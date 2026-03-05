@@ -1,0 +1,2 @@
+# Cell-hash checker — hash maps on CPU, distance kernels on GPU (CuPy).
+name: cell-hash-gpu

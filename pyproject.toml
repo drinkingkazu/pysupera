@@ -1,0 +1,52 @@
+[build-system]
+requires = ["setuptools>=42", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "pysupera"
+version = "0.0.1"
+description = "Particle partitioning library for LArTPC simulation reconstruction"
+requires-python = ">=3.9"
+license = {text = "MIT"}
+dependencies = [
+    "numpy",
+    "scipy",
+    "h5py",
+    "hydra-core>=1.3",
+    "omegaconf>=2.3",
+]
+
+[project.optional-dependencies]
+gpu = [
+    "cupy",
+]
+rapids = [
+    "cupy",
+    # cudf and cugraph must be installed via RAPIDS conda channel
+]
+numba = [
+    "numba",
+]
+dev = [
+    "pytest",
+    "jupyter",
+    "plotly",
+]
+app = [
+    "dash>=2.14",
+    "plotly>=5.18",
+]
+
+[project.scripts]
+run_pysupera  = "pysupera._run:main"
+pysupera-app  = "pysupera.app:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["pysupera*"]
+
+[tool.setuptools.package-data]
+pysupera = [
+    "conf/*.yaml",
+    "conf/**/*.yaml",
+]

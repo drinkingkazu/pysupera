@@ -1,0 +1,7 @@
+# Enable / disable each merging condition independently.
+photon_decay: true
+touching_em_shower: true
+# Consolidate transitively touching kLEScatter particles before shower absorption.
+# Must remain before absorb_le_scatter in the pipeline.
+combine_le_scatters: true
+absorb_le_scatter: true

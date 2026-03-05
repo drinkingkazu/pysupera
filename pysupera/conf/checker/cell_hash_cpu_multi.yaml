@@ -1,0 +1,3 @@
+# Cell-hash checker — multi-thread CPU via joblib (no scipy, no GPU required).
+name: cell-hash-cpu-multi
+n_jobs: -1

@@ -1,0 +1,115 @@
+/* pysupera app - dark-theme dropdown overrides */
+/*
+ * Dash dcc.Dropdown wraps react-select. Depending on Dash version the
+ * internal class names differ:
+ *   - Dash <2.4  (react-select v2): .Select-*, .Select--single, ...
+ *   - Dash >=2.4 (react-select v5): css-<hash>-<part> or <prefix>__<part>
+ * We use attribute-contains ([class*=...]) to match regardless of position
+ * in the class list, which is more reliable than $= (ends-with).
+ */
+
+/* Control (closed) */
+.Select-control,
+[class*="-control"] {
+    background-color: #0f3460 !important;
+    border-color: #1a4a8a !important;
+    box-shadow: none !important;
+}
+.Select-control:hover,
+[class*="-control"]:hover {
+    border-color: #a8b2d8 !important;
+}
+
+/* Selected value / placeholder text */
+.Select-value-label,
+.Select--single > .Select-control .Select-value,
+.Select-placeholder,
+[class*="-singleValue"],
+[class*="-placeholder"] {
+    color: #e0e0e0 !important;
+}
+
+/* Dropdown arrow / indicator */
+.Select-arrow,
+[class*="-indicatorContainer"],
+[class*="-indicatorSeparator"] {
+    color: #a8b2d8 !important;
+}
+
+/* Menu outer panel */
+.Select-menu-outer,
+[class*="-menu"] {
+    background-color: #0d1b3e !important;
+    border: 1px solid #1a4a8a !important;
+    z-index: 9999 !important;
+}
+
+/* Menu list (scroll container) */
+.Select-menu,
+[class*="-MenuList"],
+[class*="-menuList"] {
+    background-color: #0d1b3e !important;
+}
+
+/* Individual option - default */
+.Select-option,
+[class*="-option"] {
+    background-color: #0d1b3e !important;
+    color: #e0e0e0 !important;
+    cursor: pointer !important;
+}
+
+/* Hovered / focused option */
+.Select-option.is-focused,
+[class*="-option"]:hover {
+    background-color: #1a3a6e !important;
+    color: #ffffff !important;
+}
+
+/* Selected option */
+.Select-option.is-selected,
+[class*="-option"][aria-selected="true"] {
+    background-color: #e94560 !important;
+    color: #ffffff !important;
+}
+
+/* Text input inside control (searchable dropdowns) */
+.Select-input > input,
+[class*="-Input"] input,
+[class*="-input"] input {
+    color: #e0e0e0 !important;
+    caret-color: #e0e0e0 !important;
+}
+
+/* ── Collapsible sidebar sections (<details>/<summary>) ──────────────── */
+
+details {
+    /* remove the little gap some browsers add */
+    display: block;
+}
+
+/* Hide the browser default triangle completely */
+details > summary {
+    list-style: none;
+}
+details > summary::-webkit-details-marker {
+    display: none;
+}
+
+/* Our custom arrow prepended via ::before */
+details > summary::before {
+    content: "▶ ";
+    font-size: 9px;
+    color: #e94560;
+    display: inline-block;
+    transition: transform 0.15s ease;
+    transform-origin: center 40%;
+    margin-right: 2px;
+}
+details[open] > summary::before {
+    transform: rotate(90deg);
+}
+
+details > summary:hover {
+    opacity: 0.85;
+}

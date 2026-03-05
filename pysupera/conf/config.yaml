@@ -1,0 +1,68 @@
+defaults:
+  - io: default
+  - checker: gpu
+  - conditions: default
+  - _self_
+
+# ---------------------------------------------------------------------------
+# Top-level workflow parameters
+# ---------------------------------------------------------------------------
+
+# Proximity distance threshold (same spatial units as point cloud coords).
+distance_threshold: 5.0
+
+# Print per-event timing and merge counts (condition passes, per-event elapsed).
+# Set false to suppress all per-event chatter — ideal for production.
+verbose: true
+
+# Print an end-of-run summary report: time profile and particle/partition
+# statistics aggregated over all events.  Set false for completely silent runs.
+report: true
+
+# Record every merge decision for post-hoc inspection.
+enable_diagnostics: false
+
+# Verify that the particle list is self-consistent before partitioning:
+# every parent_id referenced by a particle must correspond to a particle
+# in the list.  Raises ValueError listing all missing parent IDs when
+# the check fails.  Disable (false) for performance or when incomplete
+# particle lists are expected.
+check_particle_tree: false
+
+# ---------------------------------------------------------------------------
+# Particle construction parameters
+# ---------------------------------------------------------------------------
+particle:
+  # Minimum point-cloud size for SetSemanticType classification.
+  # Particles with fewer points than this are treated as having an
+  # unknown semantic type.  -1 disables the check (all sizes accepted).
+  min_pc_size: -1
+
+  # Pre-processing: collapse points sharing identical 3-D coordinates.
+  # Aggregation rules: time=min, energy=sum, dedx=max.
+  # Runs before defragmentation so min_pc_size counts unique voxels.
+  merge_duplicates: true
+
+  # Pre-processing: defragment point clouds before partitioning.
+  # When true, each particle's point cloud is clustered with an eps-ball
+  # connected-components algorithm (eps = distance_threshold).  If more
+  # than one cluster is found, fragments with size <= min_pc_size are split
+  # off into separate kLEScatter particles.
+  defragment: true
+
+  # Defragmentation backend.  Only used when defragment: true.
+  #
+  # scipy  (default) — CPU, scipy cKDTree + sparse connected_components.
+  # gpu             — CuPy pairwise distance matrix + CPU connected_components.
+  #                   Falls back to scipy for clouds with < min_pts_for_gpu pts.
+  # rapids          — Fully GPU: CuPy edges + cuGraph connected_components.
+  #                   Requires cuDF + cuGraph (RAPIDS).
+  preprocessor:
+    name: scipy
+    # Minimum cloud size to route to GPU (gpu / rapids backends only).
+    min_pts_for_gpu: 64
+    # Restrict defragmentation to these semantic types.
+    # Empty list (default) means all semantic types are processed.
+    # Valid values: kShower, kTrack, kDelta, kMichel, kLEScatter, kUnknown
+    # Example: [kShower, kTrack]
+    sem_types: []

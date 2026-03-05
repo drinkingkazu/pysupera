@@ -1,0 +1,8 @@
+# Input / output paths.
+# Use ??? to mark a value as required (Hydra will raise if not provided).
+input_path: ???    # e.g. /data/events.h5
+output_path: ???   # e.g. /data/events_merged.h5
+
+# HDF5 compression filter.  "lz4" requires hdf5plugin; falls back to gzip.
+compression: gzip
+compression_opts: null

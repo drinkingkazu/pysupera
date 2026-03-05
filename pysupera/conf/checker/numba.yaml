@@ -1,0 +1,4 @@
+# Batched @numba.cuda.jit kernel with shared-memory B-tiling.
+# Requires: pip install numba cupy-cuda12x
+name: numba
+block_size: 128    # must be a multiple of 32

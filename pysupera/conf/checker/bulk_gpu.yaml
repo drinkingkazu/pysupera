@@ -1,0 +1,5 @@
+# Fully GPU-resident chunked brute-force (CuPy only, no RAPIDS).
+name: bulk-gpu
+# Number of cloud_a rows per GPU kernel launch.
+# Peak working memory ≈ chunk_size * max_n_b * 12 bytes.
+chunk_size: 512
