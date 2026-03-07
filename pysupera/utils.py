@@ -216,7 +216,7 @@ def trace_ancestry(particle_id: int, particles, print_result: bool = True):
             return _fmt_particle.format(
                 id=p.id, pdg=p.pdg,
                 sem=p.sem_type.name,
-                parent=p.parent_id, anc=p.ancestor_id,
+                parent=p.parent_id, anc=p.root_id,
                 pc=len(p.point_cloud),
             ) + (f"  [{tag}]" if tag else "")
 
@@ -306,7 +306,7 @@ def SetSemanticType(process_type, pdg, parent_pdg, point_cloud, point_cloud_size
         ``InteractionType`` is encountered.
     """
  
-    process_type = InteractionType(process_type+1)
+    process_type = InteractionType(process_type)
     if process_type == InteractionType.kInvalidProcess:
         return SemanticType.kUnknown
         raise Exception("'kInvalidProcess' particle process encountered\n")

@@ -40,9 +40,9 @@ class TestPhotonDecay:
     def test_electron_child_of_photon_merges(self):
         photon = make_particle(1, PT_PHOTON, pdg=22,
                                pc=np.zeros((0, 3), dtype=np.float32),
-                               parent_id=1, ancestor_id=1)
+                               parent_id=1, root_id=1)
         electron = make_particle(2, PT_PRIMARY, pdg=11, parent_pdg=22,
-                                  parent_id=1, ancestor_id=1,
+                                  parent_id=1, root_id=1,
                                   offset=(0, 0, 0))
         prt = _part(photon, electron)
         parts = prt.partition(PhotonDecay(), verbose=False)
@@ -51,9 +51,9 @@ class TestPhotonDecay:
     def test_positron_child_of_photon_merges(self):
         photon = make_particle(1, PT_PHOTON, pdg=22,
                                pc=np.zeros((0, 3), dtype=np.float32),
-                               parent_id=1, ancestor_id=1)
+                               parent_id=1, root_id=1)
         positron = make_particle(2, PT_PRIMARY, pdg=-11, parent_pdg=22,
-                                  parent_id=1, ancestor_id=1,
+                                  parent_id=1, root_id=1,
                                   offset=(0.1, 0, 0))
         prt = _part(photon, positron)
         parts = prt.partition(PhotonDecay(), verbose=False)
@@ -62,11 +62,11 @@ class TestPhotonDecay:
     def test_both_decay_products_in_same_partition(self):
         photon = make_particle(1, PT_PHOTON, pdg=22,
                                pc=np.zeros((0, 3), dtype=np.float32),
-                               parent_id=1, ancestor_id=1)
+                               parent_id=1, root_id=1)
         electron = make_particle(2, PT_PRIMARY, pdg=11, parent_pdg=22,
-                                  parent_id=1, ancestor_id=1)
+                                  parent_id=1, root_id=1)
         positron = make_particle(3, PT_PRIMARY, pdg=-11, parent_pdg=22,
-                                  parent_id=1, ancestor_id=1,
+                                  parent_id=1, root_id=1,
                                   offset=(0.2, 0, 0))
         prt = _part(photon, electron, positron)
         parts = prt.partition(PhotonDecay(), verbose=False)
@@ -76,10 +76,10 @@ class TestPhotonDecay:
     def test_non_photon_parent_no_merge(self):
         # parent is a track (parent_pdg=13, not 22) → no PhotonDecay merge
         track = make_particle(1, PT_TRACK, pdg=13,
-                               parent_id=1, ancestor_id=1,
+                               parent_id=1, root_id=1,
                                offset=(0, 0, 0))
         electron = make_particle(2, PT_PRIMARY, pdg=11, parent_pdg=13,
-                                  parent_id=1, ancestor_id=1,
+                                  parent_id=1, root_id=1,
                                   offset=(50, 0, 0))  # far away
         prt = _part(track, electron)
         parts = prt.partition(PhotonDecay(), verbose=False)
@@ -88,9 +88,9 @@ class TestPhotonDecay:
     def test_result_has_fewer_or_equal_partitions_than_particles(self):
         photon = make_particle(1, PT_PHOTON, pdg=22,
                                pc=np.zeros((0, 3), dtype=np.float32),
-                               parent_id=1, ancestor_id=1)
+                               parent_id=1, root_id=1)
         electron = make_particle(2, PT_PRIMARY, pdg=11,
-                                  parent_id=1, ancestor_id=1)
+                                  parent_id=1, root_id=1)
         prt = _part(photon, electron)
         parts = prt.partition(PhotonDecay(), verbose=False)
         assert len(parts) <= 2
@@ -103,10 +103,10 @@ class TestPhotonDecay:
 class TestTouchingEMShower:
     def test_touching_parent_child_electrons_merge(self):
         parent = make_particle(1, PT_PRIMARY, pdg=11,
-                                parent_id=1, ancestor_id=1,
+                                parent_id=1, root_id=1,
                                 offset=(0, 0, 0))
         child = make_particle(2, PT_COMPTON, pdg=11,
-                               parent_id=1, ancestor_id=1,
+                               parent_id=1, root_id=1,
                                offset=(0.05, 0, 0))  # very close → touching
         prt = _part(parent, child)
         parts = prt.partition(TouchingEMShower(), verbose=False)
@@ -114,11 +114,11 @@ class TestTouchingEMShower:
 
     def test_different_ancestor_no_merge(self):
         parent = make_particle(1, PT_PRIMARY, pdg=11,
-                                parent_id=1, ancestor_id=1,
+                                parent_id=1, root_id=1,
                                 offset=(0, 0, 0))
-        # child has different ancestor_id → TouchingEMShower filter rejects
+        # child has different root_id → TouchingEMShower filter rejects
         child = make_particle(2, PT_COMPTON, pdg=11,
-                               parent_id=1, ancestor_id=99,   # different ancestor
+                               parent_id=1, root_id=99,   # different ancestor
                                offset=(0.05, 0, 0))
         prt = _part(parent, child)
         parts = prt.partition(TouchingEMShower(), verbose=False)
@@ -126,10 +126,10 @@ class TestTouchingEMShower:
 
     def test_non_touching_parent_child_not_merged(self):
         parent = make_particle(1, PT_PRIMARY, pdg=11,
-                                parent_id=1, ancestor_id=1,
+                                parent_id=1, root_id=1,
                                 offset=(0, 0, 0))
         child = make_particle(2, PT_COMPTON, pdg=11,
-                               parent_id=1, ancestor_id=1,
+                               parent_id=1, root_id=1,
                                offset=(100, 0, 0))  # far away
         prt = _part(parent, child, D=5.0)
         parts = prt.partition(TouchingEMShower(), verbose=False)
@@ -138,10 +138,10 @@ class TestTouchingEMShower:
     def test_track_particle_not_included_as_candidate(self):
         # A track (pdg=13) parent should not produce EM shower candidates
         parent = make_particle(1, PT_TRACK, pdg=13,
-                                parent_id=1, ancestor_id=1,
+                                parent_id=1, root_id=1,
                                 offset=(0, 0, 0))
         child = make_particle(2, PT_COMPTON, pdg=11,
-                               parent_id=1, ancestor_id=1,
+                               parent_id=1, root_id=1,
                                offset=(0.05, 0, 0))
         prt = _part(parent, child)
         parts = prt.partition(TouchingEMShower(), verbose=False)
@@ -155,10 +155,10 @@ class TestTouchingEMShower:
 class TestCombineLEScatters:
     def test_two_touching_le_scatters_merge(self):
         le1 = make_particle(1, PT_IONIZATION, pdg=11,
-                             parent_id=1, ancestor_id=1,
+                             parent_id=1, root_id=1,
                              offset=(0, 0, 0))
         le2 = make_particle(2, PT_IONIZATION, pdg=11,
-                             parent_id=2, ancestor_id=2,
+                             parent_id=2, root_id=2,
                              offset=(0.05, 0, 0))  # touching
         assert le1.sem_type == SemanticType.kLEScatter
         assert le2.sem_type == SemanticType.kLEScatter

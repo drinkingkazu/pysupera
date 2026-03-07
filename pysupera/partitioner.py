@@ -113,7 +113,7 @@ class ParticlePartitioner:
         building:
 
         * ``children_map[parent_id]`` – list of direct child IDs.
-        * ``ancestor_map[ancestor_id]`` – list of all descendant IDs that
+        * ``ancestor_map[root_id]`` – list of all descendant IDs that
           share the same ancestor.
         """
         self.children_map = defaultdict(list)
@@ -122,8 +122,8 @@ class ParticlePartitioner:
         for p in self.particles:
             if p.parent_id is not None:
                 self.children_map[p.parent_id].append(p.id)
-            if p.ancestor_id is not None:
-                self.ancestor_map[p.ancestor_id].append(p.id)
+            if p.root_id is not None:
+                self.ancestor_map[p.root_id].append(p.id)
     
     def _create_backend(self, backend: str, n_jobs: int, **kwargs):
         """
@@ -751,7 +751,7 @@ class ParticlePartitioner:
 
         # Build representative Particle objects: shallow copies whose point_cloud
         # will grow as partitions merge.  All scalar attributes (id, pdg, sem_type,
-        # parent_id, ancestor_id, …) remain those of the original particle.
+        # parent_id, root_id, …) remain those of the original particle.
         reps: Dict[int, Particle] = {}
         for idx, p in enumerate(self.particles):
             rep = copy.copy(p)

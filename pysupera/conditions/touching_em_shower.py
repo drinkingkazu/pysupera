@@ -23,7 +23,7 @@ class TouchingEMShower(PartitionConditionBase):
     1. ``get_candidates`` builds parent-child pairs where both members have
        PDG code 11 (electron) or 22 (photon) – O(n).
     2. ``get_candidates`` then filters those pairs to retain only pairs
-       that share the same ``ancestor_id`` – O(candidates).
+       that share the same ``root_id`` – O(candidates).
     3. The base partitioner tests proximity on the remaining candidates.
     """
 
@@ -40,7 +40,7 @@ class TouchingEMShower(PartitionConditionBase):
         Return parent-child PDG-11/22 pairs that share an ancestor.
 
         Iterates the full particle list once to collect direct parent-child
-        edges (O(n)), then discards pairs with different ``ancestor_id``
+        edges (O(n)), then discards pairs with different ``root_id``
         values (O(candidates)).  Both filters run inside this method so
         that the list handed to the proximity checker is as small as
         possible.
@@ -80,7 +80,7 @@ class TouchingEMShower(PartitionConditionBase):
         * the original parent of that child exists in *rep_lookup*
           (i.e. the parent particle belongs to some live partition),
         * the parent representative also has PDG code 11 or 22, and
-        * child and parent representatives share the same ``ancestor_id``.
+        * child and parent representatives share the same ``root_id``.
 
         Because *rep_lookup* is updated after every merge, this method
         correctly handles chains: if A merged into B, the representative for
@@ -111,7 +111,7 @@ class TouchingEMShower(PartitionConditionBase):
                 continue  # already same partition
             if parent_rep.pdg not in target_pdgs:
                 continue
-            if rep.ancestor_id != parent_rep.ancestor_id:
+            if rep.root_id != parent_rep.root_id:
                 continue
             candidates.append((rep.id, parent_rep.id))
 
@@ -161,10 +161,10 @@ class TouchingEMShower(PartitionConditionBase):
                              partitioner: 'ParticlePartitioner',
                              candidates: List[Tuple[int, int]]) -> List[Tuple[int, int]]:
         """
-        Keep only pairs that share the same ``ancestor_id``.
+        Keep only pairs that share the same ``root_id``.
 
         Iterates *candidates* once (O(candidates)) and discards any pair
-        whose two particles have different ``ancestor_id`` values.  When
+        whose two particles have different ``root_id`` values.  When
         diagnostics are enabled, each rejected pair is recorded with reason
         ``DIFFERENT_ANCESTOR``.
 
@@ -187,13 +187,13 @@ class TouchingEMShower(PartitionConditionBase):
             p1 = partitioner.particle_lookup[id1]
             p2 = partitioner.particle_lookup[id2]
 
-            if p1.ancestor_id == p2.ancestor_id:
+            if p1.root_id == p2.root_id:
                 filtered.append((id1, id2))
             elif partitioner.diagnostics.enabled:
                 partitioner.diagnostics.record(
                     id1, id2,
                     MergeOutcome.DIFFERENT_ANCESTOR,
-                    f"ancestor_id: {p1.ancestor_id} vs {p2.ancestor_id}",
+                    f"root_id: {p1.root_id} vs {p2.root_id}",
                     stage=f"{self.name}: Stage 2 Ancestor Filter",
                 )
 

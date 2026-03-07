@@ -180,9 +180,9 @@ class TestFullPipeline:
         particles = [
             make_particle(1, PT_PHOTON, pdg=22,
                           pc=np.zeros((0, 3), dtype=np.float32),
-                          parent_id=1, ancestor_id=1),
+                          parent_id=1, root_id=1),
             make_particle(2, PT_PRIMARY, pdg=11, parent_pdg=22,
-                          parent_id=1, ancestor_id=1),
+                          parent_id=1, root_id=1),
             make_particle(3, PT_IONIZATION, pdg=11, offset=(50, 0, 0)),
         ]
         _, parts = self._run_pipeline(particles)
@@ -192,9 +192,9 @@ class TestFullPipeline:
     def test_photon_and_electron_merged_in_pipeline(self):
         photon   = make_particle(1, PT_PHOTON, pdg=22,
                                   pc=np.zeros((0, 3), dtype=np.float32),
-                                  parent_id=1, ancestor_id=1)
+                                  parent_id=1, root_id=1)
         electron = make_particle(2, PT_PRIMARY, pdg=11, parent_pdg=22,
-                                  parent_id=1, ancestor_id=1)
+                                  parent_id=1, root_id=1)
         _, parts = self._run_pipeline([photon, electron])
         # After PhotonDecay, they should be in 1 partition
         all_ids_per_part = [frozenset(p.id for p in part) for part in parts]

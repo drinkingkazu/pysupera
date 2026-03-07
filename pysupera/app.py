@@ -127,7 +127,7 @@ def _build_figure(
                 meta={"sem_type": p.sem_type.name},
                 hovertemplate=(
                     f"id={p.id}  pdg={p.pdg}  sem={p.sem_type.name}<br>"
-                    f"parent_id={p.parent_id}  ancestor_id={p.ancestor_id}<br>"
+                    f"parent_id={p.parent_id}  root_id={p.root_id}<br>"
                     "x=%{x:.1f}  y=%{y:.1f}  z=%{z:.1f}<extra></extra>"
                 ),
             ),
@@ -164,7 +164,7 @@ def _build_figure(
                     hovertemplate=(
                         f"partition {i}  ({len(part)} particles)<br>"
                         f"rep: id={rep.id}  sem={rep.sem_type.name}<br>"
-                        f"rep parent_id={rep.parent_id}  ancestor_id={rep.ancestor_id}<br>"
+                        f"rep parent_id={rep.parent_id}  root_id={rep.root_id}<br>"
                         f"members: [{ids_str}]<br>"
                         "x=%{x:.1f}  y=%{y:.1f}  z=%{z:.1f}<extra></extra>"
                     ),

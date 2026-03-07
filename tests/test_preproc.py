@@ -167,11 +167,11 @@ class TestScipyDefragmenter:
         large = _cluster_pts(10, (0, 0, 0))
         small = _cluster_pts(2, (100, 0, 0))
         p = make_particle(42, PT_PRIMARY, pdg=11, pc=np.vstack([large, small]),
-                          ancestor_id=99)
+                          root_id=99)
         result = self.defrag().process([p])
         spawned = next(r for r in result if r.id != 42)
         assert spawned.parent_id == 42
-        assert spawned.ancestor_id == 99
+        assert spawned.root_id == 99
 
     # ── sem_types filter ─────────────────────────────────────────────────
 

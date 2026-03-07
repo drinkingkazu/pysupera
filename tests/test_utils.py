@@ -14,13 +14,13 @@ class TestTraceAncestry:
     # ── basic cases ──────────────────────────────────────────────────────────
 
     def test_root_particle_chain_length_one(self):
-        root = make_particle(1, PT_PRIMARY, pdg=11, parent_id=1, ancestor_id=1)
+        root = make_particle(1, PT_PRIMARY, pdg=11, parent_id=1, root_id=1)
         chain, children = trace_ancestry(1, [root], print_result=False)
         assert len(chain) == 1
         assert chain[0].id == 1
 
     def test_root_has_no_children(self):
-        root = make_particle(1, PT_PRIMARY, pdg=11, parent_id=1, ancestor_id=1)
+        root = make_particle(1, PT_PRIMARY, pdg=11, parent_id=1, root_id=1)
         chain, children = trace_ancestry(1, [root], print_result=False)
         assert children == []
 
@@ -33,32 +33,32 @@ class TestTraceAncestry:
 
     def test_three_level_chain_root_first(self):
         # root (1) → middle (2) → leaf (3)
-        root   = make_particle(1, PT_PRIMARY, pdg=11, parent_id=1, ancestor_id=1)
-        middle = make_particle(2, PT_DECAY,   pdg=13, parent_id=1, ancestor_id=1)
-        leaf   = make_particle(3, PT_DECAY,   pdg=11, parent_id=2, ancestor_id=1)
+        root   = make_particle(1, PT_PRIMARY, pdg=11, parent_id=1, root_id=1)
+        middle = make_particle(2, PT_DECAY,   pdg=13, parent_id=1, root_id=1)
+        leaf   = make_particle(3, PT_DECAY,   pdg=11, parent_id=2, root_id=1)
         particles = [root, middle, leaf]
         chain, children = trace_ancestry(3, particles, print_result=False)
         assert [p.id for p in chain] == [1, 2, 3]
 
     def test_children_of_middle_node_listed(self):
-        root   = make_particle(1, PT_PRIMARY, pdg=11, parent_id=1, ancestor_id=1)
-        middle = make_particle(2, PT_DECAY,   pdg=13, parent_id=1, ancestor_id=1)
-        leaf   = make_particle(3, PT_DECAY,   pdg=11, parent_id=2, ancestor_id=1)
+        root   = make_particle(1, PT_PRIMARY, pdg=11, parent_id=1, root_id=1)
+        middle = make_particle(2, PT_DECAY,   pdg=13, parent_id=1, root_id=1)
+        leaf   = make_particle(3, PT_DECAY,   pdg=11, parent_id=2, root_id=1)
         chain, children = trace_ancestry(2, [root, middle, leaf], print_result=False)
         assert len(children) == 1
         assert children[0].id == 3
 
     def test_leaf_has_no_children(self):
-        root = make_particle(1, PT_PRIMARY, pdg=11, parent_id=1, ancestor_id=1)
-        leaf = make_particle(2, PT_DECAY,   pdg=11, parent_id=1, ancestor_id=1)
+        root = make_particle(1, PT_PRIMARY, pdg=11, parent_id=1, root_id=1)
+        leaf = make_particle(2, PT_DECAY,   pdg=11, parent_id=1, root_id=1)
         _, children = trace_ancestry(2, [root, leaf], print_result=False)
         assert children == []
 
     def test_multiple_children_all_listed(self):
-        root  = make_particle(1, PT_PRIMARY, pdg=11, parent_id=1, ancestor_id=1)
-        ch1   = make_particle(2, PT_DECAY,   pdg=11, parent_id=1, ancestor_id=1)
-        ch2   = make_particle(3, PT_DECAY,   pdg=-11, parent_id=1, ancestor_id=1)
-        ch3   = make_particle(4, PT_DECAY,   pdg=13, parent_id=1, ancestor_id=1)
+        root  = make_particle(1, PT_PRIMARY, pdg=11, parent_id=1, root_id=1)
+        ch1   = make_particle(2, PT_DECAY,   pdg=11, parent_id=1, root_id=1)
+        ch2   = make_particle(3, PT_DECAY,   pdg=-11, parent_id=1, root_id=1)
+        ch3   = make_particle(4, PT_DECAY,   pdg=13, parent_id=1, root_id=1)
         _, children = trace_ancestry(1, [root, ch1, ch2, ch3], print_result=False)
         child_ids = {c.id for c in children}
         assert child_ids == {2, 3, 4}
@@ -89,15 +89,15 @@ class TestTraceAncestry:
 
     def test_orphan_chain_terminates_at_orphan(self):
         # Particle's parent is missing from the list → chain stops at orphan
-        orphan = make_particle(2, PT_DECAY, pdg=11, parent_id=99, ancestor_id=99)
+        orphan = make_particle(2, PT_DECAY, pdg=11, parent_id=99, root_id=99)
         chain, _ = trace_ancestry(2, [orphan], print_result=False)
         assert chain[-1].id == 2
 
     # ── chain direction ──────────────────────────────────────────────────────
 
     def test_chain_ordered_root_to_target(self):
-        root   = make_particle(1, PT_PRIMARY, pdg=11, parent_id=1, ancestor_id=1)
-        child  = make_particle(2, PT_DECAY,   pdg=11, parent_id=1, ancestor_id=1)
+        root   = make_particle(1, PT_PRIMARY, pdg=11, parent_id=1, root_id=1)
+        child  = make_particle(2, PT_DECAY,   pdg=11, parent_id=1, root_id=1)
         chain, _ = trace_ancestry(2, [root, child], print_result=False)
         assert chain[0].id == 1
         assert chain[-1].id == 2

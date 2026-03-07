@@ -167,19 +167,60 @@ Hit **▶ Run** to execute the full pipeline and render two side-by-side 3-D poi
 
 ### Input: the `Particle` object
 
-Each particle carries:
+#### Required attributes
+
+These attributes must always be supplied at construction time and are guaranteed to be set on every `Particle` instance.
 
 | Attribute | Type | Description |
 |---|---|---|
-| `id` | `int` | Unique particle ID within an event |
-| `parent_id` | `int` | Direct parent particle ID |
-| `ancestor_id` | `int` | Root ancestor of the shower/track genealogy |
-| `pdg` | `int` | PDG Monte Carlo code |
-| `parent_pdg` | `int` | PDG code of the parent |
-| `sem_type` | `SemanticType` | Derived semantic category (see below) |
+| `id` | `int` | Unique particle ID within an event (Geant4 track ID) |
+| `parent_id` | `int` | Direct parent particle ID; equals `id` for primary particles |
+| `root_id` | `int` | ID of the primary ancestor at the root of the shower/track genealogy |
+| `pdg` | `int` | PDG Monte Carlo particle code |
+| `parent_pdg` | `int` | PDG code of the direct parent particle |
+| `process_type` | `InteractionType` | Physics process that created this particle; derived from the raw int stored in `_process_type` |
+| `sem_type` | `SemanticType` | High-level semantic category derived automatically at construction (see below) |
 | `point_cloud` | `ndarray (N, ≥3)` | 3-D hit positions; columns 0–2 are x, y, z |
 
-Semantic types (`SemanticType` enum):
+#### Optional attributes
+
+These attributes are not required at construction time.  Unset float32 scalars hold `FLOAT_UNSET` (= `np.float32('nan')`); all other unset attributes hold `None`.
+
+| Attribute | Type | Default | Description |
+|---|---|---|---|
+| `start` | `ndarray (3,) float32` | `None` | Trajectory start position (vertex).  Also accessible as `p.vertex`. |
+| `end` | `ndarray (3,) float32` | `None` | Trajectory end position. |
+| `momentum_start` | `ndarray (3,) float32` | `None` | 3-momentum at the start vertex (MeV/c). |
+| `momentum_end` | `ndarray (3,) float32` | `None` | 3-momentum at the trajectory end (MeV/c). |
+| `kinetic_energy_start` | `float32` | `NaN` | Kinetic energy at the start vertex (MeV). |
+| `kinetic_energy_end` | `float32` | `NaN` | Kinetic energy at the end of the trajectory (MeV). |
+| `mass` | `float32` | `NaN` | Particle rest mass (MeV/c²). |
+| `root_pdg` | `int` | `None` | PDG code of the primary (root) ancestor particle. |
+| `genealogy_id` | `list[int]` | `None` | IDs of ancestors from direct parent up to and including the root: `[parent_id, grandparent_id, …, root_id]`. |
+| `genealogy_pdg` | `list[int]` | `None` | PDG codes of the same ancestry chain as `genealogy_id`. |
+| `start_process_id` | `int` | `None` | Geant4/simulation process ID for this particle's creation. |
+| `start_subprocess_id` | `int` | `None` | Geant4/simulation sub-process ID for this particle's creation. |
+| `start_process_name` | `str` | `None` | Human-readable name of the creation process (e.g. `"eIoni"`). |
+| `end_process_id` | `int` | `None` | Geant4/simulation process ID for this particle's termination. |
+| `end_subprocess_id` | `int` | `None` | Geant4/simulation sub-process ID for this particle's termination. |
+| `end_process_name` | `str` | `None` | Human-readable name of the termination process. |
+
+**Checking whether an optional attribute is set:**
+
+```python
+if p.start is not None:              # array / int / str / list check
+    print(p.start)
+
+import numpy as np
+if not np.isnan(p.kinetic_energy_start):  # float32 scalar check
+    print(p.kinetic_energy_start)
+```
+
+**`vertex` property** — `p.vertex` is a read/write alias for `p.start`.
+
+#### Semantic types
+
+`sem_type` is derived automatically from `process_type`, `pdg`, `parent_pdg`, and `point_cloud` at construction time via `SetSemanticType`.  Particles with fewer than `min_pc_size` points may be reclassified as `kLEScatter`.
 
 | Value | Meaning |
 |---|---|
@@ -189,8 +230,6 @@ Semantic types (`SemanticType` enum):
 | `kMichel` | Michel electron |
 | `kLEScatter` | Low-energy scatter product |
 | `kUnknown` | Unclassified |
-
-`sem_type` is derived automatically from `process_type`, `pdg`, `parent_pdg`, and `point_cloud` at construction time via `SetSemanticType`.  Particles with fewer than `min_pc_size` points may be reclassified as `kLEScatter`.
 
 ---
 
@@ -472,7 +511,7 @@ Only the touching subset proceeds to `post_filter`, and only the final `merge_pa
 **Candidate filter:**
 - Both particles have PDG code 11 or 22.
 - Direct parent–child relationship.
-- Same `ancestor_id`.
+- Same `root_id`.
 
 **Merge direction:** child → parent (directed by the parent–child tree).
 

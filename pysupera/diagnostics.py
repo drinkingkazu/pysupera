@@ -29,7 +29,7 @@ class MergeOutcome(Enum):
         One or both particle PDG codes are not in the condition's
         allowed set.
     DIFFERENT_ANCESTOR
-        The two particles have different ``ancestor_id`` values.
+        The two particles have different ``root_id`` values.
     NO_PARENT_CHILD_RELATION
         Neither particle is the direct parent of the other.
     WRONG_SEMID
@@ -55,7 +55,7 @@ class MergeOutcome(Enum):
     NOT_IN_CANDIDATE_SET = "Pair was not in candidate set (failed metadata filter)"
     DIFFERENT_PDG = "Particles have different PDG values"
     WRONG_PDG_VALUE = "Particle PDG not in target set"
-    DIFFERENT_ANCESTOR = "Particles have different ancestor_id"
+    DIFFERENT_ANCESTOR = "Particles have different root_id"
     NO_PARENT_CHILD_RELATION = "Particles are not in parent-child relationship"
     WRONG_SEMID = "Particle SemID does not match required value"
     
@@ -748,7 +748,7 @@ class OptimizedPartitionDiagnostics:
         """
         Diagnose which metadata property caused pair rejection at *stage*.
 
-        Checks parent-child relationship, PDG codes, ``ancestor_id``, and
+        Checks parent-child relationship, PDG codes, ``root_id``, and
         ``sem_type`` in turn and accumulates all violated conditions into a
         single human-readable string.
 
@@ -773,8 +773,8 @@ class OptimizedPartitionDiagnostics:
             reasons.append(f"different PDG ({p1.pdg} vs {p2.pdg})")
         
         # Check ancestor
-        if p1.ancestor_id != p2.ancestor_id:
-            reasons.append(f"different ancestor_id ({p1.ancestor_id} vs {p2.ancestor_id})")
+        if p1.root_id != p2.root_id:
+            reasons.append(f"different root_id ({p1.root_id} vs {p2.root_id})")
         
         # Check SemID
         if p1.sem_type != p2.sem_type:

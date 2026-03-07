@@ -42,15 +42,15 @@ def make_particle(
     pdg: int = 11,
     parent_pdg: int = 0,
     parent_id: int | None = None,
-    ancestor_id: int | None = None,
+    root_id: int | None = None,
     pc: np.ndarray | None = None,
     n_pts: int = 10,
     offset: tuple = (0.0, 0.0, 0.0),
 ) -> Particle:
     if parent_id is None:
         parent_id = pid
-    if ancestor_id is None:
-        ancestor_id = pid
+    if root_id is None:
+        root_id = pid
     if pc is None:
         rng = np.random.default_rng(pid)
         xyz = rng.uniform(0, 0.1, size=(n_pts, 3)).astype(np.float32)
@@ -59,7 +59,7 @@ def make_particle(
     return Particle(
         id           = pid,
         parent_id    = parent_id,
-        ancestor_id  = ancestor_id,
+        root_id      = root_id,
         pdg          = pdg,
         parent_pdg   = parent_pdg,
         process_type = process_type,

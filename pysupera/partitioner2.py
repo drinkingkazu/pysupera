@@ -49,14 +49,14 @@ class ParticlePartitioner:
     def _build_relationships(self):
         """Build parent-child and ancestor lookup structures"""
         self.children_map = defaultdict(list)  # parent_id -> [child_ids]
-        self.ancestor_map = defaultdict(list)  # ancestor_id -> [particle_ids]
+        self.ancestor_map = defaultdict(list)  # root_id -> [particle_ids]
         
         for p in self.particles:
             if p.parent_id is not None:
                 self.children_map[p.parent_id].append(p.id)
             
-            if p.ancestor_id is not None:
-                self.ancestor_map[p.ancestor_id].append(p.id)
+            if p.root_id is not None:
+                self.ancestor_map[p.root_id].append(p.id)
     
     def _create_backend(self, backend: str, n_jobs: int) -> ProximityChecker:
         """Factory method to create appropriate backend"""
@@ -79,7 +79,7 @@ class ParticlePartitioner:
         Condition 1: For particles with PDG value 22 or 11:
         - Identify immediate parent with the same PDG value
         - Merge if they are touching
-        - Never merge particles with different ancestor_id
+        - Never merge particles with different root_id
         
         Returns:
             List of partitions, where each partition is a list of Particle objects
@@ -104,9 +104,9 @@ class ParticlePartitioner:
         if len(candidates) == 0:
             return [[p] for p in self.particles]
         
-        # Stage 2: Filter by ancestor_id (before expensive proximity checks)
+        # Stage 2: Filter by root_id (before expensive proximity checks)
         if verbose:
-            print("Stage 2: Filtering by ancestor_id...")
+            print("Stage 2: Filtering by root_id...")
         
         ancestor_filtered = self._filter_by_ancestor(candidates)
         
@@ -166,14 +166,14 @@ class ParticlePartitioner:
         return candidates
     
     def _filter_by_ancestor(self, candidates: List[Tuple[int, int]]) -> List[Tuple[int, int]]:
-        """Filter pairs to only include those with same ancestor_id"""
+        """Filter pairs to only include those with same root_id"""
         filtered = []
         
         for id1, id2 in candidates:
             p1 = self.particle_lookup[id1]
             p2 = self.particle_lookup[id2]
             
-            if p1.ancestor_id == p2.ancestor_id:
+            if p1.root_id == p2.root_id:
                 filtered.append((id1, id2))
         
         return filtered

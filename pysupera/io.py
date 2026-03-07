@@ -20,7 +20,7 @@ and slow variable-length heap allocations.
     /particles/
         id                 (n_total_particles,)   int32
         parent_id          (n_total_particles,)   int32
-        ancestor_id        (n_total_particles,)   int32
+        root_id            (n_total_particles,)   int32
         pdg                (n_total_particles,)   int32
         parent_pdg         (n_total_particles,)   int32
         process_type       (n_total_particles,)   int32
@@ -122,7 +122,7 @@ def write_events(path: str,
     # Particle-level scalars
     p_id          = np.empty(n_total_particles, dtype=np.int32)
     p_parent_id   = np.empty(n_total_particles, dtype=np.int32)
-    p_ancestor_id = np.empty(n_total_particles, dtype=np.int32)
+    p_root_id     = np.empty(n_total_particles, dtype=np.int32)
     p_pdg         = np.empty(n_total_particles, dtype=np.int32)
     p_parent_pdg  = np.empty(n_total_particles, dtype=np.int32)
     p_proc_type   = np.empty(n_total_particles, dtype=np.int32)
@@ -135,7 +135,7 @@ def write_events(path: str,
         for p in ev:
             p_id[j]          = p.id
             p_parent_id[j]   = p.parent_id
-            p_ancestor_id[j] = p.ancestor_id
+            p_root_id[j]     = p.root_id
             p_pdg[j]         = p.pdg
             p_parent_pdg[j]  = p.parent_pdg
             # process_type is stored as raw int (0-based, as passed to
@@ -177,12 +177,12 @@ def write_events(path: str,
         if n_total_particles > 0:
             _mk("id",           p_id)
             _mk("parent_id",    p_parent_id)
-            _mk("ancestor_id",  p_ancestor_id)
+            _mk("root_id",      p_root_id)
             _mk("pdg",          p_pdg)
             _mk("parent_pdg",   p_parent_pdg)
             _mk("process_type", p_proc_type)
         else:
-            for name in ("id", "parent_id", "ancestor_id",
+            for name in ("id", "parent_id", "root_id",
                          "pdg", "parent_pdg", "process_type"):
                 pg.create_dataset(name, data=np.empty(0, dtype=np.int32))
         pg.create_dataset("pc_offsets", data=pc_offsets)
@@ -279,7 +279,7 @@ class EventWriter:
 
     # Names of the six particle scalar fields in order
     _SCALAR_FIELDS = (
-        "id", "parent_id", "ancestor_id", "pdg", "parent_pdg", "process_type"
+        "id", "parent_id", "root_id", "pdg", "parent_pdg", "process_type"
     )
 
     def __init__(self, path: str, mode: str = "w",
@@ -365,7 +365,7 @@ class EventWriter:
             # Build scalar arrays for this event
             p_id          = np.empty(n_p, dtype=np.int32)
             p_parent_id   = np.empty(n_p, dtype=np.int32)
-            p_ancestor_id = np.empty(n_p, dtype=np.int32)
+            p_root_id     = np.empty(n_p, dtype=np.int32)
             p_pdg         = np.empty(n_p, dtype=np.int32)
             p_parent_pdg  = np.empty(n_p, dtype=np.int32)
             p_proc_type   = np.empty(n_p, dtype=np.int32)
@@ -374,7 +374,7 @@ class EventWriter:
             for k, p in enumerate(particles):
                 p_id[k]          = p.id
                 p_parent_id[k]   = p.parent_id
-                p_ancestor_id[k] = p.ancestor_id
+                p_root_id[k]     = p.root_id
                 p_pdg[k]         = p.pdg
                 p_parent_pdg[k]  = p.parent_pdg
                 p_proc_type[k]   = int(p._process_type)
@@ -382,7 +382,7 @@ class EventWriter:
 
             self._f["particles/id"          ][new_p_start:new_p_end] = p_id
             self._f["particles/parent_id"   ][new_p_start:new_p_end] = p_parent_id
-            self._f["particles/ancestor_id" ][new_p_start:new_p_end] = p_ancestor_id
+            self._f["particles/root_id"     ][new_p_start:new_p_end] = p_root_id
             self._f["particles/pdg"         ][new_p_start:new_p_end] = p_pdg
             self._f["particles/parent_pdg"  ][new_p_start:new_p_end] = p_parent_pdg
             self._f["particles/process_type"][new_p_start:new_p_end] = p_proc_type
@@ -587,7 +587,7 @@ class EventStore:
         # ---- read scalar metadata in 6 contiguous array slices ------------
         ids          = self._f["particles/id"          ][p_start:p_end]
         parent_ids   = self._f["particles/parent_id"   ][p_start:p_end]
-        ancestor_ids = self._f["particles/ancestor_id" ][p_start:p_end]
+        root_ids     = self._f["particles/root_id"     ][p_start:p_end]
         pdgs         = self._f["particles/pdg"         ][p_start:p_end]
         parent_pdgs  = self._f["particles/parent_pdg"  ][p_start:p_end]
         proc_types   = self._f["particles/process_type"][p_start:p_end]
@@ -606,7 +606,7 @@ class EventStore:
             p = Particle(
                 id           = int(ids[k]),
                 parent_id    = int(parent_ids[k]),
-                ancestor_id  = int(ancestor_ids[k]),
+                root_id      = int(root_ids[k]),
                 pdg          = int(pdgs[k]),
                 parent_pdg   = int(parent_pdgs[k]),
                 process_type = int(proc_types[k]),

@@ -1,5 +1,6 @@
 defaults:
   - io: default
+  - reader: edepsim_h5
   - checker: gpu
   - conditions: default
   - _self_
@@ -38,9 +39,26 @@ particle:
   # unknown semantic type.  -1 disables the check (all sizes accepted).
   min_pc_size: -1
 
+  # Pre-processing: voxelize point clouds onto a regular 3-D grid.
+  # Bins each point into a voxel cell, snaps its position to the voxel
+  # centre, and merges all points in the same voxel (time=min, energy=sum,
+  # dedx=max).  This is a strict generalisation of merge_duplicates; when
+  # voxelize.enabled is true, merge_duplicates is redundant.
+  voxelize:
+    enabled: false
+    # Voxel side length in the same units as the point-cloud coordinates.
+    # A single float produces an isotropic grid; set to [dx, dy, dz] for
+    # an anisotropic grid.
+    voxel_size: 0.3
+    # Lower corner of the grid.  null = use each cloud's own coordinate
+    # minimum (per-particle alignment, default).  Set to [x0, y0, z0] for
+    # a globally fixed grid anchored at a known detector boundary.
+    origin: null
+
   # Pre-processing: collapse points sharing identical 3-D coordinates.
   # Aggregation rules: time=min, energy=sum, dedx=max.
   # Runs before defragmentation so min_pc_size counts unique voxels.
+  # Redundant when voxelize.enabled is true.
   merge_duplicates: true
 
   # Pre-processing: defragment point clouds before partitioning.

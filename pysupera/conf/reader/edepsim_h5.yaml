@@ -1,0 +1,39 @@
+# Reader configuration for EDepSim HDF5 files.
+#
+# This config group is selected via:
+#   defaults:
+#     - reader: edepsim_h5
+#
+# or overridden on the command line / in notebooks:
+#   reader.particle_key=particle/geant4_custom
+
+# Identifies which reader class build_reader() should instantiate.
+# Do not change unless you are adding a new reader format.
+format: edepsim_h5
+
+# ---------------------------------------------------------------------------
+# HDF5 dataset keys
+# Each of these corresponds to a top-level dataset path inside the HDF5 file.
+# ---------------------------------------------------------------------------
+
+# Per-event structured array of Geant4 particles.
+# Expected fields: track_id, parent_track_id, ancestor_track_id, pdg,
+#                  proc_start, subproc_start, ke, x, y, z
+particle_key: particle/geant4
+
+# Flat per-event energy-deposit step array (the point cloud).
+# Columns 0-2 must be x, y, z.
+step_key: pstep/lar_vol
+
+# Association table mapping particle index to slice in step_key.
+# Expected fields: start, end  (integer arrays of length N_particles)
+ass_key: ass/particle_pstep_lar_vol
+
+# ---------------------------------------------------------------------------
+# Physics / classification parameters
+# ---------------------------------------------------------------------------
+
+# Kinetic-energy threshold (MeV) used by the interaction-type classifier to
+# distinguish low-energy electrons (→ kCompton) from higher-energy ones
+# (→ kOtherShower) when no cleaner G4 process tag is available.
+electron_energy_threshold: 0.05

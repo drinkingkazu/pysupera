@@ -125,6 +125,45 @@ def build_preprocessor(cfg: DictConfig, verbose: bool = False):
     )
 
 
+def build_voxelizer(cfg: DictConfig, verbose: bool = False):
+    """
+    Instantiate a :class:`~pysupera.preproc.VoxelizeProcessor` when
+    ``cfg.particle.voxelize.enabled`` is ``true``.
+
+    Returns ``None`` when voxelization is disabled or the block is absent.
+
+    Parameters
+    ----------
+    cfg : DictConfig
+        Full Hydra config (must contain ``cfg.particle``).
+    verbose : bool, optional
+        Forward to the :class:`~pysupera.preproc.VoxelizeProcessor`
+        constructor.  Default ``False``.
+
+    Returns
+    -------
+    VoxelizeProcessor or None
+    """
+    vox_cfg = cfg.particle.get("voxelize", None)
+    if not vox_cfg or not vox_cfg.get("enabled", False):
+        return None
+
+    from pysupera.preproc import VoxelizeProcessor
+
+    raw_vs = vox_cfg.get("voxel_size", 1.0)
+    # OmegaConf ListConfig → plain Python list so numpy can consume it.
+    voxel_size = list(raw_vs) if hasattr(raw_vs, "__iter__") else float(raw_vs)
+
+    raw_origin = vox_cfg.get("origin", None)
+    origin = list(raw_origin) if raw_origin is not None else None
+
+    return VoxelizeProcessor(
+        voxel_size = voxel_size,
+        origin     = origin,
+        verbose    = verbose,
+    )
+
+
 def build_merge_processor(cfg: DictConfig, verbose: bool = False):
     """
     Instantiate a :class:`~pysupera.preproc.MergeDuplicatesProcessor`
@@ -294,6 +333,70 @@ def build_conditions(cfg: DictConfig) -> list:
         conditions.append(AbsorbLEScatter())
 
     return conditions
+
+
+def build_reader(cfg: DictConfig):
+    """
+    Instantiate an :class:`~pysupera.readers.EventReaderBase` described by
+    *cfg.reader*, opening the file at *cfg.io.input_path*.
+
+    The reader format is selected by ``cfg.reader.format``:
+
+    ``edepsim_h5``
+        :class:`~pysupera.readers.EDepSimHDF5Reader` — EDepSim HDF5 output.
+
+    Parameters
+    ----------
+    cfg : DictConfig
+        Full Hydra config.  Must contain ``cfg.io.input_path`` and
+        ``cfg.reader`` with at least a ``format`` key.
+
+    Returns
+    -------
+    EventReaderBase
+        An open reader positioned at the start of the file.  Close or use
+        as a context manager when done.
+
+    Raises
+    ------
+    ValueError
+        If ``cfg.reader.format`` is not a recognised format string.
+
+    Examples
+    --------
+    ::
+
+        cfg = load_cfg([
+            "io.input_path=/data/sim.h5",
+            "reader.particle_key=particle/geant4_v2",
+        ])
+        with build_reader(cfg) as reader:
+            for particles in reader:
+                ...
+    """
+    from pysupera.readers import EDepSimHDF5Reader
+
+    fmt  = cfg.reader.get("format", "edepsim_h5")
+    path = str(cfg.io.input_path)
+
+    if fmt == "edepsim_h5":
+        return EDepSimHDF5Reader(
+            path,
+            particle_key              = str(cfg.reader.get("particle_key",
+                                               "particle/geant4")),
+            step_key                  = str(cfg.reader.get("step_key",
+                                               "pstep/lar_vol")),
+            ass_key                   = str(cfg.reader.get("ass_key",
+                                               "ass/particle_pstep_lar_vol")),
+            electron_energy_threshold = float(cfg.reader.get(
+                                               "electron_energy_threshold", 0.05)),
+            min_pc_size               = int(cfg.particle.get("min_pc_size", -1)),
+        )
+
+    raise ValueError(
+        f"Unknown reader format {fmt!r}.  "
+        f"Valid options: edepsim_h5."
+    )
 
 
 def load_cfg(overrides: list[str] | None = None,

@@ -201,7 +201,7 @@ def _split_fragments(
             new_p = Particle(
                 id           = next_id,
                 parent_id    = p.id,
-                ancestor_id  = p.ancestor_id,
+                root_id  = p.root_id,
                 pdg          = p.pdg,
                 parent_pdg   = p.parent_pdg,
                 process_type = p._process_type,
@@ -573,6 +573,233 @@ class MergeDuplicatesProcessor:
                 f"[merge_duplicates] {len(particles)} particles | "
                 f"{n_affected} had duplicates | "
                 f"{n_total_before - n_total_after} points removed | "
+                f"{n_total_before} \u2192 {n_total_after} total pts"
+            )
+
+        return particles
+
+
+# ============================================================================
+# Voxelization
+# ============================================================================
+
+@dataclass
+class VoxelizeRecord:
+    """
+    Diagnostic record for one particle processed by
+    :meth:`VoxelizeProcessor.process`.
+
+    Attributes
+    ----------
+    particle_id : int
+        ID of the particle that was processed.
+    n_before : int
+        Number of points before voxelization.
+    n_after : int
+        Number of voxels (points after merging).
+    """
+    particle_id : int
+    n_before    : int
+    n_after     : int
+
+    @property
+    def n_merged(self) -> int:
+        """Number of points collapsed."""
+        return self.n_before - self.n_after
+
+    def __str__(self) -> str:
+        return (
+            f"  particle {self.particle_id:>8d} | "
+            f"{self.n_before:>6d} pts → {self.n_after:>6d} voxels "
+            f"({self.n_merged} merged)"
+        )
+
+
+def _voxelize_point_cloud(
+    pc: np.ndarray,
+    voxel_size: np.ndarray,
+    origin: np.ndarray | None,
+) -> np.ndarray:
+    """
+    Bin each point into a regular 3-D grid and merge points that share the
+    same voxel.
+
+    Parameters
+    ----------
+    pc : np.ndarray, shape (N, F), F >= 3
+        Point-cloud array.  Columns 0–2 are x, y, z.
+    voxel_size : np.ndarray, shape (3,)
+        Side lengths of each voxel cell along x, y, z.
+    origin : np.ndarray of shape (3,) or None
+        Lower corner from which voxel indices are computed.  When ``None``
+        the per-cloud minimum of the input coordinates is used so that the
+        grid is always tightly aligned to the data.
+
+    Returns
+    -------
+    np.ndarray, shape (M, F), M <= N
+        New array where each row represents one non-empty voxel.  The
+        x, y, z columns hold the voxel-centre coordinates; remaining
+        feature columns are aggregated by the same rules as
+        :func:`_merge_point_cloud` (time=min, energy=sum, dedx=max).
+        Returns the original array unchanged when every voxel already
+        contains exactly one point.
+    """
+    coords = pc[:, :3]
+    org    = coords.min(axis=0) if origin is None else origin
+
+    # Integer voxel indices for every point
+    idx = np.floor((coords - org) / voxel_size).astype(np.int64)
+
+    # Unique voxels and group membership
+    unique_idx, inv = np.unique(idx, axis=0, return_inverse=True)
+    n_out = len(unique_idx)
+
+    if n_out == len(pc):
+        return pc   # already one point per voxel — no copy needed
+
+    n_cols = pc.shape[1]
+    out    = np.zeros((n_out, n_cols), dtype=pc.dtype)
+
+    # Voxel-centre coordinates
+    out[:, :3] = (unique_idx + 0.5) * voxel_size + org
+
+    for col, init_val, ufunc in _MERGE_RULES:
+        col = int(col)
+        if col >= n_cols:
+            continue
+        out[:, col] = init_val
+        ufunc.at(out[:, col], inv, pc[:, col])
+
+    return out
+
+
+class VoxelizeProcessor:
+    """
+    Pre-processing stage that bins each particle's point cloud onto a
+    regular 3-D grid and merges all points that fall into the same voxel.
+
+    This is a strict generalisation of :class:`MergeDuplicatesProcessor`:
+    with an infinitesimally small ``voxel_size`` the two are equivalent.
+    When voxelization is enabled, running :class:`MergeDuplicatesProcessor`
+    afterwards is redundant.
+
+    Voxel-centre positions
+    ~~~~~~~~~~~~~~~~~~~~~~
+    For a point at coordinate ``x`` the voxel index is::
+
+        i = floor( (x - origin_x) / voxel_size_x )
+
+    and its centre is placed at::
+
+        x_centre = (i + 0.5) * voxel_size_x + origin_x
+
+    Feature aggregation (columns beyond index 2)
+    ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    Identical to :class:`MergeDuplicatesProcessor`:
+    time → min, energy → sum, dedx → max.
+
+    Parameters
+    ----------
+    voxel_size : float or sequence of float
+        Voxel side length.  A single float gives an isotropic grid;
+        a 3-element sequence ``[dx, dy, dz]`` gives an anisotropic grid.
+    origin : sequence of float or None, optional
+        Lower corner ``[x0, y0, z0]`` from which voxel indices are
+        computed.  ``None`` (default) uses the per-cloud coordinate
+        minimum so that the grid is tightly aligned to each particle's
+        data independently.  Use a fixed value when a globally consistent
+        grid is needed (e.g. detector boundaries).
+    verbose : bool, optional
+        When ``True``, :meth:`process` prints one line per affected
+        particle and an end-of-batch summary.  Default ``False``.
+    """
+
+    def __init__(
+        self,
+        voxel_size: float | list,
+        origin: list | None = None,
+        verbose: bool = False,
+    ) -> None:
+        vs = np.asarray(voxel_size, dtype=float)
+        if vs.ndim == 0:
+            vs = np.broadcast_to(vs, (3,)).copy()
+        if vs.shape != (3,):
+            raise ValueError(
+                f"voxel_size must be a scalar or a 3-element sequence, "
+                f"got shape {vs.shape}."
+            )
+        if np.any(vs <= 0):
+            raise ValueError(f"All voxel_size values must be > 0, got {vs}.")
+        self.voxel_size: np.ndarray = vs
+
+        if origin is not None:
+            org = np.asarray(origin, dtype=float)
+            if org.shape != (3,):
+                raise ValueError(
+                    f"origin must be a 3-element sequence or None, "
+                    f"got shape {org.shape}."
+                )
+            self.origin: np.ndarray | None = org
+        else:
+            self.origin = None
+
+        self.verbose = bool(verbose)
+        #: :class:`VoxelizeRecord` list from the most recent :meth:`process`
+        #: call.  Only particles that had at least one merge are recorded.
+        self.last_diagnostics: List[VoxelizeRecord] = []
+
+    def process(
+        self,
+        particles: List[Particle],
+        verbose: Optional[bool] = None,
+    ) -> List[Particle]:
+        """
+        Voxelize every particle's point cloud in-place.
+
+        Parameters
+        ----------
+        particles : list of Particle
+        verbose : bool or None, optional
+            Per-call override of the instance *verbose* flag.
+
+        Returns
+        -------
+        list of Particle
+        """
+        be_verbose = self.verbose if verbose is None else bool(verbose)
+        self.last_diagnostics = []
+
+        n_total_before = 0
+        n_total_after  = 0
+        n_affected     = 0
+
+        for p in particles:
+            pc       = p.point_cloud
+            n_before = len(pc)
+            merged   = _voxelize_point_cloud(pc, self.voxel_size, self.origin)
+            n_after  = len(merged)
+
+            n_total_before += n_before
+            n_total_after  += n_after
+
+            if n_after < n_before:
+                p.point_cloud = merged
+                n_affected   += 1
+                rec = VoxelizeRecord(
+                    particle_id = p.id,
+                    n_before    = n_before,
+                    n_after     = n_after,
+                )
+                self.last_diagnostics.append(rec)
+                if be_verbose:
+                    print(rec)
+
+        if be_verbose:
+            print(
+                f"[voxelize] {len(particles)} particles | "
+                f"{n_affected} affected | "
+                f"{n_total_before - n_total_after} points merged | "
                 f"{n_total_before} \u2192 {n_total_after} total pts"
             )
 
