@@ -149,13 +149,23 @@ Then open the URL in a browser.  The sidebar lets you:
 | Section | Controls |
 |---|---|
 | **INPUT** | HDF5 file path and event index |
+| **INPUT FORMAT** | File format selector (`native` HDF5 or `edepsim_h5`); EDepSim-specific step/particle dataset keys and electron threshold |
 | **PREPROCESSING** | Enable merge-duplicates and/or defragmentation; backend; semantic-type filter |
 | **PARTITIONER** | Distance threshold, checker backend, `n_jobs` |
 | **CONDITIONS** | Toggle each of the four conditions independently |
-| **VIEW OPTIONS** | Show/hide legends; synchronise the two 3-D camera views |
-| **PARTICLE FILTER** | Instantly show/hide particles by semantic type (no re-run needed) |
+| **VIEW OPTIONS** | Show/hide legends; synchronise the two 3-D camera views; toggle **colour by sem type** (fast merged-trace rendering vs. per-particle instance colouring) |
+| **PARTICLE FILTER** | Instantly show/hide particles by semantic type (no re-run needed); **Min points to display** hides small point clouds from the view without re-running the pipeline |
 
-Hit **▶ Run** to execute the full pipeline and render two side-by-side 3-D point-cloud plots—original particles on the left, partitions on the right.  The **PARTICLE FILTER** and **show legend** checkbox take effect immediately without re-running the pipeline.
+Hit **▶ Run** to execute the full pipeline and render two side-by-side 3-D point-cloud plots—original particles on the left, partitions on the right.
+
+**Draw modes** (toggled via *colour by sem type* in VIEW OPTIONS):
+
+| Mode | Left plot | Right plot | Speed |
+|---|---|---|---|
+| **by instance** (default) | One trace per particle, unique colour per ID; hover shows particle ID, PDG, parent | One trace per partition, unique colour per partition index | Slower for large events (many traces) |
+| **by sem type** | One merged trace per semantic type with fixed colours | One merged trace per semantic type across all partitions | Fast — O(n\_sem\_types) traces regardless of event size |
+
+The **PARTICLE FILTER** and **show legend** checkbox take effect immediately without re-running the pipeline.
 
 <p align="center">
   <img src="figures/dash_display.png" alt="pysupera-app event display" width="900"/>
