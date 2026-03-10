@@ -1,6 +1,8 @@
 from collections import defaultdict
 from typing import Dict, List, Tuple, TYPE_CHECKING
 
+import numpy as np
+
 from .base import PartitionConditionBase
 from ..diagnostics import MergeOutcome
 from ..utils import SemanticType
@@ -121,10 +123,57 @@ class AbsorbLEScatter(PartitionConditionBase):
         le_reps    = [r for r in unique_reps if r.sem_type == SemanticType.kLEScatter]
         other_reps = [r for r in unique_reps if r.sem_type != SemanticType.kLEScatter]
 
+        if not le_reps or not other_reps:
+            partitioner.diagnostics.record_candidates(
+                f"{self.name}: Rep Candidate Building", []
+            )
+            return []
+
+        D = partitioner.checker.D
+
+        # Global point-cloud KDTree: build separate LE and other point arrays
+        # labelled by rep index, then call query_ball_tree(D) once to find all
+        # (LE_point, other_point) pairs within D in O(N log N).
+        # LE scatter clouds are always small (few hits/voxels), so the output
+        # size is bounded by n_le_pts × local_density near touching boundaries.
+        def _stack(reps):
+            clouds   = []
+            rep_tags = []
+            for k, rep in enumerate(reps):
+                parts = rep._cloud_parts
+                c = parts[0] if len(parts) == 1 else np.concatenate(parts, axis=0)
+                if len(c) == 0:
+                    continue
+                clouds.append(c[:, :3].astype(np.float32))
+                rep_tags.append(np.full(len(c), k, dtype=np.int32))
+            if not clouds:
+                return None, None
+            return np.concatenate(rep_tags), np.concatenate(clouds)
+
+        le_tags, le_pts = _stack(le_reps)
+        ot_tags, ot_pts = _stack(other_reps)
+
+        if le_tags is None or ot_tags is None:
+            partitioner.diagnostics.record_candidates(
+                f"{self.name}: Rep Candidate Building", []
+            )
+            return []
+
+        from scipy.spatial import KDTree
+        # query_ball_tree returns for each LE point the list of other-point
+        # indices within D.  Map to rep indices and deduplicate.
+        hits = KDTree(le_pts).query_ball_tree(KDTree(ot_pts), r=D)
+
+        touching: set = set()
+        for i, js in enumerate(hits):
+            if js:
+                lk = int(le_tags[i])
+                for j in js:
+                    touching.add((lk, int(ot_tags[j])))
+
         candidates = [
-            (le.id, other.id)
-            for le in le_reps
-            for other in other_reps
+            (le_reps[i].id, other_reps[j].id)
+            for i, j in touching
         ]
         partitioner.diagnostics.record_candidates(
             f"{self.name}: Rep Candidate Building", candidates

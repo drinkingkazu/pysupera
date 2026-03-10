@@ -300,6 +300,35 @@ class ProximityChecker(ABC):
         """
         return [self.check_cloud_proximity(c, parent_cloud) for c in child_clouds]
 
+    def batch_check_multi_cloud_proximity(
+        self,
+        groups: List[Tuple[List[np.ndarray], np.ndarray]],
+    ) -> List[List[bool]]:
+        """
+        Test each ``(child_clouds, parent_cloud)`` group and return results.
+
+        Each entry in *groups* is a tuple ``(child_clouds, parent_cloud)``
+        identical to the arguments of :meth:`batch_check_cloud_proximity`.
+        The default implementation processes groups sequentially.  Multi-
+        threaded subclasses override this to run groups in parallel, which
+        is the primary source of speedup for the partition-level proximity
+        phase: each group's parent KDTree (or hash map) is built and queried
+        independently, so they can be dispatched to different threads.
+
+        Parameters
+        ----------
+        groups : list of (child_clouds, parent_cloud) tuples
+
+        Returns
+        -------
+        list of list of bool
+            Element *i* is the result list for ``groups[i]``.
+        """
+        return [
+            self.batch_check_cloud_proximity(child_clouds, parent_cloud)
+            for child_clouds, parent_cloud in groups
+        ]
+
 
 # ============================================================================
 # CPU Single-Threaded Implementation
@@ -521,6 +550,21 @@ class CPUMultiThreadChecker(ProximityChecker):
             dists, _ = tree.query(a, k=1, distance_upper_bound=self.D + 1e-9)
             results.append(bool(np.any(dists <= self.D)))
         return results
+
+    def batch_check_multi_cloud_proximity(
+        self,
+        groups: List[Tuple[List[np.ndarray], np.ndarray]],
+    ) -> List[List[bool]]:
+        """Dispatch each (child_clouds, parent_cloud) group to a thread.
+
+        Each thread builds its own parent KDTree independently, giving
+        near-linear scaling with the number of unique parent partitions.
+        """
+        from joblib import Parallel, delayed
+        return Parallel(n_jobs=self.n_jobs, backend='threading')(
+            delayed(self.batch_check_cloud_proximity)(child_clouds, parent_cloud)
+            for child_clouds, parent_cloud in groups
+        )
 
     def cleanup(self):
         """Clear data structures"""
@@ -1041,6 +1085,42 @@ class CellHashCPUMultiThreadChecker(_CellHashMixin, ProximityChecker):
         b = cloud_b[:, :3].astype(np.float32)
         hmap = self._build_hashmap(b, self._inv_D)
         return self._query(a, b, hmap, self.D)
+
+    def batch_check_cloud_proximity(
+        self,
+        child_clouds: List[np.ndarray],
+        parent_cloud: np.ndarray,
+    ) -> List[bool]:
+        """Build the parent hash map once and query all children against it."""
+        if len(parent_cloud) == 0:
+            return [False] * len(child_clouds)
+        b = parent_cloud[:, :3].astype(np.float32)
+        min_b, max_b = b.min(axis=0), b.max(axis=0)
+        parent_hmap = self._build_hashmap(b, self._inv_D)
+        results: List[bool] = []
+        for child_cloud in child_clouds:
+            if len(child_cloud) == 0:
+                results.append(False)
+                continue
+            a = child_cloud[:, :3].astype(np.float32)
+            min_a, max_a = a.min(axis=0), a.max(axis=0)
+            delta = np.maximum(0.0, np.maximum(min_a - max_b, min_b - max_a))
+            if float(np.dot(delta, delta)) > self.D_squared:
+                results.append(False)
+                continue
+            results.append(self._query(a, b, parent_hmap, self.D))
+        return results
+
+    def batch_check_multi_cloud_proximity(
+        self,
+        groups: List[Tuple[List[np.ndarray], np.ndarray]],
+    ) -> List[List[bool]]:
+        """Dispatch each (child_clouds, parent_cloud) group to a thread."""
+        from joblib import Parallel, delayed
+        return Parallel(n_jobs=self.n_jobs, backend='threading')(
+            delayed(self.batch_check_cloud_proximity)(child_clouds, parent_cloud)
+            for child_clouds, parent_cloud in groups
+        )
 
 
 class CellHashGPUChecker(_CellHashMixin, ProximityChecker):

@@ -781,17 +781,40 @@ class ParticlePartitioner:
             rep.point_cloud = cloud
             return cloud
 
+        # Bbox cache: keyed by UF root index.  Updated in O(1) on every merge
+        # as the merged bbox = (min of mins, max of maxes).  Used to skip
+        # parent KDTree builds for pairs that are provably not touching.
+        self._rep_bmin: Dict[int, np.ndarray] = {}
+        self._rep_bmax: Dict[int, np.ndarray] = {}
+        for idx, rep in reps.items():
+            c = rep.point_cloud  # already xyz‑only float32
+            if len(c) > 0:
+                self._rep_bmin[idx] = c.min(axis=0)
+                self._rep_bmax[idx] = c.max(axis=0)
+            else:
+                self._rep_bmin[idx] = np.array([ np.inf,  np.inf,  np.inf], dtype=np.float32)
+                self._rep_bmax[idx] = np.array([-np.inf, -np.inf, -np.inf], dtype=np.float32)
+        self._D_sq = float(self.checker.D_squared)
+
         if verbose:
             print(f"  Partitioning {n} particles with {len(conditions)} condition(s)")
 
         total_merges = 0
+        # Per-condition timing and merge-count accumulators (cumulative across passes).
+        _cond_t: Dict[str, dict] = {
+            cond.name: dict(time_s=0.0, n_unconditional=0, n_candidates=0,
+                            n_resolved=0, n_touching=0, n_merged=0)
+            for cond in conditions
+        }
 
         for pass_num in range(1, max_passes + 1):
             pass_merges = 0
 
             for condition in conditions:
+                _t_cond0 = time.perf_counter()  # per-condition wall-clock start
                 # ---- Unconditional merges (e.g. photon decay: no proximity needed) ----
                 unconditional = condition.get_unconditional_merges(self, rep_lookup)
+                _n_unc = len(unconditional)
                 for child_id, parent_id in unconditional:
                     child_idx  = self.id_to_idx[child_id]
                     parent_idx = self.id_to_idx[parent_id]
@@ -826,12 +849,16 @@ class ParticlePartitioner:
                     else:
                         reps[new_root] = parent_rep
                         del reps[r_parent]
+                    # Update bbox cache (O(1): element-wise min/max of the two bboxes).
+                    self._rep_bmin[new_root] = np.minimum(self._rep_bmin.pop(r_child), self._rep_bmin.pop(r_parent))
+                    self._rep_bmax[new_root] = np.maximum(self._rep_bmax.pop(r_child), self._rep_bmax.pop(r_parent))
                     pass_merges += 1
 
                 # ---- Proximity-based candidates ----
                 # Ask the condition which partition pairs are candidates this pass.
                 # Returns (child_rep_id, parent_rep_id): child merges INTO parent.
                 candidates = condition.get_rep_candidates(self, rep_lookup)
+                _n_cands = len(candidates)
                 touching_pairs: List[Tuple[int, int]] = []
 
                 # Resolve to UF roots and deduplicate stale/duplicate rep-pairs.
@@ -851,19 +878,34 @@ class ParticlePartitioner:
                     resolved.append((child_id, parent_id, r_child, r_parent))
 
                 # Group by parent rep so each parent KDTree is built only once.
+                # Bbox pre-filter: pairs whose bboxes are >D apart skip the KDTree
+                # entirely (no cloud materialization for that parent group).
                 by_parent: Dict[int, List[int]] = defaultdict(list)
-                for i, (_, _, _, r_parent) in enumerate(resolved):
+                for i, (_, _, r_child, r_parent) in enumerate(resolved):
+                    if r_child in self._rep_bmin and r_parent in self._rep_bmin:
+                        delta = np.maximum(0.0, np.maximum(
+                            self._rep_bmin[r_child] - self._rep_bmax[r_parent],
+                            self._rep_bmin[r_parent] - self._rep_bmax[r_child]))
+                        if float(np.dot(delta, delta)) > self._D_sq:
+                            continue  # provably not touching; skip KDTree
                     by_parent[r_parent].append(i)
 
                 hit = [False] * len(resolved)
                 stage = f"{condition.name}: Partition Proximity (pass {pass_num})"
+                # Collect groups, then dispatch all parents in parallel.
+                # Multi-thread backends build each parent's KDTree in its own
+                # thread; single-thread backend falls back to sequential.
+                _groups: List = []
+                _group_idxs: List = []
                 for r_parent, idxs in by_parent.items():
-                    parent_rep = reps[r_parent]
-                    parent_cloud = _get_cloud(parent_rep)
-                    child_clouds = [_get_cloud(reps[resolved[i][2]]) for i in idxs]
-                    batch_results = self.checker.batch_check_cloud_proximity(
-                        child_clouds, parent_cloud
-                    )
+                    parent_cloud = _get_cloud(reps[r_parent])
+                    child_clouds  = [_get_cloud(reps[resolved[i][2]]) for i in idxs]
+                    _groups.append((child_clouds, parent_cloud))
+                    _group_idxs.append(idxs)
+                for idxs, batch_results in zip(
+                    _group_idxs,
+                    self.checker.batch_check_multi_cloud_proximity(_groups),
+                ):
                     for i, touching in zip(idxs, batch_results):
                         hit[i] = touching
 
@@ -887,6 +929,10 @@ class ParticlePartitioner:
 
                 # Post-filter (e.g. one-merge-per-kLEScatter)
                 merge_pairs = condition.post_filter(self, touching_pairs)
+                # Snapshot counts for print_timing (resolved / touching / merged after post-filter)
+                _n_res   = len(resolved)
+                _n_touch = len(touching_pairs)
+                _n_merge = len(merge_pairs)
 
                 # Apply accepted merges
                 for child_id, parent_id in merge_pairs:
@@ -923,8 +969,20 @@ class ParticlePartitioner:
                         # UF elected r_child as new root due to rank; remap.
                         reps[new_root] = parent_rep   # reps[r_child] = parent_rep
                         del reps[r_parent]
+                    # Update bbox cache (O(1)).
+                    self._rep_bmin[new_root] = np.minimum(self._rep_bmin.pop(r_child), self._rep_bmin.pop(r_parent))
+                    self._rep_bmax[new_root] = np.maximum(self._rep_bmax.pop(r_child), self._rep_bmax.pop(r_parent))
 
                     pass_merges += 1
+
+                # Accumulate per-condition stats for Pipeline.print_timing
+                _ct = _cond_t[condition.name]
+                _ct['time_s']          += time.perf_counter() - _t_cond0
+                _ct['n_unconditional'] += _n_unc
+                _ct['n_candidates']    += _n_cands
+                _ct['n_resolved']      += _n_res
+                _ct['n_touching']      += _n_touch
+                _ct['n_merged']        += _n_merge
 
             if verbose:
                 print(f"  Incremental pass {pass_num}: {pass_merges} merge(s)")
@@ -935,6 +993,9 @@ class ParticlePartitioner:
 
         if verbose:
             print(f"  Converged after {pass_num} pass(es), {total_merges} total merge(s)")
+
+        # Expose per-condition stats to Pipeline.print_timing
+        self._condition_timing = _cond_t
 
         partitions_dict: Dict = defaultdict(list)
         for idx, p in enumerate(self.particles):

@@ -233,7 +233,7 @@ def read(fname='out_0100.h5',entries=None):
             local_time += time.time()-t0
             pysupera_parts = Particle.from_flat_arrays(parts['track_id'],
                                                        parts['parent_track_id'],
-                                                       parts['ancestor_track_id'],
+                                                       parts['root_track_id'],
                                                        parts['pdg'],
                                                        get_parent_pdg(parts),
                                                        itype,

@@ -32,16 +32,20 @@ def main(cfg: DictConfig) -> None:
     from collections import defaultdict
     from pysupera import read_events, open_writer
     from pysupera.partitioner import ParticlePartitioner
-    from pysupera.config import build_conditions, build_preprocessor, build_merge_processor, configure
+    from pysupera.config import build_conditions, build_preprocessor, build_merge_processor, build_voxelizer, configure
 
     configure(cfg)  # set module-level defaults (e.g. min_pc_size) before any Particle is created
 
     merge_processor = build_merge_processor(cfg)  # None when merge_duplicates: false
+    voxelizer       = build_voxelizer(cfg)         # None when voxelize.enabled: false
     preprocessor    = build_preprocessor(cfg)      # None when defragment: false
 
+    _vox_info = (f"enabled (voxel_size={cfg.particle.voxelize.voxel_size})"
+                 if voxelizer is not None else "disabled")
     print(f"[run] checker         : {cfg.checker.name}")
     print(f"[run] distance        : {cfg.distance_threshold}")
     print(f"[run] merge_duplicates: {'enabled' if merge_processor is not None else 'disabled'}")
+    print(f"[run] voxelize        : {_vox_info}")
     print(f"[run] preprocessor    : {cfg.particle.get('preprocessor', {}).get('name', 'scipy') if cfg.particle.get('defragment', False) else 'disabled'}")
     print(f"[run] input         : {cfg.io.input_path}")
     print(f"[run] output        : {cfg.io.output_path}")
@@ -56,7 +60,7 @@ def main(cfg: DictConfig) -> None:
         'pc_size_min':    [],   # int  : smallest non-zero PC in event
         'pc_size_max':    [],   # int  : largest non-zero PC in event
         'pc_size_mean':   [],   # float: mean non-zero PC size in event
-        'n_partitions':   defaultdict(list),  # condition.name → [int per event]
+        'n_partitions':   [],   # int: final partition count after partition_combined
     }
     n_events = 0
 
@@ -71,10 +75,16 @@ def main(cfg: DictConfig) -> None:
                 t0 = time.perf_counter()
                 n_events += 1
 
-                if merge_processor is not None:
+                # skip merge_duplicates when voxelizer subsumes it
+                if merge_processor is not None and not (voxelizer and voxelizer.merge_duplicates):
                     _t = time.perf_counter()
                     particles = merge_processor.process(particles)
                     profile['merge_duplicates'] += time.perf_counter() - _t
+
+                if voxelizer is not None:
+                    _t = time.perf_counter()
+                    particles = voxelizer.process(particles)
+                    profile['voxelize'] += time.perf_counter() - _t
 
                 if preprocessor is not None:
                     _t = time.perf_counter()
@@ -106,11 +116,10 @@ def main(cfg: DictConfig) -> None:
                 )
                 profile['partitioner_init'] += time.perf_counter() - _t
 
-                for condition in conditions:
-                    _t = time.perf_counter()
-                    partitions = partitioner.partition(condition, verbose=cfg.verbose)
-                    profile[condition.name] += time.perf_counter() - _t
-                    stats['n_partitions'][condition.name].append(len(partitions))
+                _t = time.perf_counter()
+                partitions = partitioner.partition_combined(conditions, verbose=cfg.verbose)
+                profile['partition_combined'] += time.perf_counter() - _t
+                stats['n_partitions'].append(len(partitions))
 
                 partitioner.checker.cleanup()
 
@@ -151,10 +160,8 @@ def main(cfg: DictConfig) -> None:
         print(f"  {'PC size  mean':<{_W}} {lo:>10.2f} {mu:>10.2f} {hi:>10.2f}")
 
         print(f"  {_SEP}")
-        for cname, counts in stats['n_partitions'].items():
-            lo, mu, hi = _agg(counts)
-            label = f"Partitions [{cname}]"
-            print(f"  {label:<{_W}} {int(lo):>10,} {mu:>10.1f} {int(hi):>10,}")
+        lo, mu, hi = _agg(stats['n_partitions'])
+        print(f"  {'Partitions (final)':<{_W}} {int(lo):>10,} {mu:>10.1f} {int(hi):>10,}")
 
         # ── Time profile ──────────────────────────────────────────────────
         total = sum(profile.values())

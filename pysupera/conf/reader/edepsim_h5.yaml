@@ -17,7 +17,7 @@ format: edepsim_h5
 # ---------------------------------------------------------------------------
 
 # Per-event structured array of Geant4 particles.
-# Expected fields: track_id, parent_track_id, ancestor_track_id, pdg,
+# Expected fields: track_id, parent_track_id, root_track_id, pdg,
 #                  proc_start, subproc_start, ke, x, y, z
 particle_key: particle/geant4
 

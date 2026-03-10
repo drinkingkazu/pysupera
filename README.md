@@ -196,8 +196,6 @@ These attributes are not required at construction time.  Unset float32 scalars h
 | `kinetic_energy_end` | `float32` | `NaN` | Kinetic energy at the end of the trajectory (MeV). |
 | `mass` | `float32` | `NaN` | Particle rest mass (MeV/c²). |
 | `root_pdg` | `int` | `None` | PDG code of the primary (root) ancestor particle. |
-| `genealogy_id` | `list[int]` | `None` | IDs of ancestors from direct parent up to and including the root: `[parent_id, grandparent_id, …, root_id]`. |
-| `genealogy_pdg` | `list[int]` | `None` | PDG codes of the same ancestry chain as `genealogy_id`. |
 | `start_process_id` | `int` | `None` | Geant4/simulation process ID for this particle's creation. |
 | `start_subprocess_id` | `int` | `None` | Geant4/simulation sub-process ID for this particle's creation. |
 | `start_process_name` | `str` | `None` | Human-readable name of the creation process (e.g. `"eIoni"`). |

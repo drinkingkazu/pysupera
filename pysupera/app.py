@@ -29,11 +29,13 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import hashlib
 import io
 import os
 import shutil
 import time
 import traceback
+from collections import OrderedDict, defaultdict
 
 import numpy as np
 import dash
@@ -74,6 +76,63 @@ _CHECKER_CFG: dict[str, str] = {
 _MULTI_CHECKERS = {"cpu-multi", "cell-hash-cpu-multi"}
 
 # ---------------------------------------------------------------------------
+# Fixed colours per SemanticType
+# ---------------------------------------------------------------------------
+
+_SEM_COLORS: dict[str, str] = {
+    "kShower":    "#e74c3c",
+    "kTrack":     "#3498db",
+    "kDelta":     "#2ecc71",
+    "kMichel":    "#f39c12",
+    "kLEScatter": "#9b59b6",
+    "kUnknown":   "#95a5a6",
+}
+
+# ---------------------------------------------------------------------------
+# Preprocessing cache  (LRU, keyed by all params that affect load + preproc)
+# ---------------------------------------------------------------------------
+
+_MAX_CACHE_ENTRIES = 4
+# Maps cache-key → (particles_for_display, log_lines_from_load_and_preproc)
+_PARTICLE_CACHE: OrderedDict[str, tuple[list, list[str]]] = OrderedDict()
+
+
+def _preproc_cache_key(
+    file_path, event_idx, format_val,
+    step_key, particle_key, elec_thresh,
+    preproc_flags, min_pc_size, preproc_backend,
+    sem_types, voxel_size,
+) -> str:
+    key_data = (
+        file_path,
+        int(event_idx),
+        format_val,
+        step_key,
+        particle_key,
+        float(elec_thresh),
+        tuple(sorted(preproc_flags)),
+        int(min_pc_size),
+        preproc_backend,
+        tuple(sorted(sem_types)),
+        float(voxel_size),
+    )
+    return hashlib.md5(str(key_data).encode()).hexdigest()
+
+
+# ---------------------------------------------------------------------------
+# Fixed colours per SemanticType (used in the merged left subplot)
+# ---------------------------------------------------------------------------
+
+_SEM_COLORS: dict[str, str] = {
+    "kShower":    "#e74c3c",
+    "kTrack":     "#3498db",
+    "kDelta":     "#2ecc71",
+    "kMichel":    "#f39c12",
+    "kLEScatter": "#9b59b6",
+    "kUnknown":   "#95a5a6",
+}
+
+# ---------------------------------------------------------------------------
 # Colour helper
 # ---------------------------------------------------------------------------
 
@@ -89,88 +148,145 @@ def _build_figure(
     *,
     marker_size: int = 2,
     show_legend: bool = True,
+    draw_mode: str = "by_instance",  # "by_instance" | "by_sem_type"
 ) -> go.Figure:
     """
     Construct the side-by-side Plotly figure.
 
-    Left subplot  – one trace per original particle, coloured by index.
-    Right subplot – one trace per partition, coloured by partition index.
-                    Empty when *partitions* is None.
+    draw_mode="by_instance":
+        Left  – one trace per particle, coloured by particle index.
+        Right – one trace per partition, coloured by partition index.
+    draw_mode="by_sem_type":
+        Left  – one trace per SemanticType with fixed colours.
+        Right – one trace per SemanticType (all-partition points merged by type).
     """
-    cols = 2
     fig = make_subplots(
-        rows=1, cols=cols,
+        rows=1, cols=2,
         specs=[[{"type": "scene"}, {"type": "scene"}]],
         subplot_titles=["Original particles", "Partitions"],
     )
 
-    N_raw = len(particles_raw)
+    N_raw   = len(particles_raw)
     N_parts = len(partitions) if partitions else 0
-
     colours_raw   = _make_colorscale_array(N_raw)
     colours_parts = _make_colorscale_array(N_parts)
 
-    # ── Left subplot: original particles ─────────────────────────────────
-    for i, p in enumerate(particles_raw):
-        pc = p.point_cloud
-        if pc is None or len(pc) == 0:
-            continue
-        fig.add_trace(
-            go.Scatter3d(
-                x=pc[:, 0], y=pc[:, 1], z=pc[:, 2],
-                mode="markers",
-                marker=dict(size=marker_size, color=colours_raw[i]),
-                name=f"p{p.id}  {p.sem_type.name}",
-                legendgroup=f"raw_{i}",
-                legend="legend",
-                showlegend=show_legend,
-                meta={"sem_type": p.sem_type.name},
-                hovertemplate=(
-                    f"id={p.id}  pdg={p.pdg}  sem={p.sem_type.name}<br>"
-                    f"parent_id={p.parent_id}  root_id={p.root_id}<br>"
-                    "x=%{x:.1f}  y=%{y:.1f}  z=%{z:.1f}<extra></extra>"
-                ),
-            ),
-            row=1, col=1,
-        )
-
-    # ── Right subplot: partitions ──────────────────────────────────────────
-    if partitions:
-        for i, part in enumerate(partitions):
-            chunks = [p.point_cloud for p in part
-                      if p.point_cloud is not None and len(p.point_cloud) > 0]
-            if not chunks:
+    def _collect_sem_groups(particle_iter):
+        """Bucket points by sem_type name; returns dict[name -> (xs, ys, zs)]."""
+        groups: dict[str, tuple[list, list, list]] = defaultdict(lambda: ([], [], []))
+        for p in particle_iter:
+            pc = p.point_cloud
+            if pc is None or len(pc) == 0:
                 continue
-            pts = np.concatenate(chunks, axis=0)
-            # Representative particle = largest point cloud in the partition
-            rep = max(
-                (p for p in part if p.point_cloud is not None and len(p.point_cloud) > 0),
-                key=lambda p: len(p.point_cloud),
-                default=part[0],
-            )
-            ids_str = ",".join(str(p.id) for p in part[:8])
-            if len(part) > 8:
-                ids_str += f"+{len(part)-8}"
+            xs, ys, zs = groups[p.sem_type.name]
+            xs.append(pc[:, 0])
+            ys.append(pc[:, 1])
+            zs.append(pc[:, 2])
+        return groups
+
+    # ── Left subplot ───────────────────────────────────────────────────────
+    if draw_mode == "by_sem_type":
+        for sem_name, (xs, ys, zs) in _collect_sem_groups(particles_raw).items():
             fig.add_trace(
                 go.Scatter3d(
-                    x=pts[:, 0], y=pts[:, 1], z=pts[:, 2],
+                    x=np.concatenate(xs), y=np.concatenate(ys), z=np.concatenate(zs),
                     mode="markers",
-                    marker=dict(size=marker_size, color=colours_parts[i]),
-                    name=f"part {i}  ({len(part)}p)",
-                    legendgroup=f"part_{i}",
-                    legend="legend2",
+                    marker=dict(size=marker_size,
+                                color=_SEM_COLORS.get(sem_name, "#e0e0e0")),
+                    name=sem_name,
+                    legendgroup=f"raw_{sem_name}",
+                    legend="legend",
                     showlegend=show_legend,
-                    meta={"sem_type": rep.sem_type.name},
+                    meta={"sem_type": sem_name},
                     hovertemplate=(
-                        f"partition {i}  ({len(part)} particles)<br>"
-                        f"rep: id={rep.id}  sem={rep.sem_type.name}<br>"
-                        f"rep parent_id={rep.parent_id}  root_id={rep.root_id}<br>"
-                        f"members: [{ids_str}]<br>"
+                        f"sem={sem_name}<br>"
                         "x=%{x:.1f}  y=%{y:.1f}  z=%{z:.1f}<extra></extra>"
                     ),
                 ),
-                row=1, col=2,
+                row=1, col=1,
             )
+    else:  # by_instance
+        for i, p in enumerate(particles_raw):
+            pc = p.point_cloud
+            if pc is None or len(pc) == 0:
+                continue
+            fig.add_trace(
+                go.Scatter3d(
+                    x=pc[:, 0], y=pc[:, 1], z=pc[:, 2],
+                    mode="markers",
+                    marker=dict(size=marker_size, color=colours_raw[i]),
+                    name=f"p{p.id}  {p.sem_type.name}",
+                    legendgroup=f"raw_{i}",
+                    legend="legend",
+                    showlegend=show_legend,
+                    meta={"sem_type": p.sem_type.name},
+                    hovertemplate=(
+                        f"id={p.id}  pdg={p.pdg}  sem={p.sem_type.name}<br>"
+                        f"parent_id={p.parent_id}  root_id={p.root_id}<br>"
+                        "x=%{x:.1f}  y=%{y:.1f}  z=%{z:.1f}<extra></extra>"
+                    ),
+                ),
+                row=1, col=1,
+            )
+
+    # ── Right subplot ──────────────────────────────────────────────────────
+    if partitions:
+        if draw_mode == "by_sem_type":
+            all_part_particles = (p for part in partitions for p in part)
+            for sem_name, (xs, ys, zs) in _collect_sem_groups(all_part_particles).items():
+                fig.add_trace(
+                    go.Scatter3d(
+                        x=np.concatenate(xs), y=np.concatenate(ys), z=np.concatenate(zs),
+                        mode="markers",
+                        marker=dict(size=marker_size,
+                                    color=_SEM_COLORS.get(sem_name, "#e0e0e0")),
+                        name=sem_name,
+                        legendgroup=f"part_sem_{sem_name}",
+                        legend="legend2",
+                        showlegend=show_legend,
+                        meta={"sem_type": sem_name},
+                        hovertemplate=(
+                            f"sem={sem_name}<br>"
+                            "x=%{x:.1f}  y=%{y:.1f}  z=%{z:.1f}<extra></extra>"
+                        ),
+                    ),
+                    row=1, col=2,
+                )
+        else:  # by_instance
+            for i, part in enumerate(partitions):
+                chunks = [p.point_cloud for p in part
+                          if p.point_cloud is not None and len(p.point_cloud) > 0]
+                if not chunks:
+                    continue
+                pts = np.concatenate(chunks, axis=0)
+                rep = max(
+                    (p for p in part if p.point_cloud is not None and len(p.point_cloud) > 0),
+                    key=lambda p: len(p.point_cloud),
+                    default=part[0],
+                )
+                ids_str = ",".join(str(p.id) for p in part[:8])
+                if len(part) > 8:
+                    ids_str += f"+{len(part)-8}"
+                fig.add_trace(
+                    go.Scatter3d(
+                        x=pts[:, 0], y=pts[:, 1], z=pts[:, 2],
+                        mode="markers",
+                        marker=dict(size=marker_size, color=colours_parts[i]),
+                        name=f"part {i}  ({len(part)}p)",
+                        legendgroup=f"part_{i}",
+                        legend="legend2",
+                        showlegend=show_legend,
+                        meta={"sem_type": rep.sem_type.name},
+                        hovertemplate=(
+                            f"partition {i}  ({len(part)} particles)<br>"
+                            f"rep: id={rep.id}  sem={rep.sem_type.name}<br>"
+                            f"rep parent_id={rep.parent_id}  root_id={rep.root_id}<br>"
+                            f"members: [{ids_str}]<br>"
+                            "x=%{x:.1f}  y=%{y:.1f}  z=%{z:.1f}<extra></extra>"
+                        ),
+                    ),
+                    row=1, col=2,
+                )
 
     fig.update_layout(
         scene=dict(aspectmode="data"),
@@ -307,6 +423,25 @@ def build_layout() -> html.Div:
             _labelled("Event index", _input("event-idx", "number", 0, min=0, step=1)),
         ),
 
+        # ── Input format ──────────────────────────────────────────────────
+        _section(
+            "INPUT FORMAT",
+            _labelled("Format",
+                _dropdown("format-selector", [
+                    {"label": "native (pysupera HDF5)", "value": "native"},
+                    {"label": "EDepSim HDF5",            "value": "edepsim_h5"},
+                ], "native")),
+            html.Div([
+                _labelled("step_key (HDF5 dataset)",
+                    _input("step-key", value="pstep/lar_vol")),
+                _labelled("particle_key (HDF5 dataset)",
+                    _input("particle-key", value="particle/geant4")),
+                _labelled("electron_energy_threshold",
+                    _input("elec-threshold", "number", 0.05, min=0.0, step="any")),
+            ], id="edepsim-options", style={"display": "none"}),
+            collapsed=True,
+        ),
+
         # ── Preprocessing (collapsed by default) ───────────────────────────────────────────
         _section(
             "PREPROCESSING",
@@ -314,12 +449,17 @@ def build_layout() -> html.Div:
                 id="preproc-flags",
                 options=[
                     {"label": " merge duplicates", "value": "merge_duplicates"},
+                    {"label": " voxelize",          "value": "voxelize"},
                     {"label": " defragment",        "value": "defragment"},
                 ],
                 value=["merge_duplicates", "defragment"],
                 inputStyle={"marginRight": "6px"},
                 labelStyle={"display": "block", "marginBottom": "4px"},
             ),
+            html.Div([
+                    _labelled("voxel_size",
+                        _input("voxel-size", "number", 0.3, min=0.01, step="any")),
+                ], id="voxelize-options", style={"display": "none"}),
             html.Div([
                     _labelled("min_pc_size",
                         _input("min-pc-size", "number", 10, min=1, step=1)),
@@ -395,16 +535,18 @@ def build_layout() -> html.Div:
             dcc.Checklist(
                 id="view-options",
                 options=[
-                    {"label": " show legend",   "value": "show_legend"},
-                    {"label": " sync cameras",  "value": "sync_cameras"},
+                    {"label": " show legend",        "value": "show_legend"},
+                    {"label": " sync cameras",       "value": "sync_cameras"},
+                    {"label": " colour by sem type", "value": "draw_by_sem"},
                 ],
                 value=["show_legend", "sync_cameras"],
                 inputStyle={"marginRight": "6px"},
                 labelStyle={"display": "block", "marginBottom": "4px"},
+                persistence=True, persistence_type="session",
             ),
         ),
 
-        # ── Particle filter (by sem_type) ────────────────────────────────
+        # ── Particle filter (by sem_type + min PC size) ──────────────────
         _section(
             "PARTICLE FILTER",
             html.Div("Uncheck to hide particles of that type:",
@@ -423,6 +565,13 @@ def build_layout() -> html.Div:
                 inputStyle={"marginRight": "6px"},
                 labelStyle={"display": "block", "marginBottom": "2px"},
                 persistence=True, persistence_type="session",
+            ),
+            html.Div(
+                _labelled(
+                    "Min points to display (display-only filter)",
+                    _input("min-display-pc", "number", 0, min=0, step=1),
+                ),
+                style={"marginTop": "8px"},
             ),
         ),
 
@@ -562,6 +711,28 @@ def toggle_defrag(flags):
     return visible if "defragment" in (flags or []) else hidden
 
 
+# ── Show/hide voxelize options ────────────────────────────────────────────────
+@app.callback(
+    Output("voxelize-options", "style"),
+    Input("preproc-flags", "value"),
+)
+def toggle_voxelize(flags):
+    visible = {"display": "block", "marginTop": "6px"}
+    hidden  = {"display": "none"}
+    return visible if "voxelize" in (flags or []) else hidden
+
+
+# ── Show/hide EDepSim reader options ─────────────────────────────────────────
+@app.callback(
+    Output("edepsim-options", "style"),
+    Input("format-selector", "value"),
+)
+def toggle_edepsim_options(fmt):
+    visible = {"display": "block", "marginTop": "6px"}
+    hidden  = {"display": "none"}
+    return visible if fmt == "edepsim_h5" else hidden
+
+
 # ── Show/hide n_jobs ─────────────────────────────────────────────────────────
 @app.callback(
     Output("n-jobs-div", "style"),
@@ -607,34 +778,58 @@ def toggle_log(show_val):
     State("dist-thresh",  "value"),
     State("checker-type", "value"),
     State("n-jobs",       "value"),
+    State("voxel-size",   "value"),
     State("conditions",   "value"),
     State("verbose-toggle", "value"),
     State("view-options",  "value"),
+    State("format-selector", "value"),
+    State("step-key",        "value"),
+    State("particle-key",    "value"),
+    State("elec-threshold",  "value"),
+    State("min-display-pc",  "value"),
     prevent_initial_call=True,
 )
 def run_pipeline(
     n_clicks,
     file_path, event_idx,
     preproc_flags, min_pc_size, preproc_backend, sem_types_input,
-    dist_thresh, checker_type, n_jobs,
+    dist_thresh, checker_type, n_jobs, voxel_size_input,
     condition_keys, verbose_flags, view_options,
+    format_val, step_key_val, particle_key_val, elec_thresh_val,
+    min_display_pc_val,
 ):
     preproc_flags   = preproc_flags  or []
     condition_keys  = condition_keys or []
     sem_types_input = sem_types_input or []
     verbose_flags   = verbose_flags  or []
     view_options    = view_options   or []
-    show_legend     = "show_legend"  in view_options
-    event_idx       = int(event_idx   if event_idx   is not None else 0)
+    show_legend    = "show_legend" in view_options
+    draw_mode      = "by_sem_type" if "draw_by_sem" in view_options else "by_instance"
+    min_display_pc = int(min_display_pc_val) if min_display_pc_val is not None else 0
+    event_idx      = int(event_idx   if event_idx   is not None else 0)
     dist_thresh     = float(dist_thresh if dist_thresh is not None else 0.8)
     n_jobs          = int(n_jobs      if n_jobs      is not None else -1)
     min_pc_size     = int(min_pc_size if min_pc_size is not None else 10)
     checker_type    = checker_type or "cpu-single"
     preproc_backend = preproc_backend or "scipy"
     verbose         = "verbose" in verbose_flags
+    voxel_size_val  = float(voxel_size_input if voxel_size_input is not None else 0.3)
+    format_val      = format_val or "native"
+    step_key_val    = step_key_val    or "pstep/lar_vol"
+    particle_key_val = particle_key_val or "particle/geant4"
+    elec_thresh_val = float(elec_thresh_val) if elec_thresh_val is not None else 0.05
 
     lines: list[str] = []
     t_total = time.perf_counter()
+
+    # ── Check preprocessing cache ─────────────────────────────────────────
+    _preproc_key = _preproc_cache_key(
+        file_path, event_idx, format_val,
+        step_key_val, particle_key_val, elec_thresh_val,
+        preproc_flags, min_pc_size, preproc_backend,
+        sem_types_input, voxel_size_val,
+    )
+    _cached = _PARTICLE_CACHE.get(_preproc_key)
 
     # ── Build config via load_cfg (same path as the notebook) ────────────
     # load_cfg composes the full Hydra config with all defaults, then calls
@@ -650,6 +845,8 @@ def run_pipeline(
             f"particle.min_pc_size={min_pc_size}",
             f"particle.merge_duplicates={'true' if 'merge_duplicates' in preproc_flags else 'false'}",
             f"particle.defragment={'true' if 'defragment' in preproc_flags else 'false'}",
+            f"particle.voxelize.enabled={'true' if 'voxelize' in preproc_flags else 'false'}",
+            f"particle.voxelize.voxel_size={voxel_size_val}",
             f"particle.preprocessor.name={preproc_backend}",
             f"particle.preprocessor.sem_types={sem_types_str}",
             f"checker={_CHECKER_CFG.get(checker_type, 'cpu_single')}",
@@ -688,65 +885,114 @@ def run_pipeline(
         err = f"✘ Config error:\n{traceback.format_exc(limit=3)}"
         return dash.no_update, "✘", err
 
-    # ── Load event ───────────────────────────────────────────────────────
-    try:
-        from pysupera import read_events
-        from collections import Counter
+    # ── Load event + preprocessing (skipped on cache hit) ──────────────────
+    if _cached is not None:
+        _PARTICLE_CACHE.move_to_end(_preproc_key)
+        particles_for_display, _cache_log = _cached
+        lines.extend(_cache_log)
+        lines.append("  ↩ load+preproc result from cache")
+    else:
+        _load_preproc_lines: list[str] = []
+        try:
+            from collections import Counter
 
-        with read_events(file_path) as store:
-            n_events = len(store)
-            particles = store[min(event_idx, n_events - 1)]
+            if format_val == "edepsim_h5":
+                from pysupera.readers import EDepSimHDF5Reader
+                with EDepSimHDF5Reader(
+                    file_path,
+                    particle_key=particle_key_val,
+                    step_key=step_key_val,
+                    electron_energy_threshold=elec_thresh_val,
+                    min_pc_size=min_pc_size,
+                ) as reader:
+                    n_events = len(reader)
+                    particles = reader[min(event_idx, n_events - 1)]
+                _load_preproc_lines.append(
+                    f"✔ Loaded {file_path}  ({n_events} events)  [edepsim_h5]"
+                )
+            else:
+                from pysupera import read_events
+                with read_events(file_path) as store:
+                    n_events = len(store)
+                    particles = store[min(event_idx, n_events - 1)]
+                _load_preproc_lines.append(
+                    f"✔ Loaded {file_path}  ({n_events} events)  [native pysupera]"
+                )
 
-        lines.append(f"✔ Loaded {file_path}  ({n_events} events)")
-        lines.append(f"  Event {event_idx}: {len(particles)} particles")
-        if verbose:
-            _counts = Counter(str(p.sem_type) for p in particles)
-            for sem, cnt in sorted(_counts.items()):
-                lines.append(f"    {sem}: {cnt}")
-
-    except Exception:
-        err = f"✘ Load error:\n{traceback.format_exc(limit=3)}"
-        return dash.no_update, "✘", err
-
-    # ── Preprocessing ────────────────────────────────────────────────────
-    try:
-        from pysupera.config import build_merge_processor, build_preprocessor
-
-        if "merge_duplicates" in preproc_flags:
-            _t = time.perf_counter()
-            merger = build_merge_processor(cfg, verbose=verbose)
-            if merger:
-                _buf = io.StringIO()
-                with contextlib.redirect_stdout(_buf), contextlib.redirect_stderr(_buf):
-                    particles = merger.process(particles)
-                _cap = _buf.getvalue()
-                if _cap:
-                    lines.append(_cap.rstrip("\n"))
-            lines.append(f"  merge_duplicates: {time.perf_counter()-_t:.3f}s"
-                         f"  → {len(particles)} particles")
+            _load_preproc_lines.append(
+                f"  Event {event_idx}: {len(particles)} particles"
+            )
             if verbose:
                 _counts = Counter(str(p.sem_type) for p in particles)
                 for sem, cnt in sorted(_counts.items()):
-                    lines.append(f"    {sem}: {cnt}")
+                    _load_preproc_lines.append(f"    {sem}: {cnt}")
 
-        if "defragment" in preproc_flags:
-            _t = time.perf_counter()
-            preprocessor = build_preprocessor(cfg)
-            if preprocessor:
-                particles = preprocessor.process(particles)
-            sem_label = f" sem_types={sem_types_input}" if sem_types_input else " (all types)"
-            lines.append(f"  defragment ({preproc_backend}{sem_label}): "
-                         f"{time.perf_counter()-_t:.3f}s  → {len(particles)} particles")
-            if verbose:
-                _counts = Counter(str(p.sem_type) for p in particles)
-                for sem, cnt in sorted(_counts.items()):
-                    lines.append(f"    {sem}: {cnt}")
-    except Exception:
-        err = f"✘ Preprocessing error:\n{traceback.format_exc(limit=3)}"
-        return dash.no_update, "✘", err
+        except Exception:
+            err = f"✘ Load error:\n{traceback.format_exc(limit=3)}"
+            return dash.no_update, "✘", err
 
-    # Keep a copy of original particles for the left subplot
-    particles_for_display = list(particles)
+        # ── Preprocessing ────────────────────────────────────────────────
+        try:
+            from pysupera.config import build_merge_processor, build_preprocessor, build_voxelizer
+
+            if "merge_duplicates" in preproc_flags:
+                _t = time.perf_counter()
+                merger = build_merge_processor(cfg, verbose=verbose)
+                if merger:
+                    _buf = io.StringIO()
+                    with contextlib.redirect_stdout(_buf), contextlib.redirect_stderr(_buf):
+                        particles = merger.process(particles)
+                    _cap = _buf.getvalue()
+                    if _cap:
+                        _load_preproc_lines.append(_cap.rstrip("\n"))
+                _load_preproc_lines.append(
+                    f"  merge_duplicates: {time.perf_counter()-_t:.3f}s"
+                    f"  → {len(particles)} particles"
+                )
+                if verbose:
+                    _counts = Counter(str(p.sem_type) for p in particles)
+                    for sem, cnt in sorted(_counts.items()):
+                        _load_preproc_lines.append(f"    {sem}: {cnt}")
+
+            if "voxelize" in preproc_flags:
+                _t = time.perf_counter()
+                voxelizer = build_voxelizer(cfg)
+                if voxelizer:
+                    particles = voxelizer.process(particles)
+                _load_preproc_lines.append(
+                    f"  voxelize (voxel_size={voxel_size_val}): "
+                    f"{time.perf_counter()-_t:.3f}s  \u2192 {len(particles)} particles"
+                )
+
+            if "defragment" in preproc_flags:
+                _t = time.perf_counter()
+                preprocessor = build_preprocessor(cfg)
+                if preprocessor:
+                    particles = preprocessor.process(particles)
+                sem_label = (f" sem_types={sem_types_input}"
+                             if sem_types_input else " (all types)")
+                _load_preproc_lines.append(
+                    f"  defragment ({preproc_backend}{sem_label}): "
+                    f"{time.perf_counter()-_t:.3f}s  → {len(particles)} particles"
+                )
+                if verbose:
+                    _counts = Counter(str(p.sem_type) for p in particles)
+                    for sem, cnt in sorted(_counts.items()):
+                        _load_preproc_lines.append(f"    {sem}: {cnt}")
+
+        except Exception:
+            err = f"✘ Preprocessing error:\n{traceback.format_exc(limit=3)}"
+            return dash.no_update, "✘", err
+
+        # Store preprocessed particles in cache (evict oldest if full)
+        particles_for_display = list(particles)
+        _PARTICLE_CACHE[_preproc_key] = (particles_for_display, list(_load_preproc_lines))
+        if len(_PARTICLE_CACHE) > _MAX_CACHE_ENTRIES:
+            _PARTICLE_CACHE.popitem(last=False)
+        lines.extend(_load_preproc_lines)
+
+    # particles alias for the partition step (works on both cache-hit and miss)
+    particles = particles_for_display
 
     # ── Partition ────────────────────────────────────────────────────────
     try:
@@ -815,10 +1061,25 @@ def run_pipeline(
     total_time = time.perf_counter() - t_total
     lines.append(f"\ntotal: {total_time:.3f}s")
 
+    # ── Apply display-only point-cloud size filter ────────────────────────
+    if min_display_pc > 0:
+        particles_for_display = [
+            p for p in particles_for_display if len(p.point_cloud) >= min_display_pc
+        ]
+        partitions = [
+            [p for p in part if len(p.point_cloud) >= min_display_pc]
+            for part in partitions
+        ]
+        partitions = [part for part in partitions if part]
+        lines.append(
+            f"  display filter: pc ≥ {min_display_pc} pts →"
+            f" {len(particles_for_display)} particles, {len(partitions)} partitions shown"
+        )
+
     # ── Build figure ─────────────────────────────────────────────────────
     try:
         fig = _build_figure(particles_for_display, partitions,
-                            show_legend=show_legend)
+                            show_legend=show_legend, draw_mode=draw_mode)
     except Exception:
         err = f"✘ Figure error:\n{traceback.format_exc(limit=3)}"
         return dash.no_update, "✘", err

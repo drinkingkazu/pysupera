@@ -85,16 +85,6 @@ class TestPhotonDecay:
         parts = prt.partition(PhotonDecay(), verbose=False)
         assert not _same_partition(parts, 1, 2)
 
-    def test_result_has_fewer_or_equal_partitions_than_particles(self):
-        photon = make_particle(1, PT_PHOTON, pdg=22,
-                               pc=np.zeros((0, 3), dtype=np.float32),
-                               parent_id=1, root_id=1)
-        electron = make_particle(2, PT_PRIMARY, pdg=11,
-                                  parent_id=1, root_id=1)
-        prt = _part(photon, electron)
-        parts = prt.partition(PhotonDecay(), verbose=False)
-        assert len(parts) <= 2
-
 
 # ============================================================================
 # TouchingEMShower

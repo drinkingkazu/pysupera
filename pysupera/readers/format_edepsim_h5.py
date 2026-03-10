@@ -15,7 +15,7 @@ Expected HDF5 layout
     ============= ======================================================
     track_id      Geant4 track ID  (used as pysupera *id*)
     parent_track_id  Immediate parent track ID
-    ancestor_track_id Root ancestor track ID
+    root_track_id     Root ancestor track ID
     pdg           PDG Monte Carlo particle code
     proc_start    G4 process type integer at particle start vertex
     subproc_start G4 process subtype integer at particle start vertex
@@ -50,6 +50,69 @@ from enum import IntEnum
 
 from .base import EventReaderBase
 from ..data import Particle
+from ..utils import PointFeature
+
+
+# ---------------------------------------------------------------------------
+# Step-array conversion
+# ---------------------------------------------------------------------------
+# The EDepSim HDF5 step datasets are structured arrays with named fields.
+# pysupera's Particle expects a plain float32 2-D point cloud with columns
+# ordered by PointFeature (x=0, y=1, z=2, time=3, energy=4, dedx=5).
+# This mapping is EDepSim-format-specific and lives here rather than in
+# Particle.from_flat_arrays so that the core data class stays format-agnostic.
+
+# Maps PointFeature column → candidate HDF5 field name(s) to try, in order.
+_STEP_FIELD_MAP: list[tuple[int, tuple[str, ...]]] = [
+    (PointFeature.x,      ("x",)),
+    (PointFeature.y,      ("y",)),
+    (PointFeature.z,      ("z",)),
+    (PointFeature.time,   ("t", "time")),
+    (PointFeature.energy, ("energy", "e")),
+    (PointFeature.dedx,   ("dedx", "dEdx", "dE_dx")),
+]
+
+
+def _steps_to_plain_array(steps: np.ndarray) -> np.ndarray:
+    """
+    Convert a structured EDepSim step array to a plain float32 2-D array.
+
+    The output columns follow :class:`~pysupera.utils.PointFeature` order:
+    ``x=0, y=1, z=2, time=3, energy=4, dedx=5``.  x, y, z are mandatory;
+    any optional field (time, energy, dedx) that is absent from the dtype
+    is left as zero in the output.
+
+    Parameters
+    ----------
+    steps : numpy.ndarray
+        1-D structured array read from the HDF5 step dataset.
+
+    Returns
+    -------
+    numpy.ndarray, shape (N, 6), dtype float32
+    """
+    if steps.dtype.names is None:
+        # Already a plain (non-structured) array — nothing to do.
+        return steps.astype(np.float32, copy=False)
+
+    n = len(steps)
+    out = np.zeros((n, len(_STEP_FIELD_MAP)), dtype=np.float32)
+    available = set(steps.dtype.names)
+
+    for col, candidates in _STEP_FIELD_MAP:
+        for fname in candidates:
+            if fname in available:
+                out[:, col] = steps[fname]
+                break
+        else:
+            if col < 3:   # x, y, z are required
+                raise ValueError(
+                    f"EDepSim step array is missing a required coordinate field. "
+                    f"Tried {candidates}; available fields: {sorted(available)}"
+                )
+            # optional columns default to zero — already set
+
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -368,11 +431,11 @@ class EDepSimHDF5Reader(EventReaderBase):
         return Particle.from_flat_arrays(
             ids                  = parts["track_id"],
             parent_ids           = parts["parent_track_id"],
-            root_ids             = parts["ancestor_track_id"],
+            root_ids             = parts["root_track_id"],
             pdgs                 = parts["pdg"],
             parent_pdgs          = _get_parent_pdg(parts),
             process_types        = itype,
-            point_cloud_flat     = steps,
+            point_cloud_flat     = _steps_to_plain_array(steps),
             point_cloud_offsets  = offsets,
             min_pc_size          = self._min_pc_size,
         )

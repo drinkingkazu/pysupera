@@ -201,19 +201,72 @@ class CombineLEScatters(PartitionConditionBase):
         # ensures that already-absorbed particles are never re-inspected:
         # an absorbed particle's rep_lookup entry points to its absorber, which
         # is deduplicated away by unique_reps(), leaving only active reps.
-        seen: Dict[int, 'Particle'] = {
-            rep.id: rep
+        unique_le = [
+            rep
             for rep in self.unique_reps(rep_lookup)
             if rep.sem_type == SemanticType.kLEScatter
-        }
+        ]
 
-        unique_reps = list(seen.values())
+        if len(unique_le) < 2:
+            partitioner.diagnostics.record_candidates(
+                f"{self.name}: Rep Candidate Building", []
+            )
+            return []
+
+        D = partitioner.checker.D
+
+        # Global point-cloud KDTree: concatenate all LE rep clouds into one
+        # array labelled by rep index, then call query_pairs(D) once.  This
+        # finds all touching (rep_i, rep_j) pairs in O(N log N) — strictly
+        # better than O(n_reps²) centroid pre-filter followed by per-pair
+        # cloud checks, regardless of whether point clouds are voxelized.
+        def _xyz(rep):
+            parts = rep._cloud_parts
+            return parts[0] if len(parts) == 1 else np.concatenate(parts, axis=0)
+
+        clouds   = [_xyz(r) for r in unique_le]
+        nonempty = [(k, c) for k, c in enumerate(clouds) if len(c) > 0]
+
+        if len(nonempty) < 2:
+            partitioner.diagnostics.record_candidates(
+                f"{self.name}: Rep Candidate Building", []
+            )
+            return []
+
+        rep_tags = np.repeat(
+            [k for k, _ in nonempty],
+            [len(c) for _, c in nonempty],
+        ).astype(np.int32)
+        pts = np.concatenate([c[:, :3] for _, c in nonempty], axis=0).astype(np.float32)
+
+        from scipy.spatial import KDTree
+        pt_pairs = KDTree(pts).query_pairs(r=D, output_type='ndarray')
+
+        # Map point-pairs → rep-pairs, drop same-rep and deduplicate.
+        if len(pt_pairs) == 0:
+            partitioner.diagnostics.record_candidates(
+                f"{self.name}: Rep Candidate Building", []
+            )
+            return []
+
+        ri = rep_tags[pt_pairs[:, 0]]
+        rj = rep_tags[pt_pairs[:, 1]]
+        mask = ri != rj
+        if not mask.any():
+            partitioner.diagnostics.record_candidates(
+                f"{self.name}: Rep Candidate Building", []
+            )
+            return []
+
+        # Canonical (min, max) ordering → unique set of rep-pairs.
+        rep_pairs = np.unique(
+            np.sort(np.stack([ri[mask], rj[mask]], axis=1), axis=1), axis=0
+        )
 
         candidates: List[Tuple[int, int]] = []
-        for i in range(len(unique_reps)):
-            for j in range(i + 1, len(unique_reps)):
-                child, parent = _le_direction(unique_reps[i], unique_reps[j])
-                candidates.append((child.id, parent.id))
+        for i, j in rep_pairs:
+            child, parent = _le_direction(unique_le[i], unique_le[j])
+            candidates.append((child.id, parent.id))
 
         partitioner.diagnostics.record_candidates(
             f"{self.name}: Rep Candidate Building", candidates

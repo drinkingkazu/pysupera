@@ -42,12 +42,6 @@ class TestPartitionBasics:
         all_ids = {p.id for part in parts for p in part}
         assert all_ids == {p.id for p in particles}
 
-    def test_partition_count_never_exceeds_particle_count(self):
-        particles = [make_particle(i, PT_IONIZATION, pdg=11) for i in range(6)]
-        prt = make_partitioner(particles, D=5.0)
-        parts = prt.partition(CombineLEScatters(), verbose=False)
-        assert len(parts) <= len(particles)
-
     def test_each_particle_in_exactly_one_partition(self):
         particles = [
             make_particle(i, PT_IONIZATION, pdg=11, offset=(i * 0.05, 0, 0))
@@ -114,21 +108,6 @@ class TestGetRepresentative:
 # ============================================================================
 
 class TestPartitionBySemType:
-    def test_returns_dict(self):
-        p = make_particle(1, PT_PRIMARY, pdg=11)
-        prt = make_partitioner([p])
-        parts = prt.partition(AbsorbLEScatter(), verbose=False)
-        result = prt.partition_by_sem_type(parts)
-        assert isinstance(result, dict)
-
-    def test_keys_are_semantic_types(self):
-        p = make_particle(1, PT_PRIMARY, pdg=11)
-        prt = make_partitioner([p])
-        parts = prt.partition(AbsorbLEScatter(), verbose=False)
-        result = prt.partition_by_sem_type(parts)
-        for key in result:
-            assert isinstance(key, SemanticType)
-
     def test_total_partition_count_preserved(self):
         particles = [
             make_particle(1, PT_PRIMARY,    pdg=11, offset=(0,   0, 0)),

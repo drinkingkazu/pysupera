@@ -96,11 +96,6 @@ class Particle:
         Particle rest mass (MeV/c²).
     root_pdg : int or None
         PDG code of the primary (root) ancestor particle.
-    genealogy_id : list of int or None
-        IDs of ancestors from direct parent up to and including the root,
-        in order [parent_id, grandparent_id, …, root_id].
-    genealogy_pdg : list of int or None
-        PDG codes of the same ancestry chain as *genealogy_id*.
     start_process_id : int or None
         Geant4/simulation process ID for this particle's creation.
     start_subprocess_id : int or None
@@ -138,8 +133,6 @@ class Particle:
         kinetic_energy_end=FLOAT_UNSET,
         mass=FLOAT_UNSET,
         root_pdg=None,
-        genealogy_id=None,
-        genealogy_pdg=None,
         start_process_id=None,
         start_subprocess_id=None,
         start_process_name=None,
@@ -206,8 +199,6 @@ class Particle:
         self.kinetic_energy_end   = np.float32(kinetic_energy_end)
         self.mass                 = np.float32(mass)
         self.root_pdg             = root_pdg
-        self.genealogy_id         = list(genealogy_id)  if genealogy_id  is not None else None
-        self.genealogy_pdg        = list(genealogy_pdg) if genealogy_pdg is not None else None
         self.start_process_id     = start_process_id
         self.start_subprocess_id  = start_subprocess_id
         self.start_process_name   = start_process_name
@@ -389,9 +380,16 @@ class Particle:
             Raw interaction process codes forwarded to
             :func:`~pysupera.utils.SetSemanticType`.
         point_cloud_flat : numpy.ndarray, shape (M, ≥3)
-            Concatenated point clouds for all *N* particles.  Columns 0–2
-            are x, y, z; additional columns (time, energy, etc.) are
-            carried through unchanged.
+            Concatenated point clouds for all *N* particles.  Must be a
+            plain (non-structured) 2-D ``float32`` array.  Columns 0–2
+            are x, y, z; additional columns (time, energy, dEdx, …)
+            are carried through unchanged.
+
+            .. note::
+                File-format-specific readers (e.g.
+                :class:`~pysupera.readers.EDepSimHDF5Reader`) are
+                responsible for converting their native structured arrays
+                into this layout before calling :meth:`from_flat_arrays`.
         point_cloud_offsets : array-like of int, shape (N, 2)
             Row slices into *point_cloud_flat*.
             ``point_cloud_offsets[i] = [start, end]`` such that
@@ -464,6 +462,12 @@ class Particle:
             )
 
         flat = np.asarray(point_cloud_flat)
+        if flat.dtype.names is not None:
+            raise TypeError(
+                "point_cloud_flat must be a plain 2-D array, not a structured "
+                "array.  Convert named fields to columns before calling "
+                "from_flat_arrays (e.g. in the file-format reader)."
+            )
 
         return [
             cls(

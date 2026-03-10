@@ -54,6 +54,9 @@ particle:
     # minimum (per-particle alignment, default).  Set to [x0, y0, z0] for
     # a globally fixed grid anchored at a known detector boundary.
     origin: null
+    # When true, skips the separate merge_duplicates preprocessing step.
+    # Safe because exact-coordinate duplicates always fall in the same voxel.
+    merge_duplicates: false
 
   # Pre-processing: collapse points sharing identical 3-D coordinates.
   # Aggregation rules: time=min, energy=sum, dedx=max.

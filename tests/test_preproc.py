@@ -2,7 +2,7 @@
 import numpy as np
 import pytest
 
-from pysupera.preproc import MergeDuplicatesProcessor, ScipyDefragmenter
+from pysupera.preproc import MergeDuplicatesProcessor, ScipyDefragmenter, VoxelizeProcessor
 from pysupera.utils import SemanticType
 from tests.conftest import make_particle, cloud, PT_PRIMARY, PT_TRACK, PT_NEUTRON
 
@@ -81,6 +81,26 @@ class TestMergeDuplicatesProcessor:
         result = self.proc.process([p1, p2])
         assert len(result[0].point_cloud) == 1   # p1 had duplicate
         assert len(result[1].point_cloud) == 2   # p2 had no duplicate
+
+    def test_last_stats_populated_no_duplicates(self):
+        p = make_particle(1, PT_PRIMARY, pdg=11,
+                          pc=pc6([0, 0, 0, 1, 2, 0.5],
+                                 [1, 0, 0, 2, 3, 0.3]))
+        self.proc.process([p])
+        s = self.proc.last_stats
+        assert {'n_particles', 'n_affected', 'pts_before', 'pts_after'} <= s.keys()
+        assert s['n_affected'] == 0
+        assert s['pts_before'] == s['pts_after'] == 2
+
+    def test_last_stats_populated_with_duplicates(self):
+        p = make_particle(1, PT_PRIMARY, pdg=11,
+                          pc=pc6([0, 0, 0, 0, 1, 0.5],
+                                 [0, 0, 0, 1, 2, 0.3]))  # duplicate xyz
+        self.proc.process([p])
+        s = self.proc.last_stats
+        assert s['n_affected'] == 1
+        assert s['pts_before'] == 2
+        assert s['pts_after'] == 1
 
     def test_diagnostic_records_only_duplicates(self):
         p_dup  = make_particle(1, PT_PRIMARY, pdg=11,
@@ -207,6 +227,34 @@ class TestScipyDefragmenter:
         result = self.defrag(sem_types=None).process([p])
         assert len(result) == 2   # kTrack still processed when sem_types=None
 
+    # ── last_stats ────────────────────────────────────────────────────────
+
+    def test_last_stats_populated_no_fragmentation(self):
+        # Single contiguous cloud — bounding box early-exit applies
+        pts = _cluster_pts(20, (0, 0, 0))
+        p = make_particle(1, PT_PRIMARY, pdg=11, pc=pts)
+        defrag = self.defrag()
+        defrag.process([p])
+        s = defrag.last_stats
+        required = {'n_particles', 'n_skipped', 'n_early_exit', 'n_cc_checked',
+                    'n_fragmented', 'n_spawned', 'n_jobs',
+                    'cc_pts_median', 'cc_pts_max', 'cc_pts_total'}
+        assert required <= s.keys()
+        assert s['n_particles'] == 1
+        assert s['n_fragmented'] == 0
+        assert s['n_spawned'] == 0
+
+    def test_last_stats_fragmented_counters(self):
+        large = _cluster_pts(10, (0, 0, 0))
+        small = _cluster_pts(2, (100, 0, 0))
+        p = make_particle(1, PT_PRIMARY, pdg=11, pc=np.vstack([large, small]))
+        defrag = self.defrag()
+        defrag.process([p])
+        s = defrag.last_stats
+        assert s['n_fragmented'] == 1
+        assert s['n_spawned'] == 1
+        assert s['cc_pts_total'] > 0
+
     # ── diagnostic records ───────────────────────────────────────────────
 
     def test_fragmented_particle_has_diagnostic_record(self):
@@ -223,3 +271,181 @@ class TestScipyDefragmenter:
         defrag = self.defrag()
         defrag.process([p])
         assert len(defrag.last_diagnostics) == 0
+
+
+# ============================================================================
+# VoxelizeProcessor
+# ============================================================================
+
+class TestVoxelizeProcessor:
+    """Tests for VoxelizeProcessor (isotropic and anisotropic voxelization)."""
+
+    def setup_method(self):
+        # Isotropic 1-unit voxels anchored at the origin for predictability.
+        self.proc = VoxelizeProcessor(voxel_size=1.0, origin=[0.0, 0.0, 0.0])
+
+    # ── basic collapsing ─────────────────────────────────────────────────
+
+    def test_two_points_same_voxel_collapse_to_one(self):
+        # (0.2,0,0) and (0.7,0,0) both lie in voxel (0,0,0)
+        p = make_particle(1, PT_PRIMARY, pdg=11,
+                          pc=pc6([0.2, 0.0, 0.0, 1.0, 2.0, 0.5],
+                                 [0.7, 0.0, 0.0, 3.0, 4.0, 1.5]))
+        result = self.proc.process([p])
+        assert len(result[0].point_cloud) == 1
+
+    def test_two_points_different_voxels_unchanged(self):
+        # (0.2,0,0) → voxel (0,0,0); (1.5,0,0) → voxel (1,0,0)
+        p = make_particle(1, PT_PRIMARY, pdg=11,
+                          pc=pc6([0.2, 0.0, 0.0, 1.0, 2.0, 0.5],
+                                 [1.5, 0.0, 0.0, 3.0, 4.0, 1.5]))
+        result = self.proc.process([p])
+        assert len(result[0].point_cloud) == 2
+
+    def test_voxel_centre_position(self):
+        # voxel_size=1, origin=(0,0,0) → voxel (0,0,0) centre is (0.5,0.5,0.5)
+        p = make_particle(1, PT_PRIMARY, pdg=11,
+                          pc=pc6([0.3, 0.4, 0.2, 1.0, 1.0, 1.0],
+                                 [0.8, 0.1, 0.9, 2.0, 2.0, 2.0]))
+        result = self.proc.process([p])
+        np.testing.assert_allclose(result[0].point_cloud[0, :3],
+                                   [0.5, 0.5, 0.5], atol=1e-5)
+
+    # ── feature aggregation ───────────────────────────────────────────────
+
+    def test_time_takes_minimum(self):
+        p = make_particle(1, PT_PRIMARY, pdg=11,
+                          pc=pc6([0.2, 0.0, 0.0, 10.0, 1.0, 0.5],
+                                 [0.7, 0.0, 0.0,  2.0, 1.0, 0.5]))
+        result = self.proc.process([p])
+        assert result[0].point_cloud[0, 3] == pytest.approx(2.0)
+
+    def test_energy_takes_sum(self):
+        p = make_particle(1, PT_PRIMARY, pdg=11,
+                          pc=pc6([0.2, 0.0, 0.0, 1.0, 3.0, 0.5],
+                                 [0.7, 0.0, 0.0, 1.0, 4.0, 0.5]))
+        result = self.proc.process([p])
+        assert result[0].point_cloud[0, 4] == pytest.approx(7.0)
+
+    def test_dedx_takes_maximum(self):
+        p = make_particle(1, PT_PRIMARY, pdg=11,
+                          pc=pc6([0.2, 0.0, 0.0, 1.0, 1.0, 1.5],
+                                 [0.7, 0.0, 0.0, 1.0, 1.0, 3.2]))
+        result = self.proc.process([p])
+        assert result[0].point_cloud[0, 5] == pytest.approx(3.2)
+
+    # ── edge cases ────────────────────────────────────────────────────────
+
+    def test_empty_cloud_passes_through(self):
+        p = make_particle(1, PT_PRIMARY, pdg=11,
+                          pc=np.zeros((0, 6), dtype=np.float32))
+        result = self.proc.process([p])
+        assert len(result[0].point_cloud) == 0
+
+    def test_single_point_passes_through_unchanged(self):
+        # A single point has nothing to merge; original coordinates are preserved.
+        p = make_particle(1, PT_PRIMARY, pdg=11,
+                          pc=pc6([0.3, 0.3, 0.3, 1.0, 1.0, 1.0]))
+        result = self.proc.process([p])
+        assert len(result[0].point_cloud) == 1
+        np.testing.assert_allclose(result[0].point_cloud[0, :3],
+                                   [0.3, 0.3, 0.3], atol=1e-6)
+
+    def test_multiple_particles_processed_independently(self):
+        # p1: two points in the same voxel → collapse
+        p1 = make_particle(1, PT_PRIMARY, pdg=11,
+                           pc=pc6([0.2, 0.0, 0.0, 1.0, 1.0, 1.0],
+                                  [0.7, 0.0, 0.0, 2.0, 2.0, 2.0]))
+        # p2: two points in different voxels → no collapse
+        p2 = make_particle(2, PT_TRACK, pdg=13,
+                           pc=pc6([0.2, 0.0, 0.0, 1.0, 1.0, 1.0],
+                                  [1.5, 0.0, 0.0, 2.0, 2.0, 2.0]))
+        result = self.proc.process([p1, p2])
+        assert len(result[0].point_cloud) == 1  # p1 collapsed
+        assert len(result[1].point_cloud) == 2  # p2 unchanged
+
+    # ── anisotropic voxel ────────────────────────────────────────────────
+
+    def test_anisotropic_voxel_size(self):
+        # dx=1, dy=2, dz=3; origin=(0,0,0)
+        proc = VoxelizeProcessor(voxel_size=[1.0, 2.0, 3.0],
+                                 origin=[0.0, 0.0, 0.0])
+        # Both points fall in voxel (0,0,0): floor(0.2/1)=0, floor(0.5/2)=0, floor(0.5/3)=0
+        # and floor(0.7/1)=0, floor(1.9/2)=0, floor(2.9/3)=0
+        p = make_particle(1, PT_PRIMARY, pdg=11,
+                          pc=pc6([0.2, 0.5, 0.5, 1.0, 2.0, 0.5],
+                                 [0.7, 1.9, 2.9, 2.0, 3.0, 1.5]))
+        result = proc.process([p])
+        assert len(result[0].point_cloud) == 1
+        # centre of voxel (0,0,0) with anisotropic grid: (0.5*1, 0.5*2, 0.5*3)
+        np.testing.assert_allclose(result[0].point_cloud[0, :3],
+                                   [0.5, 1.0, 1.5], atol=1e-5)
+
+    # ── fixed vs per-particle origin ─────────────────────────────────────
+
+    def test_fixed_origin_grid_alignment(self):
+        # voxel_size=1, origin=(0,0,0): both points in voxel (1,0,0)
+        # → merged centre at (1.5, 0.5, 0.5)
+        p = make_particle(1, PT_PRIMARY, pdg=11,
+                          pc=pc6([1.2, 0.0, 0.0, 1.0, 1.0, 1.0],
+                                 [1.8, 0.0, 0.0, 2.0, 2.0, 2.0]))
+        result = self.proc.process([p])
+        assert len(result[0].point_cloud) == 1
+        np.testing.assert_allclose(result[0].point_cloud[0, :3],
+                                   [1.5, 0.5, 0.5], atol=1e-5)
+
+    # ── merge_duplicates flag ────────────────────────────────────────────
+
+    def test_merge_duplicates_flag_default_false(self):
+        proc = VoxelizeProcessor(voxel_size=1.0)
+        assert proc.merge_duplicates is False
+
+    def test_merge_duplicates_flag_can_be_set(self):
+        proc = VoxelizeProcessor(voxel_size=1.0, merge_duplicates=True)
+        assert proc.merge_duplicates is True
+
+    # ── last_stats ────────────────────────────────────────────────────────
+
+    def test_last_stats_populated_after_merge(self):
+        p = make_particle(1, PT_PRIMARY, pdg=11,
+                          pc=pc6([0.2, 0.0, 0.0, 1.0, 2.0, 0.5],
+                                 [0.7, 0.0, 0.0, 3.0, 4.0, 1.5]))
+        self.proc.process([p])
+        s = self.proc.last_stats
+        assert {'n_particles', 'n_affected', 'pts_before', 'pts_after'} <= s.keys()
+        assert s['n_particles'] == 1
+        assert s['n_affected'] == 1
+        assert s['pts_before'] == 2
+        assert s['pts_after'] == 1
+
+    def test_last_stats_no_merge_when_all_separate_voxels(self):
+        p = make_particle(1, PT_PRIMARY, pdg=11,
+                          pc=pc6([0.2, 0.0, 0.0, 1.0, 2.0, 0.5],
+                                 [1.5, 0.0, 0.0, 3.0, 4.0, 1.5]))
+        self.proc.process([p])
+        s = self.proc.last_stats
+        assert s['n_affected'] == 0
+        assert s['pts_before'] == s['pts_after']
+
+    # ── diagnostics ──────────────────────────────────────────────────────
+
+    def test_diagnostics_record_only_affected_particles(self):
+        p_merged = make_particle(1, PT_PRIMARY, pdg=11,
+                                 pc=pc6([0.2, 0.0, 0.0, 1.0, 1.0, 1.0],
+                                        [0.7, 0.0, 0.0, 2.0, 2.0, 2.0]))
+        p_clean  = make_particle(2, PT_TRACK,   pdg=13,
+                                 pc=pc6([0.2, 0.0, 0.0, 1.0, 1.0, 1.0],
+                                        [1.5, 0.0, 0.0, 2.0, 2.0, 2.0]))
+        self.proc.process([p_merged, p_clean])
+        assert len(self.proc.last_diagnostics) == 1
+        assert self.proc.last_diagnostics[0].particle_id == 1
+
+    # ── invalid constructor args ──────────────────────────────────────────
+
+    def test_zero_voxel_size_raises(self):
+        with pytest.raises(ValueError):
+            VoxelizeProcessor(voxel_size=0.0)
+
+    def test_negative_voxel_size_raises(self):
+        with pytest.raises(ValueError):
+            VoxelizeProcessor(voxel_size=-1.0)

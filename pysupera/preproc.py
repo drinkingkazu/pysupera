@@ -246,11 +246,13 @@ class DefragmentBase(ABC):
 
     def __init__(self, distance_threshold: float, min_pc_size: int,
                  verbose: bool = False,
-                 sem_types=None):
+                 sem_types=None,
+                 n_jobs: int = 1):
         self.eps         = float(distance_threshold)
         self.eps2        = self.eps ** 2
         self.min_pc_size = int(min_pc_size)
         self.verbose     = bool(verbose)
+        self.n_jobs      = int(n_jobs)
         # sem_types: frozenset of SemanticType values to process, or None for all.
         # Particles whose sem_type is not in the set are passed through unchanged.
         if sem_types is None or len(sem_types) == 0:
@@ -260,6 +262,8 @@ class DefragmentBase(ABC):
         #: List of :class:`FragmentRecord` objects from the most recent
         #: :meth:`process` call.  Always populated regardless of *verbose*.
         self.last_diagnostics: List[FragmentRecord] = []
+        #: Summary counts from the most recent :meth:`process` call.
+        self.last_stats: dict = {}
 
     # ------------------------------------------------------------------
     # Subclass contract
@@ -317,6 +321,11 @@ class DefragmentBase(ABC):
         """
         if not particles:
             self.last_diagnostics = []
+            self.last_stats = {'n_particles': 0, 'n_skipped': 0,
+                               'n_early_exit': 0, 'n_cc_checked': 0,
+                               'n_fragmented': 0, 'n_spawned': 0,
+                               'n_jobs': self.n_jobs,
+                               'cc_pts_median': 0, 'cc_pts_max': 0, 'cc_pts_total': 0}
             return particles
 
         be_verbose = self.verbose if verbose is None else bool(verbose)
@@ -324,7 +333,6 @@ class DefragmentBase(ABC):
 
         max_id  = max(p.id for p in particles)
         next_id = max_id + 1
-        result: list[Particle]  = []
         spawned: list[Particle] = []
 
         n_skipped      = 0
@@ -333,20 +341,30 @@ class DefragmentBase(ABC):
         n_fragmented   = 0
         n_spawned_total = 0
 
-        for p in particles:
+        # ---------------------------------------------------------------
+        # First pass: fast early-exit checks; collect particles needing CC
+        # ---------------------------------------------------------------
+        # result_slots preserves input order; None = to be filled after CC.
+        result_slots: list = [None] * len(particles)
+        # needs_cc: (original_index, particle, xyz)
+        # precomp:  original_index → pre-computed labels (2-pt case)
+        needs_cc: list = []
+        precomp:  dict = {}
+
+        for i, p in enumerate(particles):
             # Skip particles whose semantic type is not in the allowed set.
             if self.sem_types is not None and p.sem_type not in self.sem_types:
-                result.append(p)
+                result_slots[i] = p
                 n_skipped += 1
                 continue
 
             pc = p.point_cloud
 
-            # ---- fast early exits (cheapest first) -----------------------
+            # ---- fast early exits (cheapest first) ---------------------
 
             # 1. Single point: trivially one cluster
             if len(pc) <= 1:
-                result.append(p)
+                result_slots[i] = p
                 n_early_exit += 1
                 continue
 
@@ -355,32 +373,77 @@ class DefragmentBase(ABC):
             # 2. Two points: O(1) distance comparison
             if len(xyz) == 2:
                 if ((xyz[0] - xyz[1]) ** 2).sum() <= self.eps2:
-                    result.append(p)
+                    result_slots[i] = p
                     n_early_exit += 1
                     continue
-                # Two isolated points — labels are [0, 1] by definition
-                labels = np.array([0, 1], dtype=np.intp)
-                exit_reason = None   # did not early-exit; fell through to CC logic
-            else:
-                # 3. Bounding-box diagonal: if the whole cloud fits inside a
-                #    ball of radius eps, all pairs are within eps → 1 cluster
-                span = xyz.max(axis=0) - xyz.min(axis=0)
-                if (span ** 2).sum() <= self.eps2:
-                    result.append(p)
-                    n_early_exit += 1
-                    continue
+                # Two isolated points — labels known without CC
+                precomp[i] = np.array([0, 1], dtype=np.intp)
+                needs_cc.append((i, p, xyz))
+                n_cc_checked += 1
+                continue
 
-                # 4. Subclass-specific connected-components algorithm
-                exit_reason = None
-                labels = self._get_labels(xyz)
+            # 3. Bounding-box diagonal: if the whole cloud fits inside a
+            #    ball of radius eps, all pairs are within eps → 1 cluster
+            span = xyz.max(axis=0) - xyz.min(axis=0)
+            if (span ** 2).sum() <= self.eps2:
+                result_slots[i] = p
+                n_early_exit += 1
+                continue
 
-            # ---- reached CC — build diagnostic record -------------------
+            # 4. Needs full CC
+            needs_cc.append((i, p, xyz))
             n_cc_checked += 1
+
+        # ---------------------------------------------------------------
+        # Parallel (or sequential) CC computation
+        # ---------------------------------------------------------------
+        to_compute = [(idx, p, xyz) for idx, p, xyz in needs_cc
+                      if idx not in precomp]
+
+        if to_compute:
+            if self.n_jobs != 1 and len(to_compute) > 1:
+                import math
+                from joblib import Parallel, delayed
+                # Determine effective worker count (joblib uses cpu_count for -1)
+                import os
+                n_workers = (
+                    os.cpu_count() or 1
+                    if self.n_jobs < 0
+                    else self.n_jobs
+                )
+                # Chunk into n_workers groups to eliminate per-task overhead.
+                # Each worker processes its chunk serially — joblib dispatches
+                # only n_workers tasks instead of len(to_compute).
+                chunk_size = max(1, math.ceil(len(to_compute) / n_workers))
+                chunks = [
+                    to_compute[i : i + chunk_size]
+                    for i in range(0, len(to_compute), chunk_size)
+                ]
+
+                def _run_chunk(chunk):
+                    return [self._get_labels(xyz) for _, _, xyz in chunk]
+
+                nested = Parallel(n_jobs=self.n_jobs, prefer='threads')(
+                    delayed(_run_chunk)(chunk) for chunk in chunks
+                )
+                labels_list = [lbl for group in nested for lbl in group]
+            else:
+                labels_list = [self._get_labels(xyz) for _, _, xyz in to_compute]
+
+            for (idx, _, _), labels in zip(to_compute, labels_list):
+                precomp[idx] = labels
+
+        # ---------------------------------------------------------------
+        # Second pass: split fragments (sequential — needs next_id order)
+        # ---------------------------------------------------------------
+        for idx, p, xyz in needs_cc:
+            pc     = p.point_cloud
+            labels = precomp[idx]
+
             unique_labels, counts = np.unique(labels, return_counts=True)
             cluster_sizes = sorted(counts.tolist(), reverse=True)
             n_clusters = len(unique_labels)
 
-            # ---- split large vs. small fragments -------------------------
             kept, new_particles, next_id = _split_fragments(
                 p, labels, self.min_pc_size, next_id
             )
@@ -390,7 +453,7 @@ class DefragmentBase(ABC):
             rec = FragmentRecord(
                 particle_id   = p.id,
                 n_points      = len(pc),
-                early_exit    = exit_reason,
+                early_exit    = None,
                 n_clusters    = n_clusters,
                 cluster_sizes = cluster_sizes,
                 kept_pts      = kept_pts,
@@ -402,12 +465,30 @@ class DefragmentBase(ABC):
                 print(rec)
 
             if kept is not None:
-                result.append(kept)
+                result_slots[idx] = kept
+            # else: result_slots[idx] remains None → excluded from output
+
             spawned.extend(new_particles)
 
             if rec.fragmented:
                 n_fragmented    += 1
                 n_spawned_total += len(new_particles)
+
+        result = [p for p in result_slots if p is not None]
+
+        cc_sizes = [len(xyz) for _, _, xyz in needs_cc]
+        self.last_stats = {
+            'n_particles'   : len(particles),
+            'n_skipped'     : n_skipped,
+            'n_early_exit'  : n_early_exit,
+            'n_cc_checked'  : n_cc_checked,
+            'n_fragmented'  : n_fragmented,
+            'n_spawned'     : n_spawned_total,
+            'n_jobs'        : self.n_jobs,
+            'cc_pts_median' : int(np.median(cc_sizes)) if cc_sizes else 0,
+            'cc_pts_max'    : int(np.max(cc_sizes)) if cc_sizes else 0,
+            'cc_pts_total'  : int(np.sum(cc_sizes)) if cc_sizes else 0,
+        }
 
         if be_verbose:
             sem_label = (
@@ -520,6 +601,8 @@ class MergeDuplicatesProcessor:
         #: :meth:`process` call (only particles *with* duplicates are
         #: recorded, since duplicate-free particles carry no information).
         self.last_diagnostics: List[MergeRecord] = []
+        #: Summary counts from the most recent :meth:`process` call.
+        self.last_stats: dict = {}
 
     def process(self, particles: List[Particle],
                 verbose: Optional[bool] = None) -> List[Particle]:
@@ -543,21 +626,72 @@ class MergeDuplicatesProcessor:
         be_verbose = self.verbose if verbose is None else bool(verbose)
         self.last_diagnostics = []
 
-        n_total_before = 0
-        n_total_after  = 0
-        n_affected     = 0
+        n_affected = 0
 
-        for p in particles:
-            pc        = p.point_cloud
-            n_before  = len(pc)
-            merged    = _merge_point_cloud(pc)
-            n_after   = len(merged)
+        # --- batch: one np.unique call over all particles ----------------
+        all_pcs  = [p.point_cloud for p in particles]
+        lengths  = [len(pc) for pc in all_pcs]
+        total    = sum(lengths)
+        n_cols   = next((pc.shape[1] for pc in all_pcs if len(pc) > 0), None)
 
-            n_total_before += n_before
-            n_total_after  += n_after
+        if n_cols is None or total == 0:
+            self.last_stats = {'n_particles': len(particles), 'n_affected': 0,
+                               'pts_before': 0, 'pts_after': 0}
+            if be_verbose:
+                print(
+                    f"[merge_duplicates] {len(particles)} particles | "
+                    f"0 had duplicates | 0 points removed | 0 \u2192 0 total pts"
+                )
+            return particles
 
+        n_total_before = total
+        all_pts = np.concatenate(all_pcs)           # (total, n_cols)
+
+        # key: (float64-pid, x, y, z) — respects exact float equality for xyz
+        pids = np.repeat(np.arange(len(particles), dtype=np.float64), lengths)
+        keys = np.empty((total, 4), dtype=np.float64)
+        keys[:, 0]  = pids
+        keys[:, 1:] = all_pts[:, :3]
+
+        unique_keys, inv = np.unique(keys, axis=0, return_inverse=True)
+        n_out = len(unique_keys)
+
+        # Fast path: no duplicates at all — skip aggregation entirely
+        if n_out == total:
+            self.last_stats = {
+                'n_particles' : len(particles),
+                'n_affected'  : 0,
+                'pts_before'  : total,
+                'pts_after'   : total,
+            }
+            if be_verbose:
+                print(
+                    f"[merge_duplicates] {len(particles)} particles | "
+                    f"0 had duplicates | 0 points removed | "
+                    f"{total} \u2192 {total} total pts"
+                )
+            return particles
+
+        out = np.zeros((n_out, n_cols), dtype=all_pts.dtype)
+        out[:, :3] = unique_keys[:, 1:4].astype(all_pts.dtype)
+        for col, init_val, ufunc in _MERGE_RULES:
+            col = int(col)
+            if col >= n_cols:
+                continue
+            out[:, col] = init_val
+            ufunc.at(out[:, col], inv, all_pts[:, col])
+
+        # split back per particle — unique_keys is sorted so pid is monotone
+        pid_out    = unique_keys[:, 0].astype(np.int64)
+        boundaries = np.searchsorted(pid_out, np.arange(len(particles) + 1))
+        n_total_after = int(n_out)
+
+        for i, p in enumerate(particles):
+            start, end = int(boundaries[i]), int(boundaries[i + 1])
+            n_before = lengths[i]
+            n_after  = end - start
             if n_after < n_before:
-                p.point_cloud = merged
+                p.point_cloud = out[start:end]
                 n_affected   += 1
                 rec = MergeRecord(
                     particle_id = p.id,
@@ -567,6 +701,13 @@ class MergeDuplicatesProcessor:
                 self.last_diagnostics.append(rec)
                 if be_verbose:
                     print(rec)
+
+        self.last_stats = {
+            'n_particles'  : len(particles),
+            'n_affected'   : n_affected,
+            'pts_before'   : n_total_before,
+            'pts_after'    : n_total_after,
+        }
 
         if be_verbose:
             print(
@@ -646,6 +787,8 @@ def _voxelize_point_cloud(
         contains exactly one point.
     """
     coords = pc[:, :3]
+    if len(coords) == 0:
+        return pc   # nothing to voxelize
     org    = coords.min(axis=0) if origin is None else origin
 
     # Integer voxel indices for every point
@@ -684,6 +827,13 @@ class VoxelizeProcessor:
     When voxelization is enabled, running :class:`MergeDuplicatesProcessor`
     afterwards is redundant.
 
+    By setting ``merge_duplicates=True`` the voxelizer signals to the
+    :class:`~pysupera.config.Pipeline` that it already covers duplicate-
+    coordinate merging and the separate :class:`MergeDuplicatesProcessor`
+    step should be skipped.  This is always correct: two points that share
+    exactly the same ``(x, y, z)`` always fall into the same voxel cell,
+    so they are guaranteed to be collapsed by the voxelization pass.
+
     Voxel-centre positions
     ~~~~~~~~~~~~~~~~~~~~~~
     For a point at coordinate ``x`` the voxel index is::
@@ -713,6 +863,13 @@ class VoxelizeProcessor:
     verbose : bool, optional
         When ``True``, :meth:`process` prints one line per affected
         particle and an end-of-batch summary.  Default ``False``.
+    merge_duplicates : bool, optional
+        When ``True``, signals that this step also subsumes a preceding
+        :class:`MergeDuplicatesProcessor`.  The voxelization algorithm is
+        unchanged (exact-coordinate duplicates already land in the same
+        voxel). Setting this to ``True`` lets the
+        :class:`~pysupera.config.Pipeline` skip a redundant separate
+        merge-duplicates pass.  Default ``False``.
     """
 
     def __init__(
@@ -720,6 +877,7 @@ class VoxelizeProcessor:
         voxel_size: float | list,
         origin: list | None = None,
         verbose: bool = False,
+        merge_duplicates: bool = False,
     ) -> None:
         vs = np.asarray(voxel_size, dtype=float)
         if vs.ndim == 0:
@@ -745,9 +903,13 @@ class VoxelizeProcessor:
             self.origin = None
 
         self.verbose = bool(verbose)
+        #: When ``True`` the Pipeline skips the separate MergeDuplicatesProcessor.
+        self.merge_duplicates: bool = bool(merge_duplicates)
         #: :class:`VoxelizeRecord` list from the most recent :meth:`process`
         #: call.  Only particles that had at least one merge are recorded.
         self.last_diagnostics: List[VoxelizeRecord] = []
+        #: Summary counts from the most recent :meth:`process` call.
+        self.last_stats: dict = {}
 
     def process(
         self,
@@ -770,21 +932,79 @@ class VoxelizeProcessor:
         be_verbose = self.verbose if verbose is None else bool(verbose)
         self.last_diagnostics = []
 
-        n_total_before = 0
-        n_total_after  = 0
-        n_affected     = 0
+        n_affected = 0
 
-        for p in particles:
-            pc       = p.point_cloud
-            n_before = len(pc)
-            merged   = _voxelize_point_cloud(pc, self.voxel_size, self.origin)
-            n_after  = len(merged)
+        # --- batch: one np.unique call over all particles ----------------
+        all_pcs  = [p.point_cloud for p in particles]
+        lengths  = [len(pc) for pc in all_pcs]
+        total    = sum(lengths)
+        n_cols   = next((pc.shape[1] for pc in all_pcs if len(pc) > 0), None)
 
-            n_total_before += n_before
-            n_total_after  += n_after
+        if n_cols is None or total == 0:
+            self.last_stats = {'n_particles': len(particles), 'n_affected': 0,
+                               'pts_before': 0, 'pts_after': 0}
+            if be_verbose:
+                print(
+                    f"[voxelize] {len(particles)} particles | "
+                    f"0 affected | 0 points merged | 0 \u2192 0 total pts"
+                )
+            return particles
 
+        n_total_before = total
+        all_pts = np.concatenate(all_pcs)           # (total, n_cols)
+        coords  = all_pts[:, :3]
+
+        # Per-particle origins (preserves per-particle grid alignment)
+        if self.origin is None:
+            # compute per-particle min; empty particles get zeros
+            starts = np.cumsum([0] + lengths[:-1])
+            orgs   = np.array([
+                coords[s:s + l].min(axis=0) if l > 0 else np.zeros(3)
+                for s, l in zip(starts, lengths)
+            ])                                      # (n_parts, 3)
+        else:
+            orgs = np.broadcast_to(self.origin, (len(particles), 3))
+
+        # Per-point origin (replicated from particle)
+        pt_orgs  = np.repeat(orgs, lengths, axis=0)  # (total, 3)
+
+        # Integer voxel indices per point
+        vox_idx = np.floor(
+            (coords - pt_orgs) / self.voxel_size
+        ).astype(np.int64)                            # (total, 3)
+
+        # Key: (pid, vx, vy, vz) as int64
+        pids = np.repeat(np.arange(len(particles), dtype=np.int64), lengths)
+        keys = np.concatenate([pids[:, None], vox_idx], axis=1)  # (total, 4)
+
+        unique_keys, inv = np.unique(keys, axis=0, return_inverse=True)
+        n_out = len(unique_keys)
+
+        # Voxel-centre coordinates per output row
+        out_pid  = unique_keys[:, 0]                  # (n_out,)
+        out_orgs = orgs[out_pid]                      # (n_out, 3)
+        out = np.zeros((n_out, n_cols), dtype=all_pts.dtype)
+        out[:, :3] = (
+            (unique_keys[:, 1:4] + 0.5) * self.voxel_size + out_orgs
+        ).astype(all_pts.dtype)
+
+        for col, init_val, ufunc in _MERGE_RULES:
+            col = int(col)
+            if col >= n_cols:
+                continue
+            out[:, col] = init_val
+            ufunc.at(out[:, col], inv, all_pts[:, col])
+
+        # split back per particle — unique_keys sorted so pid is monotone
+        boundaries  = np.searchsorted(out_pid, np.arange(len(particles) + 1))
+        n_total_after = int(n_out)
+
+        for i, p in enumerate(particles):
+            start, end = int(boundaries[i]), int(boundaries[i + 1])
+            n_before = lengths[i]
+            n_after  = end - start
             if n_after < n_before:
-                p.point_cloud = merged
+                p.point_cloud = out[start:end]
                 n_affected   += 1
                 rec = VoxelizeRecord(
                     particle_id = p.id,
@@ -794,6 +1014,13 @@ class VoxelizeProcessor:
                 self.last_diagnostics.append(rec)
                 if be_verbose:
                     print(rec)
+
+        self.last_stats = {
+            'n_particles'  : len(particles),
+            'n_affected'   : n_affected,
+            'pts_before'   : n_total_before,
+            'pts_after'    : n_total_after,
+        }
 
         if be_verbose:
             print(
@@ -875,9 +1102,9 @@ class GPUDefragmenter(DefragmentBase):
 
     def __init__(self, distance_threshold: float, min_pc_size: int,
                  min_pts_for_gpu: int = 64, verbose: bool = False,
-                 sem_types=None):
+                 sem_types=None, n_jobs: int = 1):
         super().__init__(distance_threshold, min_pc_size, verbose=verbose,
-                         sem_types=sem_types)
+                         sem_types=sem_types, n_jobs=n_jobs)
         self.min_pts_for_gpu = int(min_pts_for_gpu)
         self._scipy = ScipyDefragmenter(distance_threshold, min_pc_size)
 
@@ -948,9 +1175,9 @@ class RAPIDSDefragmenter(DefragmentBase):
 
     def __init__(self, distance_threshold: float, min_pc_size: int,
                  min_pts_for_gpu: int = 64, verbose: bool = False,
-                 sem_types=None):
+                 sem_types=None, n_jobs: int = 1):
         super().__init__(distance_threshold, min_pc_size, verbose=verbose,
-                         sem_types=sem_types)
+                         sem_types=sem_types, n_jobs=n_jobs)
         self.min_pts_for_gpu = int(min_pts_for_gpu)
         self._scipy = ScipyDefragmenter(distance_threshold, min_pc_size)
 
