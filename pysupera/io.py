@@ -24,8 +24,9 @@ and slow variable-length heap allocations.
         pdg                (n_total_particles,)   int32
         parent_pdg         (n_total_particles,)   int32
         process_type       (n_total_particles,)   int32
-            Raw integer passed to SetSemanticType; sem_type is re-derived on
-            read so the stored value is always the ground-truth input.
+            Raw InteractionType integer value (1-based enum value).
+            sem_type is re-derived on read so the stored value is always
+            the ground-truth input.
         pc_offsets         (n_total_particles + 1,) int64
             particles/pc_offsets[j] : particles/pc_offsets[j+1]  — row slice
             into /points/flat that belongs to particle j.
@@ -96,8 +97,9 @@ def write_events(path: str,
     ``sem_type`` is **not** stored: it is deterministically derived from
     ``process_type``, ``pdg``, ``parent_pdg``, and ``point_cloud`` by
     :func:`~pysupera.utils.SetSemanticType` and is re-created on read.
-    Storing the raw ``process_type`` integer is both smaller and more
-    faithful to the simulation ground truth.
+    Storing the raw ``process_type`` integer (the 1-based
+    ``InteractionType`` enum value) is both smaller and more faithful to
+    the simulation ground truth.
 
     Examples
     --------
@@ -138,8 +140,8 @@ def write_events(path: str,
             p_root_id[j]     = p.root_id
             p_pdg[j]         = p.pdg
             p_parent_pdg[j]  = p.parent_pdg
-            # process_type is stored as raw int (0-based, as passed to
-            # SetSemanticType before the +1 inside that function).
+            # process_type is stored as the raw InteractionType integer value
+            # (1-based, same as the enum).
             p_proc_type[j]   = int(p._process_type)
             pc_offsets[j + 1] = pc_offsets[j] + len(p.point_cloud)
             j += 1
@@ -378,7 +380,6 @@ class EventWriter:
                 p_pdg[k]         = p.pdg
                 p_parent_pdg[k]  = p.parent_pdg
                 p_proc_type[k]   = int(p._process_type)
-                pc_lengths[k]    = len(p.point_cloud)
 
             self._f["particles/id"          ][new_p_start:new_p_end] = p_id
             self._f["particles/parent_id"   ][new_p_start:new_p_end] = p_parent_id

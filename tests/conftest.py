@@ -1,39 +1,40 @@
 """
 Shared fixtures and helpers for the pysupera test suite.
 
-process_type mapping (0-based raw int → InteractionType):
-  0  kTrack          → sem kTrack
-  1  kNeutron        → sem kLEScatter
-  2  kNucleus        → sem kTrack (large) / kLEScatter (small)
-  3  kPhoton         → sem kShower (pdg=11/22, large) / kLEScatter (small)
-  4  kPrimary        → sem kShower (pdg=11/22) / kTrack (other)
-  5  kCompton        → sem kShower (pdg=11/22, large) / kLEScatter (small)
-  6  kDelta          → sem kDelta (large) / kLEScatter (small)
-  7  kConversion     → sem kShower (pdg=11/22, large) / kLEScatter (small)
-  8  kIonization     → sem kLEScatter
-  9  kPhotoElectron  → sem kLEScatter
-  10 kDecay          → sem kMichel / kShower / kTrack
-  11 kOtherShower    → sem kShower (pdg=11/22, large) / kLEScatter (small)
-  12 kInvalidProcess → sem kUnknown
+process_type mapping (InteractionType enum → SemanticType):
+  kTrack          → sem kTrack
+  kNeutron        → sem kLEScatter
+  kNucleus        → sem kTrack (large) / kLEScatter (small)
+  kPhoton         → sem kShower (pdg=11/22, large) / kLEScatter (small)
+  kPrimary        → sem kShower (pdg=11/22) / kTrack (other)
+  kCompton        → sem kShower (pdg=11/22, large) / kLEScatter (small)
+  kDelta          → sem kDelta (large) / kLEScatter (small)
+  kConversion     → sem kShower (pdg=11/22, large) / kLEScatter (small)
+  kIonization     → sem kLEScatter
+  kPhotoElectron  → sem kLEScatter
+  kDecay          → sem kMichel / kShower / kTrack
+  kOtherShower    → sem kShower (pdg=11/22, large) / kLEScatter (small)
+  kInvalidProcess → sem kUnknown
 """
 import numpy as np
 import pytest
 from pysupera.data import Particle
+from pysupera.utils import InteractionType
 
-# ── Symbolic aliases for process_type raw ints ──────────────────────────────
-PT_TRACK        = 0
-PT_NEUTRON      = 1
-PT_NUCLEUS      = 2
-PT_PHOTON       = 3
-PT_PRIMARY      = 4
-PT_COMPTON      = 5
-PT_DELTA        = 6
-PT_CONVERSION   = 7
-PT_IONIZATION   = 8
-PT_PHOTO_ELEC   = 9
-PT_DECAY        = 10
-PT_OTHER_SHOWER = 11
-PT_INVALID      = 12
+# ── Symbolic aliases for process_type (InteractionType enum members) ────────
+PT_TRACK        = InteractionType.kTrack
+PT_NEUTRON      = InteractionType.kNeutron
+PT_NUCLEUS      = InteractionType.kNucleus
+PT_PHOTON       = InteractionType.kPhoton
+PT_PRIMARY      = InteractionType.kPrimary
+PT_COMPTON      = InteractionType.kCompton
+PT_DELTA        = InteractionType.kDelta
+PT_CONVERSION   = InteractionType.kConversion
+PT_IONIZATION   = InteractionType.kIonization
+PT_PHOTO_ELEC   = InteractionType.kPhotoElectron
+PT_DECAY        = InteractionType.kDecay
+PT_OTHER_SHOWER = InteractionType.kOtherShower
+PT_INVALID      = InteractionType.kInvalidProcess
 
 
 def make_particle(

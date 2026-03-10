@@ -5,11 +5,9 @@ class InteractionType(Enum):
     """
     Enumeration of the physics processes that can produce a simulation particle.
 
-    The integer value of each member is assigned automatically (1-based)
-    and corresponds to the ``process_type + 1`` convention used by the
-    upstream simulation output.  :func:`SetSemanticType` converts a raw
-    integer process code to an ``InteractionType`` via
-    ``InteractionType(process_type + 1)``.
+    The integer value of each member is assigned automatically (1-based).
+    :func:`SetSemanticType` converts a raw integer process code to an
+    ``InteractionType`` via ``InteractionType(process_type)``.
 
     Members
     -------

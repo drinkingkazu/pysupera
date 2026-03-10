@@ -175,7 +175,9 @@ class Particle:
         self.root_id    = root_id
         self.pdg        = pdg
         self.parent_pdg = parent_pdg
-        self._process_type = process_type  # raw int; retained for serialisation
+        self._process_type = (process_type.value
+                               if isinstance(process_type, InteractionType)
+                               else int(process_type))  # raw int; retained for serialisation
 
         if min_pc_size is None:
             min_pc_size = _DEFAULT_MIN_PC_SIZE
