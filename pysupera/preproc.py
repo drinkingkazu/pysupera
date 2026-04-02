@@ -204,7 +204,7 @@ def _split_fragments(
                 root_id  = p.root_id,
                 pdg          = p.pdg,
                 parent_pdg   = p.parent_pdg,
-                process_type = p._process_type,
+                interaction_type = p._interaction_type,
                 point_cloud  = frag_pc,
             )
             new_p.sem_type = SemanticType.kLEScatter
@@ -738,10 +738,32 @@ class VoxelizeRecord:
         Number of points before voxelization.
     n_after : int
         Number of voxels (points after merging).
+    input_ids : np.ndarray or None
+        Flat int64 array of length ``n_before`` holding the
+        ``PointFeature.id`` value of every input point, ordered so that
+        points belonging to the same output voxel are contiguous.  The
+        grouping boundaries are given by :attr:`voxel_offsets`.
+        ``None`` when :attr:`~VoxelizeProcessor.store_mapping` is
+        ``False``.
+    input_energies : np.ndarray or None
+        Flat float32 array of length ``n_before`` holding the energy of
+        each input point in the same order as :attr:`input_ids`.
+        ``None`` when ``store_mapping`` is ``False``.
+    voxel_offsets : np.ndarray or None
+        Fencepost (CSR) int64 array of length ``n_after + 1``.  For
+        output voxel ``v`` (0-based within this particle), the
+        contributing input points are::
+
+            input_ids[voxel_offsets[v] : voxel_offsets[v + 1]]
+
+        ``None`` when ``store_mapping`` is ``False``.
     """
-    particle_id : int
-    n_before    : int
-    n_after     : int
+    particle_id    : int
+    n_before       : int
+    n_after        : int
+    input_ids      : Optional[np.ndarray] = field(default=None, repr=False)
+    input_energies : Optional[np.ndarray] = field(default=None, repr=False)
+    voxel_offsets  : Optional[np.ndarray] = field(default=None, repr=False)
 
     @property
     def n_merged(self) -> int:
@@ -870,6 +892,13 @@ class VoxelizeProcessor:
         voxel). Setting this to ``True`` lets the
         :class:`~pysupera.config.Pipeline` skip a redundant separate
         merge-duplicates pass.  Default ``False``.
+    store_mapping : bool, optional
+        When ``True``, :meth:`process` stores a CSR mapping on every
+        :class:`VoxelizeRecord` in :attr:`last_diagnostics` (including
+        particles that were not affected by voxelization, which get an
+        identity mapping).  The mapping records, for each output voxel,
+        the ``PointFeature.id`` values and energy contributions of all
+        input points that were merged into it.  Default ``False``.
     """
 
     def __init__(
@@ -878,6 +907,7 @@ class VoxelizeProcessor:
         origin: list | None = None,
         verbose: bool = False,
         merge_duplicates: bool = False,
+        store_mapping: bool = False,
     ) -> None:
         vs = np.asarray(voxel_size, dtype=float)
         if vs.ndim == 0:
@@ -905,8 +935,18 @@ class VoxelizeProcessor:
         self.verbose = bool(verbose)
         #: When ``True`` the Pipeline skips the separate MergeDuplicatesProcessor.
         self.merge_duplicates: bool = bool(merge_duplicates)
+        #: When ``True``, :meth:`process` populates the CSR mapping fields
+        #: (:attr:`~VoxelizeRecord.input_ids`,
+        #: :attr:`~VoxelizeRecord.input_energies`,
+        #: :attr:`~VoxelizeRecord.voxel_offsets`) on every
+        #: :class:`VoxelizeRecord` in :attr:`last_diagnostics`, including
+        #: unaffected particles (identity mapping).  When ``False`` (default)
+        #: only affected particles are recorded and mapping fields are ``None``.
+        self.store_mapping: bool = bool(store_mapping)
         #: :class:`VoxelizeRecord` list from the most recent :meth:`process`
-        #: call.  Only particles that had at least one merge are recorded.
+        #: call.  When :attr:`store_mapping` is ``False``, only particles
+        #: that had at least one merge are included.  When ``True``, every
+        #: particle in the batch is recorded (including unaffected ones).
         self.last_diagnostics: List[VoxelizeRecord] = []
         #: Summary counts from the most recent :meth:`process` call.
         self.last_stats: dict = {}
@@ -999,20 +1039,73 @@ class VoxelizeProcessor:
         boundaries  = np.searchsorted(out_pid, np.arange(len(particles) + 1))
         n_total_after = int(n_out)
 
+        # Assign unique IDs to output voxels (stored in PointFeature.id column).
+        # Each voxel gets a 0-based index that is unique within this batch.
+        _id_col = int(PointFeature.id)
+        if n_cols > _id_col:
+            out[:, _id_col] = np.arange(n_out, dtype=all_pts.dtype)
+
+        # --- Pre-compute CSR mapping (used only when store_mapping=True) -----
+        # inv[k] = output-voxel index for input point k  (from np.unique above)
+        # We sort input points by their assigned output voxel so all points
+        # belonging to the same voxel are contiguous, then derive CSR offsets.
+        # This reuses the already-computed inv array at O(total log total).
+        if self.store_mapping:
+            sort_order   = np.argsort(inv, kind='stable')  # (total,)
+            sorted_vox   = inv[sort_order]                 # voxel indices, sorted
+            # Fencepost offsets over all n_out voxels
+            vox_off_all  = np.searchsorted(
+                sorted_vox, np.arange(n_out + 1)
+            ).astype(np.int64)                             # (n_out + 1,)
+            # Flat input IDs and energies in sorted-voxel order
+            _en_col = int(PointFeature.energy)
+            flat_ids = (
+                all_pts[sort_order, _id_col].astype(np.int64)
+                if n_cols > _id_col
+                else sort_order.astype(np.int64)
+            )
+            flat_en = (
+                all_pts[sort_order, _en_col].astype(np.float32)
+                if n_cols > _en_col
+                else np.zeros(total, dtype=np.float32)
+            )
+
         for i, p in enumerate(particles):
             start, end = int(boundaries[i]), int(boundaries[i + 1])
             n_before = lengths[i]
             n_after  = end - start
-            if n_after < n_before:
+            affected = n_after < n_before
+
+            if affected:
                 p.point_cloud = out[start:end]
                 n_affected   += 1
+            elif self.store_mapping:
+                # When tracking the mapping, all particles get updated so that
+                # p.point_cloud[:, PointFeature.id] reflects the new voxel IDs
+                # that are also stored in the mapping record.
+                p.point_cloud = out[start:end]
+
+            # Build VoxelizeRecord when affected OR when tracking the mapping.
+            if affected or self.store_mapping:
+                if self.store_mapping:
+                    inp_s    = int(vox_off_all[start])
+                    inp_e    = int(vox_off_all[end])
+                    p_off    = (vox_off_all[start:end + 1] - inp_s).astype(np.int64)
+                    p_ids    = flat_ids[inp_s:inp_e].copy()
+                    p_en     = flat_en[inp_s:inp_e].copy()
+                else:
+                    p_off = p_ids = p_en = None
+
                 rec = VoxelizeRecord(
-                    particle_id = p.id,
-                    n_before    = n_before,
-                    n_after     = n_after,
+                    particle_id    = p.id,
+                    n_before       = n_before,
+                    n_after        = n_after,
+                    input_ids      = p_ids,
+                    input_energies = p_en,
+                    voxel_offsets  = p_off,
                 )
                 self.last_diagnostics.append(rec)
-                if be_verbose:
+                if be_verbose and affected:
                     print(rec)
 
         self.last_stats = {

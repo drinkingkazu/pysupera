@@ -592,17 +592,25 @@ class GPUChecker(ProximityChecker):
     for the lifetime of the object.
 
     :meth:`batch_check_proximity` runs a vectorised bounding-box prefilter
-    across all candidate pairs in one GPU pass before falling through to
-    per-pair cuML queries, minimising the number of index lookups performed.
+    across all candidate pairs in one GPU pass.  Stage 2 then uses chunked
+    CuPy brute-force distance computation (not sequential cuML kneighbors
+    calls) to eliminate the per-pair kernel-launch overhead when many pairs
+    survive the bbox filter.
 
     Parameters
     ----------
     distance_threshold : float
         Proximity distance *D*.
+    chunk_size : int, optional
+        Number of rows of cloud_a to process per GPU kernel launch in the
+        Stage-2 exact check.  Larger values increase GPU utilisation but
+        require more working memory (``chunk_size * max_n_b * 12`` bytes).
+        Default 512.
     """
 
-    def __init__(self, distance_threshold: float):
+    def __init__(self, distance_threshold: float, chunk_size: int = 512):
         super().__init__(distance_threshold)
+        self.chunk_size = chunk_size
         self.gpu_clouds: dict = {}    # pid -> cp.ndarray (n, 3) float32
         self.nn_indices: dict = {}    # pid -> fitted NearestNeighbors model
         self.gpu_bb_min: dict = {}    # pid -> cp.ndarray (3,)
@@ -692,9 +700,10 @@ class GPUChecker(ProximityChecker):
         """
         Return all pairs from *candidate_pairs* whose clouds are within *D*.
 
-        Stage 1 vectorises all bounding-box comparisons in a single GPU pass
-        so that cuML queries are only issued for pairs whose bounding boxes
-        overlap within *D*.
+        Stage 1 vectorises all bounding-box comparisons in a single GPU pass.
+        Stage 2 uses chunked CuPy brute-force distance computation for the
+        survivors — one fused kernel per chunk rather than one cuML index
+        query per pair, eliminating the per-pair kernel-launch overhead.
 
         Parameters
         ----------
@@ -730,11 +739,20 @@ class GPUChecker(ProximityChecker):
             print(f"  GPUChecker Stage 1: bbox prefilter removed "
                   f"{n_rejected}/{len(candidate_pairs)} pairs")
 
-        # Stage 2: cuML kneighbors query for survivors
+        # Stage 2: chunked CuPy brute-force for survivors
+        # Avoids per-pair cuML kernel-launch overhead by using matrix ops.
         merge_pairs = []
         for id1, id2 in survivors:
-            distances, _ = self.nn_indices[id2].kneighbors(self.gpu_clouds[id1])
-            if float(cp.min(distances)) <= self.D:
+            a = self.gpu_clouds[id1]   # (n_a, 3) — already GPU-resident
+            b = self.gpu_clouds[id2]   # (n_b, 3) — already GPU-resident
+            touching = False
+            for start in range(0, len(a), self.chunk_size):
+                chunk = a[start : start + self.chunk_size]         # (c, 3)
+                diff  = chunk[:, cp.newaxis, :] - b[cp.newaxis, :, :]  # (c, n_b, 3)
+                if float(cp.min(cp.sum(diff * diff, axis=2))) <= self.D_squared:
+                    touching = True
+                    break
+            if touching:
                 merge_pairs.append((id1, id2))
 
         return merge_pairs

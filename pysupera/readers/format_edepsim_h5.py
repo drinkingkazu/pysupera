@@ -58,11 +58,16 @@ from ..utils import PointFeature
 # ---------------------------------------------------------------------------
 # The EDepSim HDF5 step datasets are structured arrays with named fields.
 # pysupera's Particle expects a plain float32 2-D point cloud with columns
-# ordered by PointFeature (x=0, y=1, z=2, time=3, energy=4, dedx=5).
+# ordered by PointFeature (x=0, y=1, z=2, time=3, energy=4, dedx=5, id=6).
 # This mapping is EDepSim-format-specific and lives here rather than in
 # Particle.from_flat_arrays so that the core data class stays format-agnostic.
+#
+# PointFeature.id (col 6) is NOT read from the HDF5 file — it is assigned
+# here as a global, event-wide, 0-based increasing integer so that every
+# input point can be uniquely identified across the entire event.
 
 # Maps PointFeature column → candidate HDF5 field name(s) to try, in order.
+# PointFeature.id is handled separately (generated, not read from file).
 _STEP_FIELD_MAP: list[tuple[int, tuple[str, ...]]] = [
     (PointFeature.x,      ("x",)),
     (PointFeature.y,      ("y",)),
@@ -78,9 +83,14 @@ def _steps_to_plain_array(steps: np.ndarray) -> np.ndarray:
     Convert a structured EDepSim step array to a plain float32 2-D array.
 
     The output columns follow :class:`~pysupera.utils.PointFeature` order:
-    ``x=0, y=1, z=2, time=3, energy=4, dedx=5``.  x, y, z are mandatory;
-    any optional field (time, energy, dedx) that is absent from the dtype
-    is left as zero in the output.
+    ``x=0, y=1, z=2, time=3, energy=4, dedx=5, id=6``.
+    x, y, z are mandatory; time, energy, dedx default to zero if absent.
+
+    Column 6 (``PointFeature.id``) is **not** read from the HDF5 file.
+    It is assigned here as a global, event-wide, 0-based integer
+    ``0, 1, 2, …, N-1`` so that every input step can be uniquely
+    identified across the whole event (the caller passes all steps for
+    one event at once).
 
     Parameters
     ----------
@@ -89,14 +99,26 @@ def _steps_to_plain_array(steps: np.ndarray) -> np.ndarray:
 
     Returns
     -------
-    numpy.ndarray, shape (N, 6), dtype float32
+    numpy.ndarray, shape (N, 7), dtype float32
     """
     if steps.dtype.names is None:
-        # Already a plain (non-structured) array — nothing to do.
-        return steps.astype(np.float32, copy=False)
+        # Already a plain (non-structured) array.
+        # Ensure it has at least 7 columns, padding with zeros if needed.
+        arr = steps.astype(np.float32, copy=False)
+        n_cols = arr.shape[1] if arr.ndim == 2 else 0
+        n_extra = max(0, 7 - n_cols)
+        if n_extra:
+            arr = np.concatenate(
+                [arr, np.zeros((len(arr), n_extra), dtype=np.float32)], axis=1
+            )
+        # Assign global point IDs if the id column is all-zero
+        if arr.shape[1] > PointFeature.id and (arr[:, PointFeature.id] == 0).all():
+            arr[:, PointFeature.id] = np.arange(len(arr), dtype=np.float32)
+        return arr
 
     n = len(steps)
-    out = np.zeros((n, len(_STEP_FIELD_MAP)), dtype=np.float32)
+    # 7 columns: the 6 from _STEP_FIELD_MAP plus PointFeature.id
+    out = np.zeros((n, 7), dtype=np.float32)
     available = set(steps.dtype.names)
 
     for col, candidates in _STEP_FIELD_MAP:
@@ -111,6 +133,9 @@ def _steps_to_plain_array(steps: np.ndarray) -> np.ndarray:
                     f"Tried {candidates}; available fields: {sorted(available)}"
                 )
             # optional columns default to zero — already set
+
+    # Assign global, event-wide, 0-based point IDs.
+    out[:, PointFeature.id] = np.arange(n, dtype=np.float32)
 
     return out
 
@@ -239,7 +264,7 @@ def _get_interaction_type(parts: np.ndarray,
     -------
     ndarray of int32, shape (N,)
         Raw ``InteractionType.value`` integers, ready to be passed as
-        ``process_types`` to :meth:`~pysupera.data.Particle.from_flat_arrays`.
+        ``interaction_types`` to :meth:`~pysupera.data.Particle.from_flat_arrays`.
     """
     from ..utils import InteractionType
 
@@ -434,7 +459,7 @@ class EDepSimHDF5Reader(EventReaderBase):
             root_ids             = parts["root_track_id"],
             pdgs                 = parts["pdg"],
             parent_pdgs          = _get_parent_pdg(parts),
-            process_types        = itype,
+            interaction_types    = itype,
             point_cloud_flat     = _steps_to_plain_array(steps),
             point_cloud_offsets  = offsets,
             min_pc_size          = self._min_pc_size,

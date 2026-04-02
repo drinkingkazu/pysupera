@@ -7,7 +7,7 @@ class InteractionType(Enum):
 
     The integer value of each member is assigned automatically (1-based).
     :func:`SetSemanticType` converts a raw integer process code to an
-    ``InteractionType`` via ``InteractionType(process_type)``.
+    ``InteractionType`` via ``InteractionType(interaction_type)``.
 
     Members
     -------
@@ -112,6 +112,8 @@ class PointFeature(int):
         Energy deposited at the hit.
     dedx : int = 5
         Ionisation energy loss (dE/dx) at the hit.
+    id : int = 6
+        (optional) integer hit ID, e.g. for matching to truth-level information.
     """
     x      = 0
     y      = 1
@@ -119,6 +121,7 @@ class PointFeature(int):
     time   = 3
     energy = 4
     dedx   = 5
+    id     = 6
 
     def __new__(cls, value):
         return int.__new__(cls, value)
@@ -252,7 +255,7 @@ def trace_ancestry(particle_id: int, particles, print_result: bool = True):
     return chain, children
 
 
-def SetSemanticType(process_type, pdg, parent_pdg, point_cloud, point_cloud_size=-1):
+def SetSemanticType(interaction_type, pdg, parent_pdg, point_cloud, point_cloud_size=-1):
     """
     Derive the :class:`SemanticType` of a particle from its physics properties.
 
@@ -273,9 +276,8 @@ def SetSemanticType(process_type, pdg, parent_pdg, point_cloud, point_cloud_size
 
     Parameters
     ----------
-    process_type : int
-        Raw integer process code (0-based).  Internally converted via
-        ``InteractionType(process_type + 1)``.
+    interaction_type : int or InteractionType
+        Raw integer process code or ``InteractionType`` enum member.
     pdg : int
         PDG Monte Carlo particle code for this particle.
     parent_pdg : int
@@ -298,35 +300,35 @@ def SetSemanticType(process_type, pdg, parent_pdg, point_cloud, point_cloud_size
     Raises
     ------
     Exception
-        If *process_type* maps to
+        If *interaction_type* maps to
         ``kPhoton`` / ``kConversion`` / ``kCompton`` / ``kOtherShower``
         but *pdg* is not ±11 or ±22, or if an entirely unrecognised
         ``InteractionType`` is encountered.
     """
- 
-    process_type = InteractionType(process_type)
-    if process_type == InteractionType.kInvalidProcess:
+    if not isinstance(interaction_type, InteractionType):
+        interaction_type = InteractionType(interaction_type)
+    if interaction_type == InteractionType.kInvalidProcess:
         return SemanticType.kUnknown
         raise Exception("'kInvalidProcess' particle process encountered\n")
-    elif process_type == InteractionType.kTrack:
+    elif interaction_type == InteractionType.kTrack:
         if point_cloud.shape[0] < point_cloud_size:
             return SemanticType.kLEScatter
         else:
             return SemanticType.kTrack
         
-    elif process_type == InteractionType.kPrimary:
+    elif interaction_type == InteractionType.kPrimary:
         if abs(pdg) != 11 and abs(pdg) != 22:
             return SemanticType.kTrack
         else:
             return SemanticType.kShower
         
-    elif process_type == InteractionType.kDelta:
+    elif interaction_type == InteractionType.kDelta:
         if point_cloud.shape[0] < point_cloud_size:
             return SemanticType.kLEScatter
         else:
             return SemanticType.kDelta
         
-    elif process_type == InteractionType.kDecay:
+    elif interaction_type == InteractionType.kDecay:
         if abs(pdg) == 11 and abs(parent_pdg) == 13:
             return SemanticType.kMichel
         elif abs(pdg) in [11,22]:
@@ -334,22 +336,22 @@ def SetSemanticType(process_type, pdg, parent_pdg, point_cloud, point_cloud_size
         else:
             return SemanticType.kTrack
         
-    elif process_type in [InteractionType.kNeutron, InteractionType.kIonization, InteractionType.kPhotoElectron]:
+    elif interaction_type in [InteractionType.kNeutron, InteractionType.kIonization, InteractionType.kPhotoElectron]:
         return SemanticType.kLEScatter
         
-    elif process_type in [InteractionType.kPhoton, InteractionType.kConversion, InteractionType.kCompton, InteractionType.kOtherShower]:
+    elif interaction_type in [InteractionType.kPhoton, InteractionType.kConversion, InteractionType.kCompton, InteractionType.kOtherShower]:
         if abs(pdg) in [11,22]:
             if point_cloud.shape[0] > point_cloud_size:
                 return SemanticType.kShower
             else:
                 return SemanticType.kLEScatter
         else:
-            raise Exception("kPhoton/kConversion/kCompton/kOtherShower encountered but PDG ("+str(pdg)+") not 11/22, InteractionType ("+str(process_type)+")\n")
-    elif process_type == InteractionType.kNucleus:
+            raise Exception("kPhoton/kConversion/kCompton/kOtherShower encountered but PDG ("+str(pdg)+") not 11/22, InteractionType ("+str(interaction_type)+")\n")
+    elif interaction_type == InteractionType.kNucleus:
         if point_cloud.shape[0] > point_cloud_size:
             return SemanticType.kTrack
         else:
             return SemanticType.kLEScatter
         
     else:
-        raise Exception("Unexpected interaction type ("+str(process_type)+") encountered")
+        raise Exception("Unexpected interaction type ("+str(interaction_type)+") encountered")

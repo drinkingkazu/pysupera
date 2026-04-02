@@ -249,6 +249,7 @@ def build_voxelizer(cfg: DictConfig, verbose: bool = False):
         origin           = origin,
         verbose          = verbose,
         merge_duplicates = bool(vox_cfg.get('merge_duplicates', False)),
+        store_mapping    = bool(vox_cfg.get('store_mapping',    False)),
     )
 
 
@@ -317,7 +318,7 @@ def build_checker(cfg: DictConfig):
 
     if name == "gpu":
         from pysupera.proxck import GPUChecker
-        return GPUChecker(D)
+        return GPUChecker(D, chunk_size=int(cfg.checker.get("chunk_size", 512)))
 
     if name == "bulk-gpu":
         from pysupera.proxck import BulkGPUChecker
@@ -498,6 +499,8 @@ def load_cfg(overrides: list[str] | None = None,
     overrides : list of str, optional
         Hydra override strings, e.g.
         ``["checker=bulk_gpu", "distance_threshold=4.0"]``.
+        Checker names may use hyphens or underscores interchangeably
+        (``"checker=bulk-gpu"`` and ``"checker=bulk_gpu"`` are equivalent).
     config_path : str, optional
         Path to the ``conf/`` directory **relative to this file's location**.
         Default is ``"conf"`` (the ``conf/`` directory that lives inside the
@@ -525,8 +528,56 @@ def load_cfg(overrides: list[str] | None = None,
         os.path.join(os.path.dirname(__file__), config_path)
     )
 
+    # --- Normalise overrides ------------------------------------------------
+    # 1. checker=<name>  : convert hyphens → underscores in the value so that
+    #                      e.g. "bulk-gpu" resolves to bulk_gpu.yaml.
+    # 2. checker.<key>=  : pull these OUT of the Hydra compose call and apply
+    #                      them directly via OmegaConf after composition.
+    #                      Hydra's struct-mode handling of config-group sub-keys
+    #                      is brittle across versions (MissingConfigException /
+    #                      ConfigCompositionException depending on whether the
+    #                      key already exists and which sigil is used).
+    #                      Setting them on the live DictConfig is simpler and
+    #                      completely version-agnostic.
+    _hydra_overrides:   list[str]        = []
+    _checker_subkeys:   dict[str, str]   = {}   # key → raw string value
+
+    for ov in (overrides or []):
+        bare = ov.lstrip("+~")
+        if bare.startswith("checker="):
+            prefix = ov[: len(ov) - len(bare)]
+            val    = bare[len("checker="):]
+            _hydra_overrides.append(f"{prefix}checker={val.replace('-', '_')}")
+        elif bare.startswith("checker.") and "=" in bare:
+            rest = bare[len("checker."):]
+            key, _, val = rest.partition("=")
+            _checker_subkeys[key] = val
+        else:
+            _hydra_overrides.append(ov)
+
+    # Hydra keeps a process-wide singleton; clear it so repeated calls inside
+    # a notebook kernel always get a fresh composition.
+    from hydra.core.global_hydra import GlobalHydra
+    GlobalHydra.instance().clear()
+
     with initialize_config_dir(config_dir=abs_conf, version_base=None):
-        cfg = compose(config_name, overrides=overrides or [])
+        cfg = compose(config_name, overrides=_hydra_overrides)
+
+    # Apply checker sub-key overrides directly, bypassing struct-mode checks.
+    if _checker_subkeys:
+        from omegaconf import OmegaConf
+        OmegaConf.set_struct(cfg.checker, False)
+        for k, raw in _checker_subkeys.items():
+            # Coerce to int or float when possible so callers get numeric types.
+            try:
+                v: object = int(raw)
+            except ValueError:
+                try:
+                    v = float(raw)
+                except ValueError:
+                    v = raw
+            OmegaConf.update(cfg.checker, k, v, merge=True)
+        OmegaConf.set_struct(cfg.checker, True)
 
     configure(cfg)
     _cfg_override_keys[id(cfg)] = _parse_override_keys(overrides or [])

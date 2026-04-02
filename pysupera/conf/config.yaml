@@ -57,6 +57,10 @@ particle:
     # When true, skips the separate merge_duplicates preprocessing step.
     # Safe because exact-coordinate duplicates always fall in the same voxel.
     merge_duplicates: false
+    # When true, VoxelizeProcessor stores a CSR mapping (input_ids,
+    # input_energies, voxel_offsets) for every particle in last_diagnostics,
+    # enabling traces from output voxels back to input points.
+    store_mapping: false
 
   # Pre-processing: collapse points sharing identical 3-D coordinates.
   # Aggregation rules: time=min, energy=sum, dedx=max.

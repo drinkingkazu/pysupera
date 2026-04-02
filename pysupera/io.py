@@ -23,10 +23,11 @@ and slow variable-length heap allocations.
         root_id            (n_total_particles,)   int32
         pdg                (n_total_particles,)   int32
         parent_pdg         (n_total_particles,)   int32
-        process_type       (n_total_particles,)   int32
+        interaction_type   (n_total_particles,)   int32
             Raw InteractionType integer value (1-based enum value).
-            sem_type is re-derived on read so the stored value is always
-            the ground-truth input.
+        sem_type           (n_total_particles,)   int8
+            SemanticType integer value stored for fast filtered reads
+            without re-deriving at load time.
         pc_offsets         (n_total_particles + 1,) int64
             particles/pc_offsets[j] : particles/pc_offsets[j+1]  — row slice
             into /points/flat that belongs to particle j.
@@ -51,10 +52,11 @@ cached in RAM after the file is opened.
 
 from __future__ import annotations
 
+import os
 import numpy as np
 from typing import List, Optional
 
-FORMAT_VERSION = "1.0.0"
+FORMAT_VERSION = "2.0.0"
 
 # Chunk sizes for compressed HDF5 datasets.
 # Tuned for typical event sizes; adjust if your events are significantly
@@ -94,12 +96,11 @@ def write_events(path: str,
 
     Notes
     -----
-    ``sem_type`` is **not** stored: it is deterministically derived from
-    ``process_type``, ``pdg``, ``parent_pdg``, and ``point_cloud`` by
-    :func:`~pysupera.utils.SetSemanticType` and is re-created on read.
-    Storing the raw ``process_type`` integer (the 1-based
-    ``InteractionType`` enum value) is both smaller and more faithful to
-    the simulation ground truth.
+    Both ``interaction_type`` (raw ``InteractionType`` int32) and
+    ``sem_type`` (``SemanticType`` int8) are stored.  ``sem_type`` is
+    written directly from the in-memory value so filtered reads do not
+    need to re-derive it; ``interaction_type`` is the ground-truth
+    physics process integer (1-based enum value).
 
     Examples
     --------
@@ -127,7 +128,8 @@ def write_events(path: str,
     p_root_id     = np.empty(n_total_particles, dtype=np.int32)
     p_pdg         = np.empty(n_total_particles, dtype=np.int32)
     p_parent_pdg  = np.empty(n_total_particles, dtype=np.int32)
-    p_proc_type   = np.empty(n_total_particles, dtype=np.int32)
+    p_itype       = np.empty(n_total_particles, dtype=np.int32)
+    p_sem_type    = np.empty(n_total_particles, dtype=np.int8)
 
     # Particle → point offsets  (fencepost: n_total_particles + 1 entries)
     pc_offsets = np.zeros(n_total_particles + 1, dtype=np.int64)
@@ -140,9 +142,8 @@ def write_events(path: str,
             p_root_id[j]     = p.root_id
             p_pdg[j]         = p.pdg
             p_parent_pdg[j]  = p.parent_pdg
-            # process_type is stored as the raw InteractionType integer value
-            # (1-based, same as the enum).
-            p_proc_type[j]   = int(p._process_type)
+            p_itype[j]       = int(p._interaction_type)
+            p_sem_type[j]    = int(p.sem_type.value)
             pc_offsets[j + 1] = pc_offsets[j] + len(p.point_cloud)
             j += 1
 
@@ -177,16 +178,22 @@ def write_events(path: str,
             **ckw,
         )
         if n_total_particles > 0:
-            _mk("id",           p_id)
-            _mk("parent_id",    p_parent_id)
-            _mk("root_id",      p_root_id)
-            _mk("pdg",          p_pdg)
-            _mk("parent_pdg",   p_parent_pdg)
-            _mk("process_type", p_proc_type)
+            _mk("id",               p_id)
+            _mk("parent_id",        p_parent_id)
+            _mk("root_id",          p_root_id)
+            _mk("pdg",              p_pdg)
+            _mk("parent_pdg",       p_parent_pdg)
+            _mk("interaction_type", p_itype)
+            pg.create_dataset(
+                "sem_type", data=p_sem_type,
+                chunks=(min(_CHUNK_PARTICLES, max(1, n_total_particles)),),
+                **ckw,
+            )
         else:
             for name in ("id", "parent_id", "root_id",
-                         "pdg", "parent_pdg", "process_type"):
+                         "pdg", "parent_pdg", "interaction_type"):
                 pg.create_dataset(name, data=np.empty(0, dtype=np.int32))
+            pg.create_dataset("sem_type", data=np.empty(0, dtype=np.int8))
         pg.create_dataset("pc_offsets", data=pc_offsets)
 
         # Flat point cloud
@@ -279,9 +286,10 @@ class EventWriter:
             w.append_event(more_particles)
     """
 
-    # Names of the six particle scalar fields in order
+    # Names of the six int32 particle scalar fields (sem_type handled separately
+    # because it uses dtype=int8)
     _SCALAR_FIELDS = (
-        "id", "parent_id", "root_id", "pdg", "parent_pdg", "process_type"
+        "id", "parent_id", "root_id", "pdg", "parent_pdg", "interaction_type"
     )
 
     def __init__(self, path: str, mode: str = "w",
@@ -363,6 +371,7 @@ class EventWriter:
             for name in self._SCALAR_FIELDS:
                 ds = self._f[f"particles/{name}"]
                 ds.resize(new_p_end, axis=0)
+            self._f["particles/sem_type"].resize(new_p_end, axis=0)
 
             # Build scalar arrays for this event
             p_id          = np.empty(n_p, dtype=np.int32)
@@ -370,7 +379,8 @@ class EventWriter:
             p_root_id     = np.empty(n_p, dtype=np.int32)
             p_pdg         = np.empty(n_p, dtype=np.int32)
             p_parent_pdg  = np.empty(n_p, dtype=np.int32)
-            p_proc_type   = np.empty(n_p, dtype=np.int32)
+            p_itype       = np.empty(n_p, dtype=np.int32)
+            p_sem_type    = np.empty(n_p, dtype=np.int8)
             pc_lengths    = np.empty(n_p, dtype=np.int64)
 
             for k, p in enumerate(particles):
@@ -379,14 +389,17 @@ class EventWriter:
                 p_root_id[k]     = p.root_id
                 p_pdg[k]         = p.pdg
                 p_parent_pdg[k]  = p.parent_pdg
-                p_proc_type[k]   = int(p._process_type)
+                p_itype[k]       = int(p._interaction_type)
+                p_sem_type[k]    = int(p.sem_type.value)
+                pc_lengths[k]    = len(p.point_cloud)
 
-            self._f["particles/id"          ][new_p_start:new_p_end] = p_id
-            self._f["particles/parent_id"   ][new_p_start:new_p_end] = p_parent_id
-            self._f["particles/root_id"     ][new_p_start:new_p_end] = p_root_id
-            self._f["particles/pdg"         ][new_p_start:new_p_end] = p_pdg
-            self._f["particles/parent_pdg"  ][new_p_start:new_p_end] = p_parent_pdg
-            self._f["particles/process_type"][new_p_start:new_p_end] = p_proc_type
+            self._f["particles/id"               ][new_p_start:new_p_end] = p_id
+            self._f["particles/parent_id"        ][new_p_start:new_p_end] = p_parent_id
+            self._f["particles/root_id"          ][new_p_start:new_p_end] = p_root_id
+            self._f["particles/pdg"              ][new_p_start:new_p_end] = p_pdg
+            self._f["particles/parent_pdg"       ][new_p_start:new_p_end] = p_parent_pdg
+            self._f["particles/interaction_type" ][new_p_start:new_p_end] = p_itype
+            self._f["particles/sem_type"         ][new_p_start:new_p_end] = p_sem_type
 
             # ---- extend pc_offsets (n_particles+1 entries total) ----------
             pc_ds = self._f["particles/pc_offsets"]
@@ -449,7 +462,7 @@ class EventWriter:
             chunks=(_CHUNK_PARTICLES,),
         )
 
-        # particle scalar datasets — start empty
+        # particle scalar datasets — start empty (int32)
         pg = f.create_group("particles")
         for name in self._SCALAR_FIELDS:
             pg.create_dataset(
@@ -458,6 +471,13 @@ class EventWriter:
                 chunks=(_CHUNK_PARTICLES,),
                 **ckw,
             )
+        # sem_type — int8
+        pg.create_dataset(
+            "sem_type",
+            shape=(0,), maxshape=(None,), dtype=np.int8,
+            chunks=(_CHUNK_PARTICLES,),
+            **ckw,
+        )
         # pc_offsets — single fencepost 0
         pg.create_dataset(
             "pc_offsets",
@@ -585,13 +605,14 @@ class EventStore:
         if n_parts == 0:
             return []
 
-        # ---- read scalar metadata in 6 contiguous array slices ------------
-        ids          = self._f["particles/id"          ][p_start:p_end]
-        parent_ids   = self._f["particles/parent_id"   ][p_start:p_end]
-        root_ids     = self._f["particles/root_id"     ][p_start:p_end]
-        pdgs         = self._f["particles/pdg"         ][p_start:p_end]
-        parent_pdgs  = self._f["particles/parent_pdg"  ][p_start:p_end]
-        proc_types   = self._f["particles/process_type"][p_start:p_end]
+        # ---- read scalar metadata in 7 contiguous array slices ------------
+        ids          = self._f["particles/id"               ][p_start:p_end]
+        parent_ids   = self._f["particles/parent_id"        ][p_start:p_end]
+        root_ids     = self._f["particles/root_id"          ][p_start:p_end]
+        pdgs         = self._f["particles/pdg"              ][p_start:p_end]
+        parent_pdgs  = self._f["particles/parent_pdg"       ][p_start:p_end]
+        itypes       = self._f["particles/interaction_type" ][p_start:p_end]
+        sem_types    = self._f["particles/sem_type"         ][p_start:p_end]
 
         # ---- read point-cloud data in one contiguous slice ----------------
         pc_bounds = self._pc_offsets[p_start : p_end + 1]  # (n_parts+1,)
@@ -600,19 +621,23 @@ class EventStore:
         flat_chunk = self._f["points/flat"][pt_start:pt_end]  # (n_pts, _PC_NDIM)
 
         # ---- reconstruct Particle objects ----------------------------------
+        from .utils import SemanticType
         local_offsets = pc_bounds - pt_start  # zero-indexed within flat_chunk
         particles = []
         for k in range(n_parts):
             cloud = flat_chunk[local_offsets[k] : local_offsets[k + 1]]
             p = Particle(
-                id           = int(ids[k]),
-                parent_id    = int(parent_ids[k]),
-                root_id      = int(root_ids[k]),
-                pdg          = int(pdgs[k]),
-                parent_pdg   = int(parent_pdgs[k]),
-                process_type = int(proc_types[k]),
-                point_cloud  = cloud,
+                id               = int(ids[k]),
+                parent_id        = int(parent_ids[k]),
+                root_id          = int(root_ids[k]),
+                pdg              = int(pdgs[k]),
+                parent_pdg       = int(parent_pdgs[k]),
+                interaction_type = int(itypes[k]),
+                point_cloud      = cloud,
             )
+            # Override the re-derived sem_type with the stored value so that
+            # the on-disk label is authoritative (avoids re-running rules).
+            p.sem_type = SemanticType(int(sem_types[k]))
             particles.append(p)
 
         return particles
@@ -709,3 +734,479 @@ def _compress_kwargs(compression: Optional[str],
     if compression_opts is not None:
         kwargs["compression_opts"] = compression_opts
     return kwargs
+
+
+# ---------------------------------------------------------------------------
+# Voxelization-mapping companion file
+# ---------------------------------------------------------------------------
+
+def voxmap_path(main_path: str) -> str:
+    """
+    Return the companion voxmap file path for *main_path*.
+
+    The companion file is written alongside the main HDF5 file with
+    ``_voxmap`` inserted before the extension::
+
+        "run042.h5" → "run042_voxmap.h5"
+
+    Parameters
+    ----------
+    main_path : str
+        Path to the main particle event file.
+    """
+    stem, ext = os.path.splitext(main_path)
+    return f"{stem}_voxmap{ext}"
+
+
+def write_voxmap(main_path: str,
+                 events_voxmaps,
+                 compression: str = "lz4",
+                 compression_opts: Optional[int] = None) -> str:
+    """
+    Write a companion voxelization-mapping file alongside *main_path*.
+
+    The companion is a three-level CSR file that encodes, for every
+    voxel in every particle in every event, which input point IDs were
+    merged into that voxel and their individual energy contributions.
+
+    File layout
+    -----------
+    .. code-block:: text
+
+        /format_version                   scalar str
+        /n_events                         scalar int64
+
+        /events/
+            offsets        (n_events + 1,)              int64
+                Fencepost into the particle index space.
+
+        /particles/
+            vox_offsets    (n_total_particles + 1,)     int64
+                Fencepost into the voxel index space.
+
+        /voxels/
+            input_offsets  (n_total_voxels + 1,)        int64
+                Fencepost into /flat/*.
+
+        /flat/
+            input_ids      (n_total_mappings,)           int64
+            input_energies (n_total_mappings,)           float32
+
+    Parameters
+    ----------
+    main_path : str
+        Path to the main particle event HDF5 file.  The companion is
+        created at :func:`voxmap_path(main_path) <voxmap_path>`.
+    events_voxmaps : list of list of VoxelizeRecord
+        Outer list indexed by event; inner list is the
+        :class:`~pysupera.preproc.VoxelizeRecord` for each particle.
+        Records must appear in the same particle order as in *main_path*.
+    compression : str, optional
+        Same as :func:`write_events`.
+    compression_opts : int or None, optional
+        Same as :func:`write_events`.
+
+    Returns
+    -------
+    str
+        Path of the companion file that was written.
+    """
+    import h5py
+    ckw  = _compress_kwargs(compression, compression_opts)
+    vpath = voxmap_path(main_path)
+
+    n_events = len(events_voxmaps)
+
+    # Event → particle fencepost
+    ev_offsets = np.zeros(n_events + 1, dtype=np.int64)
+    for i, ev_recs in enumerate(events_voxmaps):
+        ev_offsets[i + 1] = ev_offsets[i] + len(ev_recs)
+    n_total_particles = int(ev_offsets[-1])
+
+    # Build particle/voxel/flat CSR arrays in one pass
+    # particles/vox_offsets : fencepost, length n_total_particles + 1
+    vox_offsets      = np.zeros(n_total_particles + 1, dtype=np.int64)
+    # voxels/input_offsets collected as list (variable total voxels)
+    vox_input_segs   = []   # one entry per particle: rec.voxel_offsets[1:] shifted
+    flat_ids_segs    = []
+    flat_eng_segs    = []
+
+    p_idx         = 0
+    running_vox   = np.int64(0)
+    running_flat  = np.int64(0)
+
+    for ev_recs in events_voxmaps:
+        for rec in ev_recs:
+            n_vox = np.int64(len(rec.voxel_offsets) - 1)
+            vox_offsets[p_idx + 1] = running_vox + n_vox
+
+            # Shift this particle's per-voxel fencepost values by running_flat
+            vox_input_segs.append(
+                rec.voxel_offsets[1:].astype(np.int64) + running_flat
+            )
+
+            flat_ids_segs.append(rec.input_ids.astype(np.int64))
+            flat_eng_segs.append(rec.input_energies.astype(np.float32))
+
+            running_flat += np.int64(len(rec.input_ids))
+            running_vox  += n_vox
+            p_idx        += 1
+
+    n_total_voxels   = int(running_vox)
+    n_total_mappings = int(running_flat)
+
+    # Assemble voxels/input_offsets: starts with 0, then all shifted segments
+    if vox_input_segs:
+        vox_input_offsets = np.concatenate(
+            [np.zeros(1, dtype=np.int64)] + vox_input_segs
+        )
+    else:
+        vox_input_offsets = np.zeros(1, dtype=np.int64)
+
+    flat_ids      = np.concatenate(flat_ids_segs)   if flat_ids_segs   else np.empty(0, dtype=np.int64)
+    flat_energies = np.concatenate(flat_eng_segs)   if flat_eng_segs   else np.empty(0, dtype=np.float32)
+
+    # Write
+    _cp = lambda n, size: (min(_CHUNK_PARTICLES, max(1, size)),)
+    _cp2 = lambda size: (min(_CHUNK_POINTS, max(1, size)),)
+
+    with h5py.File(vpath, "w") as f:
+        f.create_dataset("format_version", data=FORMAT_VERSION)
+        f.create_dataset("n_events",       data=np.int64(n_events))
+
+        eg = f.create_group("events")
+        eg.create_dataset("offsets", data=ev_offsets)
+
+        pg = f.create_group("particles")
+        pg.create_dataset(
+            "vox_offsets", data=vox_offsets,
+            chunks=_cp("vox", n_total_particles + 1),
+        )
+
+        vg = f.create_group("voxels")
+        vg.create_dataset(
+            "input_offsets", data=vox_input_offsets,
+            chunks=_cp("inp", len(vox_input_offsets)),
+        )
+
+        fg = f.create_group("flat")
+        if n_total_mappings > 0:
+            fg.create_dataset(
+                "input_ids", data=flat_ids,
+                chunks=_cp2(n_total_mappings),
+                **ckw,
+            )
+            fg.create_dataset(
+                "input_energies", data=flat_energies,
+                chunks=_cp2(n_total_mappings),
+                **ckw,
+            )
+        else:
+            fg.create_dataset("input_ids",      data=np.empty(0, dtype=np.int64))
+            fg.create_dataset("input_energies", data=np.empty(0, dtype=np.float32))
+
+    return vpath
+
+
+def open_voxmap_writer(main_path: str,
+                       compression: str = "lz4",
+                       compression_opts: Optional[int] = None) -> "VoxmapWriter":
+    """
+    Open a :class:`VoxmapWriter` for incremental voxmap writing.
+
+    Parameters
+    ----------
+    main_path : str
+        Path of the *main* particle event file.  The companion is
+        written at :func:`voxmap_path(main_path) <voxmap_path>`.
+
+    Returns
+    -------
+    VoxmapWriter
+    """
+    return VoxmapWriter(main_path, compression=compression,
+                        compression_opts=compression_opts)
+
+
+def read_voxmap(main_path: str) -> "VoxmapStore":
+    """
+    Open the companion voxmap file for *main_path*.
+
+    Parameters
+    ----------
+    main_path : str
+        Path of the main particle event file.
+
+    Returns
+    -------
+    VoxmapStore
+    """
+    return VoxmapStore(main_path)
+
+
+# ---------------------------------------------------------------------------
+# VoxmapWriter
+# ---------------------------------------------------------------------------
+
+class VoxmapWriter:
+    """
+    Incremental writer for the companion voxelization-mapping file.
+
+    Mirrors :class:`EventWriter`: append one event's worth of
+    :class:`~pysupera.preproc.VoxelizeRecord` objects per call.
+
+    Parameters
+    ----------
+    main_path : str
+        Path of the main particle event HDF5 file.  The companion is
+        created at :func:`voxmap_path(main_path) <voxmap_path>`.
+    compression : str, optional
+        HDF5 filter name.  Same options as :func:`write_events`.
+    compression_opts : int or None, optional
+        Same as :func:`write_events`.
+    """
+
+    def __init__(self, main_path: str,
+                 compression: str = "lz4",
+                 compression_opts: Optional[int] = None) -> None:
+        import h5py
+        self._ckw   = _compress_kwargs(compression, compression_opts)
+        self._vpath = voxmap_path(main_path)
+
+        self._f = h5py.File(self._vpath, "w")
+        self._n_events    = 0
+        self._n_particles = 0
+        self._n_voxels    = 0
+        self._n_flat      = 0
+        self._init_datasets()
+
+    # ------------------------------------------------------------------ CM --
+
+    def __enter__(self) -> "VoxmapWriter":
+        return self
+
+    def __exit__(self, *_) -> None:
+        self.close()
+
+    def close(self) -> None:
+        """Finalise and close the companion file.  Idempotent."""
+        if self._f.id.valid:
+            self._f["n_events"][()] = np.int64(self._n_events)
+            self._f.close()
+
+    # ------------------------------------------------------------------ API --
+
+    def append_event(self, vox_records) -> None:
+        """
+        Append one event's voxelization records.
+
+        Parameters
+        ----------
+        vox_records : list of VoxelizeRecord
+            One record per particle in the event, in the same order as
+            the corresponding :meth:`EventWriter.append_event` call.
+            May be empty.
+        """
+        n_p  = len(vox_records)
+        n_vox_total  = sum(len(r.voxel_offsets) - 1 for r in vox_records)
+        n_flat_total = sum(len(r.input_ids)         for r in vox_records)
+
+        # Extend events/offsets
+        ev_ds = self._f["events/offsets"]
+        ev_ds.resize(self._n_events + 2, axis=0)
+        ev_ds[self._n_events + 1] = np.int64(self._n_particles + n_p)
+
+        if n_p > 0:
+            new_p_start  = self._n_particles
+            new_p_end    = self._n_particles + n_p
+            new_vox_end  = self._n_voxels  + n_vox_total
+            new_flat_end = self._n_flat    + n_flat_total
+
+            # particles/vox_offsets
+            vox_off_ds = self._f["particles/vox_offsets"]
+            vox_off_ds.resize(new_p_end + 1, axis=0)
+
+            # voxels/input_offsets
+            vox_inp_ds = self._f["voxels/input_offsets"]
+            vox_inp_ds.resize(new_vox_end + 1, axis=0)
+
+            # flat datasets
+            flat_ids_ds = self._f["flat/input_ids"]
+            flat_eng_ds = self._f["flat/input_energies"]
+            flat_ids_ds.resize(new_flat_end, axis=0)
+            flat_eng_ds.resize(new_flat_end, axis=0)
+
+            running_vox  = np.int64(self._n_voxels)
+            running_flat = np.int64(self._n_flat)
+
+            for k, rec in enumerate(vox_records):
+                n_vox = np.int64(len(rec.voxel_offsets) - 1)
+                p_abs = new_p_start + k
+                vox_off_ds[p_abs + 1] = running_vox + n_vox
+
+                # per-voxel fencepost into flat
+                vox_inp_ds[running_vox + 1 : running_vox + 1 + n_vox] = (
+                    rec.voxel_offsets[1:].astype(np.int64) + running_flat
+                )
+
+                n_flat = np.int64(len(rec.input_ids))
+                flat_ids_ds[running_flat : running_flat + n_flat] = rec.input_ids.astype(np.int64)
+                flat_eng_ds[running_flat : running_flat + n_flat] = rec.input_energies.astype(np.float32)
+
+                running_flat += n_flat
+                running_vox  += n_vox
+
+        self._n_events    += 1
+        self._n_particles += n_p
+        self._n_voxels    += n_vox_total
+        self._n_flat      += n_flat_total
+
+    @property
+    def n_events(self) -> int:
+        return self._n_events
+
+    def __repr__(self) -> str:
+        status = "open" if self._f.id.valid else "closed"
+        return (f"VoxmapWriter(path={self._vpath!r}, "
+                f"n_events={self._n_events}, {status})")
+
+    # ---------------------------------------------------------- private -----
+
+    def _init_datasets(self) -> None:
+        f   = self._f
+        ckw = self._ckw
+
+        f.create_dataset("format_version", data=FORMAT_VERSION)
+        f.create_dataset("n_events",       data=np.int64(0))
+
+        eg = f.create_group("events")
+        eg.create_dataset("offsets", data=np.zeros(1, dtype=np.int64),
+                          maxshape=(None,), chunks=(_CHUNK_PARTICLES,))
+
+        pg = f.create_group("particles")
+        pg.create_dataset("vox_offsets", data=np.zeros(1, dtype=np.int64),
+                          maxshape=(None,), chunks=(_CHUNK_PARTICLES,))
+
+        vg = f.create_group("voxels")
+        vg.create_dataset("input_offsets", data=np.zeros(1, dtype=np.int64),
+                          maxshape=(None,), chunks=(_CHUNK_PARTICLES,))
+
+        fg = f.create_group("flat")
+        fg.create_dataset("input_ids",
+                          shape=(0,), maxshape=(None,), dtype=np.int64,
+                          chunks=(_CHUNK_POINTS,), **ckw)
+        fg.create_dataset("input_energies",
+                          shape=(0,), maxshape=(None,), dtype=np.float32,
+                          chunks=(_CHUNK_POINTS,), **ckw)
+
+
+# ---------------------------------------------------------------------------
+# VoxmapStore
+# ---------------------------------------------------------------------------
+
+class VoxmapStore:
+    """
+    Random-access reader for a companion voxmap file.
+
+    Supports ``len()`` and ``store[i]`` (returns per-particle mapping
+    data for event *i*).
+
+    Parameters
+    ----------
+    main_path : str
+        Path to the main particle event HDF5 file.
+    """
+
+    def __init__(self, main_path: str) -> None:
+        import h5py
+        self._vpath = voxmap_path(main_path)
+        self._f = h5py.File(self._vpath, "r")
+        self._n_events: int = int(self._f["n_events"][()])
+
+        self._ev_offsets  = self._f["events/offsets"][:]
+        self._vox_offsets = self._f["particles/vox_offsets"][:]
+        # voxels/input_offsets is potentially large — load lazily
+        # (accessed via HDF5 slice in __getitem__)
+
+    def __enter__(self) -> "VoxmapStore":
+        return self
+
+    def __exit__(self, *_) -> None:
+        self.close()
+
+    def close(self) -> None:
+        if self._f.id.valid:
+            self._f.close()
+
+    def __len__(self) -> int:
+        return self._n_events
+
+    def __getitem__(self, index: int):
+        """
+        Return per-particle mapping data for event *index*.
+
+        Returns
+        -------
+        list of dict
+            One dict per particle with keys:
+
+            ``"vox_input_offsets"`` : np.ndarray, int64, shape (n_vox+1,)
+                Per-voxel fencepost into the flat arrays (zero-indexed
+                within this particle — i.e. shifted to start from 0).
+            ``"input_ids"`` : np.ndarray, int64, shape (n_total_inputs,)
+                Input point IDs for all voxels of this particle.
+            ``"input_energies"`` : np.ndarray, float32, shape (n_total_inputs,)
+                Energy contributions corresponding to each input_id.
+        """
+        if index < 0 or index >= self._n_events:
+            raise IndexError(
+                f"Event index {index} out of range [0, {self._n_events})"
+            )
+
+        p_start = int(self._ev_offsets[index])
+        p_end   = int(self._ev_offsets[index + 1])
+        n_parts = p_end - p_start
+
+        if n_parts == 0:
+            return []
+
+        vox_start = int(self._vox_offsets[p_start])
+        vox_end   = int(self._vox_offsets[p_end])
+        n_voxels  = vox_end - vox_start
+
+        vox_input_bounds = self._f["voxels/input_offsets"][vox_start : vox_end + 1]
+        flat_start = int(vox_input_bounds[0])
+        flat_end   = int(vox_input_bounds[-1])
+
+        all_ids = self._f["flat/input_ids"     ][flat_start:flat_end]
+        all_eng = self._f["flat/input_energies"][flat_start:flat_end]
+
+        result = []
+        for k in range(n_parts):
+            v_start = int(self._vox_offsets[p_start + k])     - vox_start
+            v_end   = int(self._vox_offsets[p_start + k + 1]) - vox_start
+            # local fencepost into all_ids/all_eng (zero-indexed)
+            local_vox_offsets = vox_input_bounds[v_start : v_end + 1] - flat_start
+            f_s = int(local_vox_offsets[0])
+            f_e = int(local_vox_offsets[-1])
+            result.append({
+                "vox_input_offsets": local_vox_offsets - f_s,
+                "input_ids":         all_ids[f_s:f_e],
+                "input_energies":    all_eng[f_s:f_e],
+            })
+
+        return result
+
+    def iter_events(self):
+        """Iterate over all events in file order."""
+        for i in range(self._n_events):
+            yield self[i]
+
+    @property
+    def n_events(self) -> int:
+        return self._n_events
+
+    def __repr__(self) -> str:
+        status = "open" if self._f.id.valid else "closed"
+        return (f"VoxmapStore(path={self._vpath!r}, "
+                f"n_events={self._n_events}, {status})")

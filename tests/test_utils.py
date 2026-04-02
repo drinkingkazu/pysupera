@@ -110,7 +110,7 @@ class TestTraceAncestry:
 class TestSetSemanticTypeEdgeCases:
     def test_with_zero_size_point_cloud(self):
         # Empty cloud with default point_cloud_size=-1: 0 < -1 is False → kDelta
-        st = SetSemanticType(process_type=PT_DELTA, pdg=11, parent_pdg=0,
+        st = SetSemanticType(interaction_type=PT_DELTA, pdg=11, parent_pdg=0,
                              point_cloud=np.zeros((0, 3)))
         assert st == SemanticType.kDelta
 
@@ -118,7 +118,7 @@ class TestSetSemanticTypeEdgeCases:
         # When point_cloud=None, should either use point_cloud_size or raise
         # At minimum it should not silently return a wrong type
         try:
-            st = SetSemanticType(process_type=PT_TRACK, pdg=13, parent_pdg=0,
+            st = SetSemanticType(interaction_type=PT_TRACK, pdg=13, parent_pdg=0,
                                   point_cloud=None)
             # kTrack is always kTrack regardless of cloud size
             assert st == SemanticType.kTrack
@@ -129,13 +129,13 @@ class TestSetSemanticTypeEdgeCases:
         # Explicit point_cloud_size overrides actual array length
         # kDelta with explicit large size → kDelta not kLEScatter
         large_pc = np.ones((100, 3), dtype=np.float32)
-        st = SetSemanticType(process_type=PT_DELTA, pdg=11, parent_pdg=0,
+        st = SetSemanticType(interaction_type=PT_DELTA, pdg=11, parent_pdg=0,
                              point_cloud=large_pc, point_cloud_size=100)
         assert st == SemanticType.kDelta
 
     def test_small_cloud_explicit_size_override(self):
         # kDelta: cloud size (2) < point_cloud_size (100) → kLEScatter
         small_pc = np.ones((2, 3), dtype=np.float32)
-        st = SetSemanticType(process_type=PT_DELTA, pdg=11, parent_pdg=0,
+        st = SetSemanticType(interaction_type=PT_DELTA, pdg=11, parent_pdg=0,
                              point_cloud=small_pc, point_cloud_size=100)
         assert st == SemanticType.kLEScatter

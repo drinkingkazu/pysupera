@@ -66,13 +66,13 @@ class Particle:
     parent_pdg : int
         PDG code of the direct parent particle.
     sem_type : SemanticType
-        High-level semantic category derived from *process_type*, *pdg*,
+        High-level semantic category derived from *interaction_type*, *pdg*,
         *parent_pdg*, and *point_cloud* by
         :func:`~pysupera.utils.SetSemanticType`.
-    process_type : InteractionType
+    interaction_type : InteractionType
         Physics process that created this particle, expressed as an
         :class:`~pysupera.utils.InteractionType` member.  Derived from
-        the raw integer stored in ``_process_type``.
+        the raw integer stored in ``_interaction_type``.
     point_cloud : numpy.ndarray, shape (N, ≥3)
         3-D spatial hits; columns 0–2 are x, y, z.  Additional columns
         (time, energy, dE/dx, …) may be present.
@@ -117,7 +117,7 @@ class Particle:
         root_id,
         pdg,
         parent_pdg,
-        process_type,
+        interaction_type,
         point_cloud,
         min_pc_size=None,
         # ------------------------------------------------------------------
@@ -153,9 +153,9 @@ class Particle:
             PDG Monte Carlo particle code.
         parent_pdg : int
             PDG code of the parent particle.
-        process_type : int
+        interaction_type : int
             Raw integer encoding of the interaction process (stored as
-            ``_process_type``).  The public ``process_type`` property
+            ``_interaction_type``).  The public ``interaction_type`` property
             returns the corresponding :class:`~pysupera.utils.InteractionType`
             member.
         point_cloud : numpy.ndarray, shape (N, ≥3)
@@ -175,15 +175,15 @@ class Particle:
         self.root_id    = root_id
         self.pdg        = pdg
         self.parent_pdg = parent_pdg
-        self._process_type = (process_type.value
-                               if isinstance(process_type, InteractionType)
-                               else int(process_type))  # raw int; retained for serialisation
+        self._interaction_type = (interaction_type.value
+                                    if isinstance(interaction_type, InteractionType)
+                                    else int(interaction_type))  # raw int; retained for serialisation
 
         if min_pc_size is None:
             min_pc_size = _DEFAULT_MIN_PC_SIZE
 
         self.sem_type   = SetSemanticType(
-            process_type, pdg, parent_pdg, point_cloud,
+            interaction_type, pdg, parent_pdg, point_cloud,
             point_cloud_size=min_pc_size,
         )
         self.point_cloud = point_cloud
@@ -223,15 +223,15 @@ class Particle:
                       if value is not None else None)
 
     @property
-    def process_type(self) -> "InteractionType":
+    def interaction_type(self) -> "InteractionType":
         """
         :class:`~pysupera.utils.InteractionType` member corresponding to
-        the raw integer stored in ``_process_type``.
+        the raw integer stored in ``_interaction_type``.
 
-        Read-only; modify by setting ``_process_type`` directly if needed.
+        Read-only; modify by setting ``_interaction_type`` directly if needed.
         """
         try:
-            return InteractionType(int(self._process_type))
+            return InteractionType(int(self._interaction_type))
         except ValueError:
             return InteractionType.kInvalidProcess
 
@@ -247,7 +247,7 @@ class Particle:
         root_ids,
         pdgs,
         parent_pdgs,
-        process_types,
+        interaction_types,
         point_clouds,
         min_pc_size=None,
     ):
@@ -271,7 +271,7 @@ class Particle:
             PDG Monte Carlo codes.
         parent_pdgs : array-like of int, shape (N,)
             PDG codes of direct parents.
-        process_types : array-like of int, shape (N,)
+        interaction_types : array-like of int, shape (N,)
             Raw interaction process codes forwarded to
             :func:`~pysupera.utils.SetSemanticType`.
         point_clouds : sequence of numpy.ndarray, length N
@@ -303,30 +303,30 @@ class Particle:
         ...     root_ids=[0, 0],
         ...     pdgs=[11, 22],
         ...     parent_pdgs=[0, 11],
-        ...     process_types=[0, 7],
+        ...     interaction_types=[0, 7],
         ...     point_clouds=pcs,
         ... )
         >>> len(particles)
         2
         """
-        ids           = list(ids)
-        parent_ids    = list(parent_ids)
-        root_ids  = list(root_ids)
-        pdgs          = list(pdgs)
-        parent_pdgs   = list(parent_pdgs)
-        process_types = list(process_types)
-        point_clouds  = list(point_clouds)
+        ids               = list(ids)
+        parent_ids        = list(parent_ids)
+        root_ids          = list(root_ids)
+        pdgs              = list(pdgs)
+        parent_pdgs       = list(parent_pdgs)
+        interaction_types = list(interaction_types)
+        point_clouds      = list(point_clouds)
 
         n = len(ids)
         if not all(len(a) == n for a in (parent_ids, root_ids, pdgs,
-                                          parent_pdgs, process_types,
+                                          parent_pdgs, interaction_types,
                                           point_clouds)):
             raise ValueError(
                 "All input arrays must have the same length. "
                 f"Got lengths: ids={len(ids)}, parent_ids={len(parent_ids)}, "
                 f"root_ids={len(root_ids)}, pdgs={len(pdgs)}, "
                 f"parent_pdgs={len(parent_pdgs)}, "
-                f"process_types={len(process_types)}, "
+                f"interaction_types={len(interaction_types)}, "
                 f"point_clouds={len(point_clouds)}."
             )
 
@@ -337,7 +337,7 @@ class Particle:
                 root_id=root_ids[i],
                 pdg=pdgs[i],
                 parent_pdg=parent_pdgs[i],
-                process_type=process_types[i],
+                interaction_type=interaction_types[i],
                 point_cloud=point_clouds[i],
                 min_pc_size=min_pc_size,
             )
@@ -352,7 +352,7 @@ class Particle:
         root_ids,
         pdgs,
         parent_pdgs,
-        process_types,
+        interaction_types,
         point_cloud_flat,
         point_cloud_offsets,
         min_pc_size=None,
@@ -378,7 +378,7 @@ class Particle:
             PDG Monte Carlo codes.
         parent_pdgs : array-like of int, shape (N,)
             PDG codes of direct parents.
-        process_types : array-like of int, shape (N,)
+        interaction_types : array-like of int, shape (N,)
             Raw interaction process codes forwarded to
             :func:`~pysupera.utils.SetSemanticType`.
         point_cloud_flat : numpy.ndarray, shape (M, ≥3)
@@ -424,7 +424,7 @@ class Particle:
         ...     root_ids=[0, 0],
         ...     pdgs=[11, 22],
         ...     parent_pdgs=[0, 11],
-        ...     process_types=[0, 7],
+        ...     interaction_types=[0, 7],
         ...     point_cloud_flat=flat,
         ...     point_cloud_offsets=offsets,
         ... )
@@ -433,13 +433,13 @@ class Particle:
         >>> particles[0].point_cloud.shape
         (10, 4)
         """
-        ids           = list(ids)
-        parent_ids    = list(parent_ids)
-        root_ids      = list(root_ids)
-        pdgs          = list(pdgs)
-        parent_pdgs   = list(parent_pdgs)
-        process_types = list(process_types)
-        offsets       = np.asarray(point_cloud_offsets)
+        ids               = list(ids)
+        parent_ids        = list(parent_ids)
+        root_ids          = list(root_ids)
+        pdgs              = list(pdgs)
+        parent_pdgs       = list(parent_pdgs)
+        interaction_types = list(interaction_types)
+        offsets           = np.asarray(point_cloud_offsets)
 
         n = len(ids)
 
@@ -449,13 +449,13 @@ class Particle:
                 f"got {offsets.shape}."
             )
         if not all(len(a) == n for a in (parent_ids, root_ids, pdgs,
-                                          parent_pdgs, process_types)):
+                                          parent_pdgs, interaction_types)):
             raise ValueError(
                 "All scalar arrays must have the same length. "
                 f"Got lengths: ids={len(ids)}, parent_ids={len(parent_ids)}, "
                 f"root_ids={len(root_ids)}, pdgs={len(pdgs)}, "
                 f"parent_pdgs={len(parent_pdgs)}, "
-                f"process_types={len(process_types)}."
+                f"interaction_types={len(interaction_types)}."
             )
         if offsets.shape[0] != n:
             raise ValueError(
@@ -478,7 +478,7 @@ class Particle:
                 root_id=root_ids[i],
                 pdg=pdgs[i],
                 parent_pdg=parent_pdgs[i],
-                process_type=process_types[i],
+                interaction_type=interaction_types[i],
                 point_cloud=flat[offsets[i, 0] : offsets[i, 1]],
                 min_pc_size=min_pc_size,
             )
@@ -493,7 +493,7 @@ class Particle:
             f"root_id={self.root_id}",
             f"  pdg={self.pdg}, parent_pdg={self.parent_pdg}, "
             f"root_pdg={self.root_pdg}",
-            f"  sem_type={self.sem_type}, process_type={self.process_type}",
+            f"  sem_type={self.sem_type}, interaction_type={self.interaction_type}",
             f"  point_cloud: shape={self.point_cloud.shape}",
         ]
         if self.start is not None:

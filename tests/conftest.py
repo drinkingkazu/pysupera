@@ -1,7 +1,7 @@
 """
 Shared fixtures and helpers for the pysupera test suite.
 
-process_type mapping (InteractionType enum → SemanticType):
+interaction_type mapping (InteractionType enum → SemanticType):
   kTrack          → sem kTrack
   kNeutron        → sem kLEScatter
   kNucleus        → sem kTrack (large) / kLEScatter (small)
@@ -21,7 +21,7 @@ import pytest
 from pysupera.data import Particle
 from pysupera.utils import InteractionType
 
-# ── Symbolic aliases for process_type (InteractionType enum members) ────────
+# ── Symbolic aliases for interaction_type (InteractionType enum members) ───────
 PT_TRACK        = InteractionType.kTrack
 PT_NEUTRON      = InteractionType.kNeutron
 PT_NUCLEUS      = InteractionType.kNucleus
@@ -39,7 +39,7 @@ PT_INVALID      = InteractionType.kInvalidProcess
 
 def make_particle(
     pid: int,
-    process_type: int,
+    interaction_type: int,
     pdg: int = 11,
     parent_pdg: int = 0,
     parent_id: int | None = None,
@@ -58,13 +58,13 @@ def make_particle(
         xyz += np.array(offset, dtype=np.float32)
         pc = xyz
     return Particle(
-        id           = pid,
-        parent_id    = parent_id,
-        root_id      = root_id,
-        pdg          = pdg,
-        parent_pdg   = parent_pdg,
-        process_type = process_type,
-        point_cloud  = pc,
+        id               = pid,
+        parent_id        = parent_id,
+        root_id          = root_id,
+        pdg              = pdg,
+        parent_pdg       = parent_pdg,
+        interaction_type = interaction_type,
+        point_cloud      = pc,
     )
 
 
