@@ -77,6 +77,7 @@ class ParticlePartitioner:
                  n_jobs: int = -1,
                  enable_diagnostics: bool = False,
                  check_completeness: bool = False,
+                 verbose: bool = True,
                  **kwargs):
         
         if check_completeness:
@@ -102,6 +103,7 @@ class ParticlePartitioner:
         
         # Initialize backend
         self.checker = self._create_backend(backend, n_jobs, **kwargs)
+        self.checker._verbose = verbose
         self.checker.initialize(particles)
 
     def _build_relationships(self):
@@ -682,7 +684,11 @@ class ParticlePartitioner:
             partitions_dict[root].append(p)
 
         # In the legacy (non-incremental) path no point clouds are merged, so
-        # each original particle is its own representative.
+        # each original particle is its own representative.  Stamp member_ids
+        # as a singleton list so downstream lookups (_frag_lookup / _inst_lookup)
+        # can always use the member_ids branch rather than the id-fallback.
+        for p in self.particles:
+            p.member_ids = [p.id]
         self.rep_lookup = {p.id: p for p in self.particles}
 
         return list(partitions_dict.values())
@@ -1007,6 +1013,11 @@ class ParticlePartitioner:
             if len(rep._cloud_parts) > 1:
                 rep.point_cloud = np.concatenate(rep._cloud_parts, axis=0)
                 rep._cloud_parts = [rep.point_cloud]
+
+        # Stamp member_ids on every surviving representative so callers can
+        # trace back which original preprocessed particle IDs were absorbed.
+        for rep in reps.values():
+            rep.member_ids = list(rep_members[id(rep)])
 
         # Persist rep_lookup so callers can retrieve the representative
         # Particle for any original particle ID via get_representative().

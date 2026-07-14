@@ -2,6 +2,7 @@ from typing import Dict, List, Tuple, TYPE_CHECKING
 
 from .base import PartitionConditionBase
 from ..diagnostics import MergeOutcome
+from ..utils import SemanticType
 
 if TYPE_CHECKING:
     from ..partitioner import ParticlePartitioner
@@ -76,10 +77,13 @@ class TouchingEMShower(PartitionConditionBase):
         Iterates the current unique partition representatives and emits
         ``(child_rep_id, parent_rep_id)`` whenever:
 
-        * the child representative has PDG code 11 or 22,
+        * the child representative has PDG code 11 or 22 **and** is not
+          ``kLEScatter`` (to avoid pulling kLEScatter particles into EM showers),
         * the original parent of that child exists in *rep_lookup*
           (i.e. the parent particle belongs to some live partition),
-        * the parent representative also has PDG code 11 or 22, and
+        * the parent representative also has PDG code 11 or 22 **and** is not
+          ``kLEScatter`` (kLEScatter reps must not become shower parents —
+          ``AbsorbLEScatter`` is responsible for handling them),
         * child and parent representatives share the same ``root_id``.
 
         Because *rep_lookup* is updated after every merge, this method
@@ -98,10 +102,17 @@ class TouchingEMShower(PartitionConditionBase):
             ``(child_rep_id, parent_rep_id)`` — child merges INTO parent.
         """
         target_pdgs = {11, 22}
+        _le_type = SemanticType.kLEScatter
         candidates = []
 
         for rep in self.unique_reps(rep_lookup):
             if rep.pdg not in target_pdgs:
+                continue
+            # kLEScatter reps must never be absorbed here — they are
+            # handled by AbsorbLEScatter.  If a kLEScatter particle has
+            # PDG 11/22 it could otherwise become the surviving parent and
+            # silently steal non-LE shower particles into a kLEScatter rep.
+            if rep.sem_type == _le_type:
                 continue
             if rep.parent_id not in rep_lookup:
                 # Original parent not in any live partition
@@ -110,6 +121,9 @@ class TouchingEMShower(PartitionConditionBase):
             if parent_rep.id == rep.id:
                 continue  # already same partition
             if parent_rep.pdg not in target_pdgs:
+                continue
+            if parent_rep.sem_type == _le_type:
+                # kLEScatter rep must not absorb non-LE children
                 continue
             if rep.root_id != parent_rep.root_id:
                 continue

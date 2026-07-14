@@ -45,6 +45,7 @@ Usage
 
 from __future__ import annotations
 
+import warnings
 import numpy as np
 from enum import IntEnum
 
@@ -58,7 +59,7 @@ from ..utils import PointFeature
 # ---------------------------------------------------------------------------
 # The EDepSim HDF5 step datasets are structured arrays with named fields.
 # pysupera's Particle expects a plain float32 2-D point cloud with columns
-# ordered by PointFeature (x=0, y=1, z=2, time=3, energy=4, dedx=5, id=6).
+# ordered by PointFeature (x=0, y=1, z=2, time=3, energy=4, dx=5, id=6).
 # This mapping is EDepSim-format-specific and lives here rather than in
 # Particle.from_flat_arrays so that the core data class stays format-agnostic.
 #
@@ -68,13 +69,14 @@ from ..utils import PointFeature
 
 # Maps PointFeature column → candidate HDF5 field name(s) to try, in order.
 # PointFeature.id is handled separately (generated, not read from file).
+_warned_cols: set[int] = set()   # columns for which a missing-field warning has already been shown
 _STEP_FIELD_MAP: list[tuple[int, tuple[str, ...]]] = [
     (PointFeature.x,      ("x",)),
     (PointFeature.y,      ("y",)),
     (PointFeature.z,      ("z",)),
     (PointFeature.time,   ("t", "time")),
-    (PointFeature.energy, ("energy", "e")),
-    (PointFeature.dedx,   ("dedx", "dEdx", "dE_dx")),
+    (PointFeature.energy, ("energy", "e", "de")),
+    (PointFeature.dx,     ("dx")),
 ]
 
 
@@ -83,8 +85,8 @@ def _steps_to_plain_array(steps: np.ndarray) -> np.ndarray:
     Convert a structured EDepSim step array to a plain float32 2-D array.
 
     The output columns follow :class:`~pysupera.utils.PointFeature` order:
-    ``x=0, y=1, z=2, time=3, energy=4, dedx=5, id=6``.
-    x, y, z are mandatory; time, energy, dedx default to zero if absent.
+    ``x=0, y=1, z=2, time=3, energy=4, dx=5, id=6``.
+    x, y, z are mandatory; time, energy, dx default to zero if absent.
 
     Column 6 (``PointFeature.id``) is **not** read from the HDF5 file.
     It is assigned here as a global, event-wide, 0-based integer
@@ -133,6 +135,19 @@ def _steps_to_plain_array(steps: np.ndarray) -> np.ndarray:
                     f"Tried {candidates}; available fields: {sorted(available)}"
                 )
             # optional columns default to zero — already set
+            if col not in _warned_cols:
+                _warned_cols.add(col)
+                col_name = next(
+                    name for name, val in PointFeature.__dict__.items()
+                    if isinstance(val, int) and val == col
+                )
+                warnings.warn(
+                    f"EDepSim step array has no field for '{col_name}' "
+                    f"(tried {candidates}); available fields: {sorted(available)}. "
+                    f"Column {col} will be zero.",
+                    UserWarning,
+                    stacklevel=2,
+                )
 
     # Assign global, event-wide, 0-based point IDs.
     out[:, PointFeature.id] = np.arange(n, dtype=np.float32)
@@ -180,7 +195,7 @@ class G4ProcessSubtype(IntEnum):
 # ---------------------------------------------------------------------------
 # Default HDF5 dataset keys
 # ---------------------------------------------------------------------------
-
+_DEFAULT_VERTEX_KEY   = "vertex/geant4"
 _DEFAULT_PARTICLE_KEY = "particle/geant4"
 _DEFAULT_STEP_KEY     = "pstep/lar_vol"
 _DEFAULT_ASS_KEY      = "ass/particle_pstep_lar_vol"
@@ -237,6 +252,57 @@ def _get_parent_pdg(parts: np.ndarray) -> np.ndarray:
     parent_valid = parent_locs != -1
     parent_zfill = np.where(parent_valid, parent_locs, 0)
     return np.where(parent_valid, parts["pdg"][parent_zfill], 0)
+
+
+def _get_interaction_id(parts: np.ndarray, verts: np.ndarray) -> np.ndarray:
+    """
+    Look up the interaction ID of every particle
+
+    Returns -1 for particles whose root particle is not found or the root particle does not match with any vertex in "verts"
+
+    Parameters
+    ----------
+    parts : structured ndarray
+        Must contain fields ``x``, ``y``, ``z``, ``t``, ``track_id``, and either
+        ``root_track_id`` or ``ancestor_track_id``.
+    verts : structured ndarray
+        Must contain fields ``x``, ``y``, ``z``, ``t``, ``interaction_id``.
+
+    Returns
+    -------
+    ndarray of int, shape (N,)
+    """
+
+    interaction_ids = np.full(len(parts), -1, dtype=np.int32)
+
+    # Resolve the root-ancestor field name (two conventions exist).
+    _root_field = 'root_track_id' if 'root_track_id' in parts.dtype.names else 'ancestor_track_id'
+
+    # Step 0: loop over root particles and match to one of vertices by (x,y,z,t) proximity.
+    root_indices = np.where(parts['track_id'] == parts[_root_field])[0]
+    root_ids = parts['track_id'][root_indices]
+
+    for index in root_indices:
+        p = parts[index]
+        for vtx in verts:
+            if np.isclose(p['x'], vtx['x'], atol=1e-4) and \
+               np.isclose(p['y'], vtx['y'], atol=1e-4) and \
+               np.isclose(p['z'], vtx['z'], atol=1e-4) and \
+               np.isclose(p['t'], vtx['t'], atol=1e-4):
+                # Match found, do something
+                interaction_ids[index] = vtx['interaction_id']
+                break
+
+    # Step 1: for non-root particles, assign the same interaction ID as their root particle.
+    for i in range(len(parts)):
+        p = parts[i]
+        if p['track_id'] == p[_root_field]:
+            continue
+
+        root_index = root_indices[np.where(p[_root_field] == root_ids)[0][0]]
+        interaction_ids[i] = interaction_ids[root_index]
+
+    return interaction_ids
 
 
 def _get_interaction_type(parts: np.ndarray,
@@ -384,7 +450,7 @@ class EDepSimHDF5Reader(EventReaderBase):
         with EDepSimHDF5Reader("out_0100.h5") as reader:
             print(len(reader), "events")
             particles = reader[0]
-            for particles in reader:
+            for particles in reader:from_flat_arrays
                 ...
     """
 
@@ -392,6 +458,7 @@ class EDepSimHDF5Reader(EventReaderBase):
         self,
         path: str,
         *,
+        vertex_key:   str = _DEFAULT_VERTEX_KEY,
         particle_key: str = _DEFAULT_PARTICLE_KEY,
         step_key: str     = _DEFAULT_STEP_KEY,
         ass_key: str      = _DEFAULT_ASS_KEY,
@@ -400,6 +467,7 @@ class EDepSimHDF5Reader(EventReaderBase):
     ) -> None:
         import h5py
         self._path        = path
+        self._vertex_key  = vertex_key
         self._part_key    = particle_key
         self._step_key    = step_key
         self._ass_key     = ass_key
@@ -442,23 +510,28 @@ class EDepSimHDF5Reader(EventReaderBase):
         if index < 0:
             index += n
 
+        verts = self._file[self._vertex_key][index]
         parts = self._file[self._part_key][index]
         steps = self._file[self._step_key][index]
         ass   = self._file[self._ass_key][index]
 
         num_parts = len(parts)
         itype     = _get_interaction_type(parts, self._e_thresh)
+        int_ids   = _get_interaction_id(parts,verts)
         offsets   = np.column_stack([
             ass["start"][:num_parts],
             ass["end"][:num_parts],
         ])
 
+        _root_field = 'root_track_id' if 'root_track_id' in parts.dtype.names else 'ancestor_track_id'
+
         return Particle.from_flat_arrays(
             ids                  = parts["track_id"],
             parent_ids           = parts["parent_track_id"],
-            root_ids             = parts["root_track_id"],
+            root_ids             = parts[_root_field],
             pdgs                 = parts["pdg"],
             parent_pdgs          = _get_parent_pdg(parts),
+            interaction_ids      = int_ids,
             interaction_types    = itype,
             point_cloud_flat     = _steps_to_plain_array(steps),
             point_cloud_offsets  = offsets,

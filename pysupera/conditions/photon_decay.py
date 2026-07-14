@@ -3,6 +3,7 @@ from typing import Dict, List, Tuple, TYPE_CHECKING
 
 from .base import PartitionConditionBase
 from ..diagnostics import MergeOutcome
+from ..utils import SemanticType
 
 if TYPE_CHECKING:
     from ..partitioner import ParticlePartitioner
@@ -116,6 +117,17 @@ class PhotonDecay(PartitionConditionBase):
                 photon_rep = rep_lookup.get(photon_id)
                 if photon_rep is None:
                     continue
+                # Promote the photon rep to kShower immediately, even if it
+                # currently carries kLEScatter (which happens when the photon's
+                # own point cloud is below the min_pc_size threshold so it was
+                # initially assigned kLEScatter).  After merging its e+/e-
+                # children in, the photon will have a non-zero point cloud and
+                # correctly represents a shower.  Promoting BEFORE returning
+                # the pairs ensures that CombineLEScatters and AbsorbLEScatter
+                # (which run later in the same convergence pass) see the photon
+                # as kShower and leave it alone, rather than absorbing it.
+                if photon_rep.sem_type == SemanticType.kLEScatter:
+                    photon_rep.sem_type = SemanticType.kShower
                 for child in children:
                     child_rep = rep_lookup.get(child.id)
                     if child_rep is None or child_rep.id == photon_rep.id:

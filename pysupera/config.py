@@ -404,19 +404,28 @@ def build_conditions(cfg: DictConfig) -> list:
 
     conditions = []
 
+    # 1. Photon decay: merge e+/e- children into photon rep unconditionally
+    #    (topology-only, no proximity); must run early so photon reps have
+    #    real point clouds before any spatial condition inspects them.
     if cfg.conditions.get("photon_decay", True):
         conditions.append(PhotonDecay())
 
-    if cfg.conditions.get("touching_em_shower", True):
-        conditions.append(TouchingEMShower())
-
-    # Must come before absorb_le_scatter so transitive LEScatter chains are
-    # consolidated into one particle before shower absorption.
+    # 2. Consolidate transitively-touching kLEScatter chains into one blob
+    #    before absorption so chains are absorbed as a unit.
     if cfg.conditions.get("combine_le_scatters", True):
         conditions.append(CombineLEScatters())
 
+    # 3. Absorb every kLEScatter rep into a touching non-LE rep.
+    #    After this step no standalone kLEScatter representative remains,
+    #    so TouchingEMShower (step 4) cannot accidentally promote a
+    #    kLEScatter rep to a shower parent.
     if cfg.conditions.get("absorb_le_scatter", True):
         conditions.append(AbsorbLEScatter())
+
+    # 4. Merge touching PDG-11/22 parent-child pairs into EM shower fragments.
+    #    Runs last in stage-1 so all kLEScatter reps are already absorbed.
+    if cfg.conditions.get("touching_em_shower", True):
+        conditions.append(TouchingEMShower())
 
     return conditions
 
@@ -426,10 +435,27 @@ def build_reader(cfg: DictConfig):
     Instantiate an :class:`~pysupera.readers.EventReaderBase` described by
     *cfg.reader*, opening the file at *cfg.io.input_path*.
 
-    The reader format is selected by ``cfg.reader.format``:
+    The reader format is selected by ``cfg.reader.format``.  Currently only
+    ``"edepsim_h5"`` is supported.
 
-    ``edepsim_h5``
-        :class:`~pysupera.readers.EDepSimHDF5Reader` — EDepSim HDF5 output.
+    JAXTPC visibility filtering
+    ---------------------------
+    When ``cfg.reader.jaxtpc_seg_path`` and ``cfg.reader.jaxtpc_inst_path``
+    are both non-null/non-empty, the reader automatically switches to
+    :class:`~pysupera.readers.JaxtpcHDF5Reader`, which restricts each
+    particle's point cloud to energy-deposit segments that were visible in the
+    JAXTPC readout simulation.  All particle-level metadata still comes from
+    the EDepSim file at *cfg.io.input_path*.
+
+    With JAXTPC masking disabled (default)::
+
+        run_pysupera io.input_path=edepsim.h5 io.output_path=out.h5
+
+    With JAXTPC visibility filtering::
+
+        run_pysupera io.input_path=edepsim.h5 io.output_path=out.h5 \\
+            reader.jaxtpc_seg_path=sim_seg_0000.h5 \\
+            reader.jaxtpc_inst_path=sim_inst_0000.h5
 
     Parameters
     ----------
@@ -452,30 +478,51 @@ def build_reader(cfg: DictConfig):
     --------
     ::
 
-        cfg = load_cfg([
-            "io.input_path=/data/sim.h5",
-            "reader.particle_key=particle/geant4_v2",
-        ])
+        cfg = load_cfg(["io.input_path=/data/sim.h5"])
         with build_reader(cfg) as reader:
             for particles in reader:
                 ...
     """
-    from pysupera.readers import EDepSimHDF5Reader
-
     fmt  = cfg.reader.get("format", "edepsim_h5")
     path = str(cfg.io.input_path)
 
     if fmt == "edepsim_h5":
+        # Check whether JAXTPC visibility filtering has been requested.
+        seg_path  = cfg.reader.get("jaxtpc_seg_path",  None)
+        inst_path = cfg.reader.get("jaxtpc_inst_path", None)
+
+        jaxtpc_active = bool(seg_path) and bool(inst_path)
+
+        if jaxtpc_active:
+            # Both JAXTPC paths are set → use visibility-filtered reader.
+            from pysupera.readers import JaxtpcHDF5Reader
+            return JaxtpcHDF5Reader(
+                edepsim_path              = path,
+                seg_path                  = str(seg_path),
+                inst_path                 = str(inst_path),
+                vertex_key                = str(cfg.reader.get("vertex_key",
+                                                "vertex/geant4")),
+                particle_key              = str(cfg.reader.get("particle_key",
+                                                "particle/geant4")),
+                electron_energy_threshold = float(cfg.reader.get(
+                                                "electron_energy_threshold", 0.05)),
+                min_pc_size               = int(cfg.particle.get("min_pc_size", -1)),
+            )
+
+        # Default: full EDepSim reader (no JAXTPC masking).
+        from pysupera.readers import EDepSimHDF5Reader
         return EDepSimHDF5Reader(
             path,
+            vertex_key                = str(cfg.reader.get("vertex_key",
+                                             "vertex/geant4")),
             particle_key              = str(cfg.reader.get("particle_key",
-                                               "particle/geant4")),
+                                             "particle/geant4")),
             step_key                  = str(cfg.reader.get("step_key",
-                                               "pstep/lar_vol")),
+                                             "pstep/lar_vol")),
             ass_key                   = str(cfg.reader.get("ass_key",
-                                               "ass/particle_pstep_lar_vol")),
+                                             "ass/particle_pstep_lar_vol")),
             electron_energy_threshold = float(cfg.reader.get(
-                                               "electron_energy_threshold", 0.05)),
+                                             "electron_energy_threshold", 0.05)),
             min_pc_size               = int(cfg.particle.get("min_pc_size", -1)),
         )
 

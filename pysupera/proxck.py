@@ -114,6 +114,8 @@ class ProximityChecker(ABC):
         # IDs of particles whose point cloud has zero points.  Every
         # check_proximity implementation returns False immediately for these.
         self.empty_ids: set = set()
+        # Controls whether initialize() emits progress messages.
+        self._verbose: bool = True
 
     @abstractmethod
     def initialize(self, particles):
@@ -357,7 +359,8 @@ class CPUSingleThreadChecker(ProximityChecker):
         """Build KD-trees and precompute bounding boxes"""
         from scipy.spatial import KDTree
         
-        print("Initializing CPU single-threaded backend...")
+        if self._verbose:
+            print("Initializing CPU single-threaded backend...")
         for p in particles:
             cloud_xyz = p.point_cloud[:, :3].astype(np.float32)
             self.clouds[p.id] = cloud_xyz
@@ -370,7 +373,8 @@ class CPUSingleThreadChecker(ProximityChecker):
             self.bboxes[p.id]    = self.compute_bbox(p.point_cloud)
             self.centroids[p.id] = self.compute_centroid(p.point_cloud)
 
-        print(f"  Initialized {len(particles)} particles")
+        if self._verbose:
+            print(f"  Initialized {len(particles)} particles")
     
     def check_proximity(self, id1, id2) -> bool:
         """Check if any point in cloud1 is within D of any point in cloud2"""
@@ -464,7 +468,8 @@ class CPUMultiThreadChecker(ProximityChecker):
         from scipy.spatial import KDTree
         from joblib import Parallel, delayed
         
-        print(f"Initializing CPU multi-threaded backend (n_jobs={self.n_jobs})...")
+        if self._verbose:
+            print(f"Initializing CPU multi-threaded backend (n_jobs={self.n_jobs})...")
         
         def build_structures(p):
             cloud_xyz = p.point_cloud[:, :3].astype(np.float32)
@@ -494,7 +499,8 @@ class CPUMultiThreadChecker(ProximityChecker):
             self.bboxes[pid]    = bbox
             self.centroids[pid] = centroid
         
-        print(f"  Initialized {len(particles)} particles")
+        if self._verbose:
+            print(f"  Initialized {len(particles)} particles")
     
     def check_proximity(self, id1, id2) -> bool:
         """Check if any point in cloud1 is within D of any point in cloud2"""
@@ -635,7 +641,8 @@ class GPUChecker(ProximityChecker):
         import cupy as cp
         from cuml.neighbors import NearestNeighbors
 
-        print("Initializing GPU backend (RAPIDS cuML)...")
+        if self._verbose:
+            print("Initializing GPU backend (RAPIDS cuML)...")
         for p in particles:
             cloud = cp.asarray(p.point_cloud[:, :3].astype(np.float32))
             self.gpu_clouds[p.id] = cloud
@@ -654,9 +661,10 @@ class GPUChecker(ProximityChecker):
 
         total_pts = sum(len(c) for c in self.gpu_clouds.values())
         mempool = cp.get_default_memory_pool()
-        print(f"  Initialized {len(particles)} particles "
-              f"({total_pts:,} total points)")
-        print(f"  GPU memory: {mempool.used_bytes() / 1024**2:.1f} MB")
+        if self._verbose:
+            print(f"  Initialized {len(particles)} particles "
+                  f"({total_pts:,} total points)")
+            print(f"  GPU memory: {mempool.used_bytes() / 1024**2:.1f} MB")
 
     def check_proximity(self, id1, id2) -> bool:
         """
@@ -735,7 +743,7 @@ class GPUChecker(ProximityChecker):
         survivors = [pair for pair, ok in zip(candidate_pairs, bbox_pass) if ok]
 
         n_rejected = len(candidate_pairs) - len(survivors)
-        if n_rejected:
+        if n_rejected and self._verbose:
             print(f"  GPUChecker Stage 1: bbox prefilter removed "
                   f"{n_rejected}/{len(candidate_pairs)} pairs")
 
@@ -929,7 +937,8 @@ class CellHashCPUSingleThreadChecker(_CellHashMixin, ProximityChecker):
 
     def initialize(self, particles) -> None:
         """Build voxel hash maps for every particle cloud."""
-        print("Initializing CellHash CPU single-threaded backend...")
+        if self._verbose:
+            print("Initializing CellHash CPU single-threaded backend...")
         for p in particles:
             cloud = p.point_cloud[:, :3].astype(np.float32)
             self.clouds[p.id] = cloud
@@ -942,7 +951,8 @@ class CellHashCPUSingleThreadChecker(_CellHashMixin, ProximityChecker):
             self.hashmaps[p.id]  = self._build_hashmap(cloud, self._inv_D)
             self.bboxes[p.id]    = self.compute_bbox(p.point_cloud)
             self.centroids[p.id] = self.compute_centroid(p.point_cloud)
-        print(f"  Initialized {len(particles)} particles")
+        if self._verbose:
+            print(f"  Initialized {len(particles)} particles")
 
     def check_proximity(self, id1, id2) -> bool:
         """
@@ -1019,8 +1029,9 @@ class CellHashCPUMultiThreadChecker(_CellHashMixin, ProximityChecker):
         """Build voxel hash maps in parallel."""
         from joblib import Parallel, delayed
 
-        print(f"Initializing CellHash CPU multi-threaded backend "
-              f"(n_jobs={self.n_jobs})...")
+        if self._verbose:
+            print(f"Initializing CellHash CPU multi-threaded backend "
+                  f"(n_jobs={self.n_jobs})...")
 
         def _build(p):
             cloud = p.point_cloud[:, :3].astype(np.float32)
@@ -1046,7 +1057,8 @@ class CellHashCPUMultiThreadChecker(_CellHashMixin, ProximityChecker):
                 self.hashmaps[pid] = hmap
             self.bboxes[pid]    = bbox
             self.centroids[pid] = centroid
-        print(f"  Initialized {len(particles)} particles")
+        if self._verbose:
+            print(f"  Initialized {len(particles)} particles")
 
     def check_proximity(self, id1, id2) -> bool:
         """
@@ -1171,7 +1183,8 @@ class CellHashGPUChecker(_CellHashMixin, ProximityChecker):
         """Transfer point clouds to the GPU and build CPU hash maps."""
         import cupy as cp
 
-        print("Initializing CellHash GPU backend...")
+        if self._verbose:
+            print("Initializing CellHash GPU backend...")
         for p in particles:
             cloud = p.point_cloud[:, :3].astype(np.float32)
             self.gpu_clouds[p.id] = cp.asarray(cloud)
@@ -1186,8 +1199,9 @@ class CellHashGPUChecker(_CellHashMixin, ProximityChecker):
             self.centroids[p.id]  = self.compute_centroid(p.point_cloud)
 
         mempool = cp.get_default_memory_pool()
-        print(f"  Initialized {len(particles)} particles")
-        print(f"  GPU memory: {mempool.used_bytes() / 1024**2:.1f} MB")
+        if self._verbose:
+            print(f"  Initialized {len(particles)} particles")
+            print(f"  GPU memory: {mempool.used_bytes() / 1024**2:.1f} MB")
 
     def check_proximity(self, id1, id2) -> bool:
         """
@@ -1373,7 +1387,8 @@ class BulkGPUChecker(ProximityChecker):
         """
         import cupy as cp
 
-        print("Initializing BulkGPU backend...")
+        if self._verbose:
+            print("Initializing BulkGPU backend...")
         for p in particles:
             cloud = cp.asarray(p.point_cloud[:, :3].astype(np.float32))
             self.gpu_clouds[p.id] = cloud
@@ -1387,9 +1402,10 @@ class BulkGPUChecker(ProximityChecker):
 
         total_pts = sum(len(c) for c in self.gpu_clouds.values())
         mempool = cp.get_default_memory_pool()
-        print(f"  Initialized {len(particles)} particles "
-              f"({total_pts:,} total points)")
-        print(f"  GPU memory: {mempool.used_bytes() / 1024**2:.1f} MB")
+        if self._verbose:
+            print(f"  Initialized {len(particles)} particles "
+                  f"({total_pts:,} total points)")
+            print(f"  GPU memory: {mempool.used_bytes() / 1024**2:.1f} MB")
 
     def check_proximity(self, id1, id2) -> bool:
         """
@@ -1472,7 +1488,7 @@ class BulkGPUChecker(ProximityChecker):
         survivors = [pair for pair, ok in zip(candidate_pairs, bbox_pass) if ok]
 
         n_rejected = len(candidate_pairs) - len(survivors)
-        if n_rejected:
+        if n_rejected and self._verbose:
             print(f"  BulkGPU Stage 1: bbox prefilter removed "
                   f"{n_rejected}/{len(candidate_pairs)} pairs")
 
@@ -1785,7 +1801,8 @@ class NumbaKernelChecker(ProximityChecker):
         """
         import cupy as cp
 
-        print("Initializing NumbaKernel backend...")
+        if self._verbose:
+            print("Initializing NumbaKernel backend...")
         total_pts = sum(len(p.point_cloud) for p in particles)
         flat_cpu  = np.empty((total_pts, 3), dtype=np.float32)
 
@@ -1811,9 +1828,10 @@ class NumbaKernelChecker(ProximityChecker):
             self._gpu_bb_max[p.id] = cp.max(cloud, axis=0)
 
         mempool = cp.get_default_memory_pool()
-        print(f"  Initialized {len(particles)} particles "
-              f"({total_pts:,} total points)")
-        print(f"  GPU memory: {mempool.used_bytes() / 1024**2:.1f} MB")
+        if self._verbose:
+            print(f"  Initialized {len(particles)} particles "
+                  f"({total_pts:,} total points)")
+            print(f"  GPU memory: {mempool.used_bytes() / 1024**2:.1f} MB")
 
     def check_proximity(self, id1, id2) -> bool:
         """Return ``True`` if any point of cloud *id1* lies within *D* of *id2*."""

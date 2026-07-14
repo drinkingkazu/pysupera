@@ -1,7 +1,17 @@
 defaults:
   - io: default
+  # Reader config group.  Currently only "edepsim_h5" is available.
+  # JAXTPC visibility filtering is not a separate reader — it is activated
+  # by setting two optional flags on the same edepsim_h5 config:
+  #
+  #   reader.jaxtpc_seg_path=sim_seg_0000.h5
+  #   reader.jaxtpc_inst_path=sim_inst_0000.h5
+  #
+  # When both are non-null, only segments visible in the JAXTPC readout are
+  # included in each particle's point cloud.  Particle metadata (PDG, track
+  # IDs, interaction type) always comes from the EDepSim file (io.input_path).
   - reader: edepsim_h5
-  - checker: gpu
+  - checker: cpu_single
   - conditions: default
   - _self_
 
@@ -10,11 +20,18 @@ defaults:
 # ---------------------------------------------------------------------------
 
 # Proximity distance threshold (same spatial units as point cloud coords).
-distance_threshold: 5.0
+distance_threshold: 5.2
+
+# Maximum number of events to process.  -1 (default) means all events.
+max_events: -1
+
+# Show a tqdm progress bar during the event loop.
+# Set false to suppress all dynamic output (useful when stdout is redirected).
+progress: true
 
 # Print per-event timing and merge counts (condition passes, per-event elapsed).
 # Set false to suppress all per-event chatter — ideal for production.
-verbose: true
+verbose: false
 
 # Print an end-of-run summary report: time profile and particle/partition
 # statistics aggregated over all events.  Set false for completely silent runs.
@@ -31,13 +48,37 @@ enable_diagnostics: false
 check_particle_tree: false
 
 # ---------------------------------------------------------------------------
+# Output filtering options
+# ---------------------------------------------------------------------------
+
+# Compact output: skip writing raw input-level (Level 0) particles.
+# Only fragment representatives (Level 1) and instance representatives
+# (Level 2) are stored, which is sufficient for most downstream analyses.
+# Reduces output file size significantly when input particles are numerous.
+output_compact: true
+
+# Drop kLEScatter particles from all output levels.
+# When true, particles with sem_type == kLEScatter are excluded from
+# fragments, instances, and (when output_compact is false) raw particles.
+# Useful when low-energy scatter products are not needed downstream.
+drop_le_scatter: false
+
+# Write event-level union point clouds (event_cloud and le_scatter_cloud).
+# event_cloud     : union of all particles' point clouds for each event,
+#                   voxelized with the same voxel_size/origin as particle
+#                   pre-processing when voxelization is enabled.
+# le_scatter_cloud: same but restricted to kLEScatter particles only.
+# Set false to omit these datasets and reduce output file size.
+write_event_clouds: true
+
+# ---------------------------------------------------------------------------
 # Particle construction parameters
 # ---------------------------------------------------------------------------
 particle:
   # Minimum point-cloud size for SetSemanticType classification.
   # Particles with fewer points than this are treated as having an
   # unknown semantic type.  -1 disables the check (all sizes accepted).
-  min_pc_size: -1
+  min_pc_size: 5
 
   # Pre-processing: voxelize point clouds onto a regular 3-D grid.
   # Bins each point into a voxel cell, snaps its position to the voxel
@@ -45,22 +86,22 @@ particle:
   # dedx=max).  This is a strict generalisation of merge_duplicates; when
   # voxelize.enabled is true, merge_duplicates is redundant.
   voxelize:
-    enabled: false
+    enabled: true
     # Voxel side length in the same units as the point-cloud coordinates.
     # A single float produces an isotropic grid; set to [dx, dy, dz] for
     # an anisotropic grid.
-    voxel_size: 0.3
+    voxel_size: 3
     # Lower corner of the grid.  null = use each cloud's own coordinate
     # minimum (per-particle alignment, default).  Set to [x0, y0, z0] for
     # a globally fixed grid anchored at a known detector boundary.
-    origin: null
+    origin: [-2160.,-2160.,-2160.]
     # When true, skips the separate merge_duplicates preprocessing step.
     # Safe because exact-coordinate duplicates always fall in the same voxel.
-    merge_duplicates: false
+    merge_duplicates: true
     # When true, VoxelizeProcessor stores a CSR mapping (input_ids,
     # input_energies, voxel_offsets) for every particle in last_diagnostics,
     # enabling traces from output voxels back to input points.
-    store_mapping: false
+    store_mapping: true
 
   # Pre-processing: collapse points sharing identical 3-D coordinates.
   # Aggregation rules: time=min, energy=sum, dedx=max.
@@ -90,4 +131,5 @@ particle:
     # Empty list (default) means all semantic types are processed.
     # Valid values: kShower, kTrack, kDelta, kMichel, kLEScatter, kUnknown
     # Example: [kShower, kTrack]
-    sem_types: []
+    sem_types: [kShower,kDelta,kMichel,kLEScatter]
+    

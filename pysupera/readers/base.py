@@ -70,5 +70,9 @@ class EventReaderBase(ABC):
         for i in range(len(self)):
             yield self[i]
 
+    def iter_events(self) -> Iterator[list[Particle]]:
+        """Alias for :meth:`__iter__`; mirrors the :class:`~pysupera.io.EventStore` API."""
+        return iter(self)
+
     def __repr__(self) -> str:
         return f"{type(self).__name__}(n_events={len(self)})"

@@ -47,6 +47,7 @@ def make_particle(
     pc: np.ndarray | None = None,
     n_pts: int = 10,
     offset: tuple = (0.0, 0.0, 0.0),
+    interaction_id: int = -1,
 ) -> Particle:
     if parent_id is None:
         parent_id = pid
@@ -63,6 +64,7 @@ def make_particle(
         root_id          = root_id,
         pdg              = pdg,
         parent_pdg       = parent_pdg,
+        interaction_id   = interaction_id,
         interaction_type = interaction_type,
         point_cloud      = pc,
     )

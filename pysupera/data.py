@@ -39,7 +39,6 @@ _DEFAULT_MIN_PC_SIZE: int = -1
 FLOAT_UNSET: np.float32 = np.float32("nan")
 """Sentinel value for unset ``float32`` scalar attributes on :class:`Particle`."""
 
-
 # ============================================================================
 # Particle Data Class
 # ============================================================================
@@ -69,6 +68,8 @@ class Particle:
         High-level semantic category derived from *interaction_type*, *pdg*,
         *parent_pdg*, and *point_cloud* by
         :func:`~pysupera.utils.SetSemanticType`.
+    interaction_id : int
+        Unique interaction identifier within an event.
     interaction_type : InteractionType
         Physics process that created this particle, expressed as an
         :class:`~pysupera.utils.InteractionType` member.  Derived from
@@ -108,6 +109,20 @@ class Particle:
         Geant4/simulation sub-process ID for this particle's termination.
     end_process_name : str or None
         Human-readable name of the termination process.
+    member_ids : list of int or None
+        IDs of the original preprocessed particles absorbed into this
+        representative during partitioning (step 1) or EM shower merging
+        (step 2).  ``None`` for raw input particles; populated by the
+        partitioner / shower merger.
+    parent_frag_id : int or None
+        Index of the parent particle's fragment in the written fragment
+        list for this event.  ``-1`` (or own fragment index if own
+        particle has no parent fragment) when computed; ``None`` before
+        the value is stamped by the run pipeline.
+    parent_inst_id : int or None
+        Index of the parent particle's instance in the written instance
+        list for this event.  ``-1`` (or own instance index) when
+        computed; ``None`` before stamped by the run pipeline.
     """
 
     def __init__(
@@ -117,6 +132,7 @@ class Particle:
         root_id,
         pdg,
         parent_pdg,
+        interaction_id,
         interaction_type,
         point_cloud,
         min_pc_size=None,
@@ -139,6 +155,9 @@ class Particle:
         end_process_id=None,
         end_subprocess_id=None,
         end_process_name=None,
+        member_ids=None,
+        parent_frag_id=None,
+        parent_inst_id=None,
     ):
         """
         Parameters
@@ -175,6 +194,7 @@ class Particle:
         self.root_id    = root_id
         self.pdg        = pdg
         self.parent_pdg = parent_pdg
+        self._interaction_id = interaction_id
         self._interaction_type = (interaction_type.value
                                     if isinstance(interaction_type, InteractionType)
                                     else int(interaction_type))  # raw int; retained for serialisation
@@ -207,6 +227,13 @@ class Particle:
         self.end_process_id       = end_process_id
         self.end_subprocess_id    = end_subprocess_id
         self.end_process_name     = end_process_name
+        # member_ids: list of original preprocessed particle IDs absorbed into
+        # this representative (populated by the partitioner / shower merger).
+        self.member_ids = list(member_ids) if member_ids is not None else None
+        # parent_frag_id / parent_inst_id: set by the run pipeline after
+        # fragment and instance lists are built; -1 = no valid parent.
+        self.parent_frag_id = parent_frag_id
+        self.parent_inst_id = parent_inst_id
 
     # ------------------------------------------------------------------ #
     # Properties                                                           #
@@ -247,6 +274,7 @@ class Particle:
         root_ids,
         pdgs,
         parent_pdgs,
+        interaction_ids,
         interaction_types,
         point_clouds,
         min_pc_size=None,
@@ -271,6 +299,8 @@ class Particle:
             PDG Monte Carlo codes.
         parent_pdgs : array-like of int, shape (N,)
             PDG codes of direct parents.
+        interaction_ids : array-like of int, shape (N,)
+            Unique interaction identifier.
         interaction_types : array-like of int, shape (N,)
             Raw interaction process codes forwarded to
             :func:`~pysupera.utils.SetSemanticType`.
@@ -303,6 +333,7 @@ class Particle:
         ...     root_ids=[0, 0],
         ...     pdgs=[11, 22],
         ...     parent_pdgs=[0, 11],
+        ...     interaction_ids=[0, 1],
         ...     interaction_types=[0, 7],
         ...     point_clouds=pcs,
         ... )
@@ -314,18 +345,20 @@ class Particle:
         root_ids          = list(root_ids)
         pdgs              = list(pdgs)
         parent_pdgs       = list(parent_pdgs)
+        interaction_ids   = list(interaction_ids)
         interaction_types = list(interaction_types)
         point_clouds      = list(point_clouds)
 
         n = len(ids)
         if not all(len(a) == n for a in (parent_ids, root_ids, pdgs,
-                                          parent_pdgs, interaction_types,
+                                          parent_pdgs, interaction_ids, interaction_types,
                                           point_clouds)):
             raise ValueError(
                 "All input arrays must have the same length. "
                 f"Got lengths: ids={len(ids)}, parent_ids={len(parent_ids)}, "
                 f"root_ids={len(root_ids)}, pdgs={len(pdgs)}, "
                 f"parent_pdgs={len(parent_pdgs)}, "
+                f"interaction_ids={len(interaction_ids)}, "
                 f"interaction_types={len(interaction_types)}, "
                 f"point_clouds={len(point_clouds)}."
             )
@@ -337,6 +370,7 @@ class Particle:
                 root_id=root_ids[i],
                 pdg=pdgs[i],
                 parent_pdg=parent_pdgs[i],
+                interaction_id=interaction_ids[i],
                 interaction_type=interaction_types[i],
                 point_cloud=point_clouds[i],
                 min_pc_size=min_pc_size,
@@ -352,6 +386,7 @@ class Particle:
         root_ids,
         pdgs,
         parent_pdgs,
+        interaction_ids,
         interaction_types,
         point_cloud_flat,
         point_cloud_offsets,
@@ -378,6 +413,8 @@ class Particle:
             PDG Monte Carlo codes.
         parent_pdgs : array-like of int, shape (N,)
             PDG codes of direct parents.
+        interaction_ids : array-like of int, shape (N,)
+            Unique interaction identifier.
         interaction_types : array-like of int, shape (N,)
             Raw interaction process codes forwarded to
             :func:`~pysupera.utils.SetSemanticType`.
@@ -424,6 +461,7 @@ class Particle:
         ...     root_ids=[0, 0],
         ...     pdgs=[11, 22],
         ...     parent_pdgs=[0, 11],
+        ...     interaction_ids=[0, 1],
         ...     interaction_types=[0, 7],
         ...     point_cloud_flat=flat,
         ...     point_cloud_offsets=offsets,
@@ -438,6 +476,7 @@ class Particle:
         root_ids          = list(root_ids)
         pdgs              = list(pdgs)
         parent_pdgs       = list(parent_pdgs)
+        interaction_ids   = list(interaction_ids)
         interaction_types = list(interaction_types)
         offsets           = np.asarray(point_cloud_offsets)
 
@@ -449,12 +488,13 @@ class Particle:
                 f"got {offsets.shape}."
             )
         if not all(len(a) == n for a in (parent_ids, root_ids, pdgs,
-                                          parent_pdgs, interaction_types)):
+                                          parent_pdgs, interaction_ids, interaction_types)):
             raise ValueError(
                 "All scalar arrays must have the same length. "
                 f"Got lengths: ids={len(ids)}, parent_ids={len(parent_ids)}, "
                 f"root_ids={len(root_ids)}, pdgs={len(pdgs)}, "
                 f"parent_pdgs={len(parent_pdgs)}, "
+                f"interaction_ids={len(interaction_ids)}, "
                 f"interaction_types={len(interaction_types)}."
             )
         if offsets.shape[0] != n:
@@ -478,6 +518,7 @@ class Particle:
                 root_id=root_ids[i],
                 pdg=pdgs[i],
                 parent_pdg=parent_pdgs[i],
+                interaction_id=interaction_ids[i],
                 interaction_type=interaction_types[i],
                 point_cloud=flat[offsets[i, 0] : offsets[i, 1]],
                 min_pc_size=min_pc_size,

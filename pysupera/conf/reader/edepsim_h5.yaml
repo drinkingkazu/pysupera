@@ -4,8 +4,21 @@
 #   defaults:
 #     - reader: edepsim_h5
 #
-# or overridden on the command line / in notebooks:
+# or overridden on the command line:
 #   reader.particle_key=particle/geant4_custom
+#
+# JAXTPC visibility filtering (optional)
+# --------------------------------------
+# When jaxtpc_seg_path and jaxtpc_inst_path are both non-null, the reader
+# automatically switches to visibility-filtered mode: only energy-deposit
+# segments that produced a signal above threshold in the JAXTPC readout
+# simulation are included in each particle's point cloud.  The EDepSim file
+# still provides all particle-level metadata (PDG, track IDs, etc.).
+#
+#   reader.jaxtpc_seg_path=sim_seg_0000.h5
+#   reader.jaxtpc_inst_path=sim_inst_0000.h5
+#
+# Leave both as null (~) to use full EDepSim steps without any masking.
 
 # Identifies which reader class build_reader() should instantiate.
 # Do not change unless you are adding a new reader format.
@@ -21,13 +34,31 @@ format: edepsim_h5
 #                  proc_start, subproc_start, ke, x, y, z
 particle_key: particle/geant4
 
+# Per-event structured array of Geant4 vertices.
+# Expected fields: x, y, z, t, interaction_id
+vertex_key: vertex/geant4
+
 # Flat per-event energy-deposit step array (the point cloud).
-# Columns 0-2 must be x, y, z.
+# Columns 0-2 must be x, y, z.  Not used in JAXTPC mode.
 step_key: pstep/lar_vol
 
 # Association table mapping particle index to slice in step_key.
-# Expected fields: start, end  (integer arrays of length N_particles)
+# Expected fields: start, end  (integer arrays of length N_particles).
+# Not used in JAXTPC mode.
 ass_key: ass/particle_pstep_lar_vol
+
+# ---------------------------------------------------------------------------
+# JAXTPC visibility mask (optional — leave null to disable)
+# ---------------------------------------------------------------------------
+
+# Path to the JAXTPC seg HDF5 file (per-volume 3-D truth deposits:
+# positions_mm, de, dx, t0_us, charge, …).
+jaxtpc_seg_path: ~
+
+# Path to the JAXTPC inst HDF5 file (per-readout-plane correspondence data:
+# segment_to_group, group_to_track, and per-plane group_ids that record
+# which groups were above the readout threshold).
+jaxtpc_inst_path: ~
 
 # ---------------------------------------------------------------------------
 # Physics / classification parameters

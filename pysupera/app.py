@@ -12,6 +12,16 @@ Then open http://localhost:8050 in a browser.
 Controls (sidebar)
 ------------------
 * HDF5 file path + event index
+* Input format:
+
+  - ``native``     — pysupera native HDF5 (default)
+  - ``edepsim_h5`` — EDepSim HDF5 output; exposes step_key, particle_key,
+                     electron_energy_threshold, and two optional JAXTPC
+                     visibility-filter fields (jaxtpc_seg_path /
+                     jaxtpc_inst_path).  Leave the JAXTPC fields blank to
+                     use all EDepSim segments; fill both to restrict point
+                     clouds to segments visible in the JAXTPC readout.
+
 * Preprocessing: merge_duplicates, defragment, min_pc_size, backend
 * Partitioner: distance_threshold, checker type, n_jobs
 * Conditions: enable / disable each of the four conditions
@@ -424,6 +434,10 @@ def build_layout() -> html.Div:
         ),
 
         # ── Input format ──────────────────────────────────────────────────
+        # Input format:
+        # - native     : pysupera native HDF5
+        # - edepsim_h5 : EDepSim HDF5; optionally add JAXTPC visibility
+        #                filtering by filling the seg/inst path fields below.
         _section(
             "INPUT FORMAT",
             _labelled("Format",
@@ -431,6 +445,7 @@ def build_layout() -> html.Div:
                     {"label": "native (pysupera HDF5)", "value": "native"},
                     {"label": "EDepSim HDF5",            "value": "edepsim_h5"},
                 ], "native")),
+            # EDepSim options (shown when format == edepsim_h5)
             html.Div([
                 _labelled("step_key (HDF5 dataset)",
                     _input("step-key", value="pstep/lar_vol")),
@@ -438,6 +453,17 @@ def build_layout() -> html.Div:
                     _input("particle-key", value="particle/geant4")),
                 _labelled("electron_energy_threshold",
                     _input("elec-threshold", "number", 0.05, min=0.0, step="any")),
+                html.Hr(style={"borderColor": "#0f3460", "margin": "6px 0"}),
+                # JAXTPC visibility filtering — leave blank to use all EDepSim
+                # segments; fill both paths to restrict point clouds to only the
+                # segments that were visible in the JAXTPC readout.
+                html.Div("JAXTPC visibility filter (optional):",
+                         style=dict(fontSize="11px", color="#5a6a9a",
+                                    marginBottom="4px")),
+                _labelled("jaxtpc_seg_path",
+                    _input("jaxtpc-seg-path", value="")),
+                _labelled("jaxtpc_inst_path",
+                    _input("jaxtpc-inst-path", value="")),
             ], id="edepsim-options", style={"display": "none"}),
             collapsed=True,
         ),
@@ -723,6 +749,7 @@ def toggle_voxelize(flags):
 
 
 # ── Show/hide EDepSim reader options ─────────────────────────────────────────
+# ── Show/hide EDepSim options (and embedded JAXTPC optional fields) ───────────
 @app.callback(
     Output("edepsim-options", "style"),
     Input("format-selector", "value"),
@@ -782,11 +809,13 @@ def toggle_log(show_val):
     State("conditions",   "value"),
     State("verbose-toggle", "value"),
     State("view-options",  "value"),
-    State("format-selector", "value"),
-    State("step-key",        "value"),
-    State("particle-key",    "value"),
-    State("elec-threshold",  "value"),
-    State("min-display-pc",  "value"),
+    State("format-selector",  "value"),
+    State("step-key",         "value"),
+    State("particle-key",     "value"),
+    State("elec-threshold",   "value"),
+    State("jaxtpc-seg-path",  "value"),
+    State("jaxtpc-inst-path", "value"),
+    State("min-display-pc",   "value"),
     prevent_initial_call=True,
 )
 def run_pipeline(
@@ -796,6 +825,7 @@ def run_pipeline(
     dist_thresh, checker_type, n_jobs, voxel_size_input,
     condition_keys, verbose_flags, view_options,
     format_val, step_key_val, particle_key_val, elec_thresh_val,
+    jaxtpc_seg_path_val, jaxtpc_inst_path_val,
     min_display_pc_val,
 ):
     preproc_flags   = preproc_flags  or []
@@ -897,19 +927,40 @@ def run_pipeline(
             from collections import Counter
 
             if format_val == "edepsim_h5":
-                from pysupera.readers import EDepSimHDF5Reader
-                with EDepSimHDF5Reader(
-                    file_path,
-                    particle_key=particle_key_val,
-                    step_key=step_key_val,
-                    electron_energy_threshold=elec_thresh_val,
-                    min_pc_size=min_pc_size,
-                ) as reader:
-                    n_events = len(reader)
-                    particles = reader[min(event_idx, n_events - 1)]
-                _load_preproc_lines.append(
-                    f"✔ Loaded {file_path}  ({n_events} events)  [edepsim_h5]"
-                )
+                _jaxtpc = bool(jaxtpc_seg_path_val) and bool(jaxtpc_inst_path_val)
+                if _jaxtpc:
+                    # Both JAXTPC paths provided → visibility-filtered reader.
+                    # Only segments visible in the JAXTPC readout are returned.
+                    from pysupera.readers import JaxtpcHDF5Reader
+                    with JaxtpcHDF5Reader(
+                        edepsim_path=file_path,
+                        seg_path=jaxtpc_seg_path_val,
+                        inst_path=jaxtpc_inst_path_val,
+                        particle_key=particle_key_val,
+                        electron_energy_threshold=elec_thresh_val,
+                        min_pc_size=min_pc_size,
+                    ) as reader:
+                        n_events = len(reader)
+                        particles = reader[min(event_idx, n_events - 1)]
+                    _load_preproc_lines.append(
+                        f"✔ Loaded {file_path}  ({n_events} events)  [edepsim_h5 + jaxtpc visibility]"
+                    )
+                    _load_preproc_lines.append(f"  seg : {jaxtpc_seg_path_val}")
+                    _load_preproc_lines.append(f"  inst: {jaxtpc_inst_path_val}")
+                else:
+                    from pysupera.readers import EDepSimHDF5Reader
+                    with EDepSimHDF5Reader(
+                        file_path,
+                        particle_key=particle_key_val,
+                        step_key=step_key_val,
+                        electron_energy_threshold=elec_thresh_val,
+                        min_pc_size=min_pc_size,
+                    ) as reader:
+                        n_events = len(reader)
+                        particles = reader[min(event_idx, n_events - 1)]
+                    _load_preproc_lines.append(
+                        f"✔ Loaded {file_path}  ({n_events} events)  [edepsim_h5]"
+                    )
             else:
                 from pysupera import read_events
                 with read_events(file_path) as store:

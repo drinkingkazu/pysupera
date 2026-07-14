@@ -3,6 +3,12 @@
 input_path: ???    # e.g. /data/events.h5
 output_path: ???   # e.g. /data/events_merged.h5
 
-# HDF5 compression filter.  "lz4" requires hdf5plugin; falls back to gzip.
-compression: gzip
-compression_opts: null
+# HDF5 compression filter.
+#   lzf        — built into h5py; always available; fast decompression, good ratio. (default)
+#   lz4        — faster than lzf; requires `pip install hdf5plugin`.
+#   blosc_lz4  — parallel decompression via Blosc+LZ4; requires hdf5plugin.
+#   gzip       — standard DEFLATE; best ratio, slowest reads. Avoid for large files.
+#   ~          — no compression; fastest reads, largest files.
+# compression_opts: only relevant for gzip (1=fast … 9=best).
+compression: lz4
+compression_opts: ~

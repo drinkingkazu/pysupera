@@ -56,14 +56,23 @@ import os
 import numpy as np
 from typing import List, Optional
 
-FORMAT_VERSION = "2.0.0"
+# Register HDF5 compression filters (LZ4, Blosc, etc.) if available.
+# Importing hdf5plugin is enough — it auto-registers all supported filters
+# with the HDF5 library so h5py can transparently read/write them.
+try:
+    import hdf5plugin  # noqa: F401
+except ImportError:
+    pass
+
+FORMAT_VERSION = "2.1.0"
 
 # Chunk sizes for compressed HDF5 datasets.
 # Tuned for typical event sizes; adjust if your events are significantly
 # larger or smaller.
-_CHUNK_PARTICLES = 256     # rows per chunk in particle metadata arrays
-_CHUNK_POINTS    = 65536   # rows per chunk in the flat point array
-_PC_NDIM = 5               # number of columns in the flat point array (x,y,z,t,e)
+_CHUNK_PARTICLES = 256      # rows per chunk in particle metadata arrays
+_CHUNK_POINTS    = 262144   # rows per chunk in the flat point array (1 chunk ≈ 5 MB)
+_PC_NDIM = 5                # number of columns in the flat point array (x,y,z,t,e)
+_CLOUD_NDIM = 9             # columns in event-cloud datasets (x,y,z,t,e,interaction_id,root_id,frag_id,inst_id)
 
 # ---------------------------------------------------------------------------
 # Public helpers
@@ -71,7 +80,7 @@ _PC_NDIM = 5               # number of columns in the flat point array (x,y,z,t,
 
 def write_events(path: str,
                  events: List[List],
-                 compression: str = "lz4",
+                 compression: str = "lzf",
                  compression_opts: Optional[int] = None) -> None:
     """
     Write a list of events to an HDF5 file.
@@ -211,7 +220,7 @@ def write_events(path: str,
 
 def open_writer(path: str,
                 mode: str = "w",
-                compression: str = "lz4",
+                compression: str = "lzf",
                 compression_opts: Optional[int] = None) -> "EventWriter":
     """
     Open an :class:`EventWriter` for incremental event writing.
@@ -286,14 +295,15 @@ class EventWriter:
             w.append_event(more_particles)
     """
 
-    # Names of the six int32 particle scalar fields (sem_type handled separately
+    # Names of the int32 particle scalar fields (sem_type handled separately
     # because it uses dtype=int8)
     _SCALAR_FIELDS = (
-        "id", "parent_id", "root_id", "pdg", "parent_pdg", "interaction_type"
+        "id", "parent_id", "root_id", "pdg", "parent_pdg",
+        "interaction_id", "interaction_type"
     )
 
     def __init__(self, path: str, mode: str = "w",
-                 compression: str = "lz4",
+                 compression: str = "lzf",
                  compression_opts: Optional[int] = None) -> None:
         import h5py
 
@@ -315,11 +325,31 @@ class EventWriter:
             self._n_events      = int(self._f["n_events"][()])
             self._n_particles   = int(self._f["events/offsets"][-1])
             self._n_points      = int(self._f["particles/pc_offsets"][-1])
+            # Fragment / instance counters (0 if the groups don't yet exist)
+            if "particle_fragments/pc_offsets" in self._f:
+                self._n_fragments    = int(self._f["frag_events/offsets"][-1])
+                self._n_frag_points  = int(self._f["particle_fragments/pc_offsets"][-1])
+                self._n_frag_members = int(self._f["particle_fragments/member_offsets"][-1])
+            else:
+                self._n_fragments = self._n_frag_points = self._n_frag_members = 0
+            if "particle_instances/pc_offsets" in self._f:
+                self._n_instances    = int(self._f["inst_events/offsets"][-1])
+                self._n_inst_points  = int(self._f["particle_instances/pc_offsets"][-1])
+                self._n_inst_members = int(self._f["particle_instances/member_offsets"][-1])
+            else:
+                self._n_instances = self._n_inst_points = self._n_inst_members = 0
+            # Event-cloud counters
+            self._n_event_cloud_pts   = int(self._f["non_le_cloud/offsets"][-1])     if "non_le_cloud/offsets"    in self._f else 0
+            self._n_le_cloud_pts      = int(self._f["le_scatter_cloud/offsets"][-1]) if "le_scatter_cloud/offsets" in self._f else 0
         else:
             self._f = h5py.File(path, "w")
             self._n_events    = 0
             self._n_particles = 0
             self._n_points    = 0
+            self._n_fragments = self._n_frag_points = self._n_frag_members = 0
+            self._n_instances = self._n_inst_points = self._n_inst_members = 0
+            self._n_event_cloud_pts = 0
+            self._n_le_cloud_pts    = 0
             self._init_datasets()
 
     # ------------------------------------------------------------------
@@ -374,14 +404,15 @@ class EventWriter:
             self._f["particles/sem_type"].resize(new_p_end, axis=0)
 
             # Build scalar arrays for this event
-            p_id          = np.empty(n_p, dtype=np.int32)
-            p_parent_id   = np.empty(n_p, dtype=np.int32)
-            p_root_id     = np.empty(n_p, dtype=np.int32)
-            p_pdg         = np.empty(n_p, dtype=np.int32)
-            p_parent_pdg  = np.empty(n_p, dtype=np.int32)
-            p_itype       = np.empty(n_p, dtype=np.int32)
-            p_sem_type    = np.empty(n_p, dtype=np.int8)
-            pc_lengths    = np.empty(n_p, dtype=np.int64)
+            p_id             = np.empty(n_p, dtype=np.int32)
+            p_parent_id      = np.empty(n_p, dtype=np.int32)
+            p_root_id        = np.empty(n_p, dtype=np.int32)
+            p_pdg            = np.empty(n_p, dtype=np.int32)
+            p_parent_pdg     = np.empty(n_p, dtype=np.int32)
+            p_int_id         = np.empty(n_p, dtype=np.int32)
+            p_itype          = np.empty(n_p, dtype=np.int32)
+            p_sem_type       = np.empty(n_p, dtype=np.int8)
+            pc_lengths       = np.empty(n_p, dtype=np.int64)
 
             for k, p in enumerate(particles):
                 p_id[k]          = p.id
@@ -389,6 +420,7 @@ class EventWriter:
                 p_root_id[k]     = p.root_id
                 p_pdg[k]         = p.pdg
                 p_parent_pdg[k]  = p.parent_pdg
+                p_int_id[k]      = int(p._interaction_id)
                 p_itype[k]       = int(p._interaction_type)
                 p_sem_type[k]    = int(p.sem_type.value)
                 pc_lengths[k]    = len(p.point_cloud)
@@ -398,6 +430,7 @@ class EventWriter:
             self._f["particles/root_id"          ][new_p_start:new_p_end] = p_root_id
             self._f["particles/pdg"              ][new_p_start:new_p_end] = p_pdg
             self._f["particles/parent_pdg"       ][new_p_start:new_p_end] = p_parent_pdg
+            self._f["particles/interaction_id"   ][new_p_start:new_p_end] = p_int_id
             self._f["particles/interaction_type" ][new_p_start:new_p_end] = p_itype
             self._f["particles/sem_type"         ][new_p_start:new_p_end] = p_sem_type
 
@@ -412,18 +445,19 @@ class EventWriter:
                 new_pc_offsets[k] = running
             pc_ds[new_p_start + 1 : new_p_end + 1] = new_pc_offsets
 
-            # ---- extend flat point array ----------------------------------
+            # ---- extend flat point array (single bulk write) --------------
             if n_pt > 0:
                 pt_ds = self._f["points/flat"]
                 new_pt_start = self._n_points
                 pt_ds.resize(new_pt_start + n_pt, axis=0)
-                cursor = new_pt_start
+                bulk = np.empty((n_pt, _PC_NDIM), dtype=np.float32)
+                cursor = 0
                 for p in particles:
                     n = len(p.point_cloud)
                     if n > 0:
-                        cloud = _normalize_cloud(p.point_cloud)
-                        pt_ds[cursor : cursor + n] = cloud[:, :_PC_NDIM]
+                        bulk[cursor : cursor + n] = _normalize_cloud(p.point_cloud)
                     cursor += n
+                pt_ds[new_pt_start : new_pt_start + n_pt] = bulk
 
         # ---- advance counters ---------------------------------------------
         self._n_events    += 1
@@ -495,6 +529,349 @@ class EventWriter:
             **ckw,
         )
 
+        # Representative-level groups: particle_fragments and particle_instances
+        self._init_rep_group("particle_fragments")
+        self._init_rep_group("particle_instances")
+
+        # Event-level union point clouds
+        # Layout: (x, y, z, t, energy, interaction_id, root_id, frag_id, inst_id)
+        #          — _CLOUD_NDIM = 9 columns (all stored as float32).
+        # non_le_cloud  : union of point clouds from particles with sem_type != kLEScatter.
+        # le_scatter_cloud : union of point clouds from kLEScatter particles only.
+        for grp_name in ("non_le_cloud", "le_scatter_cloud"):
+            g = f.create_group(grp_name)
+            g.create_dataset(
+                "offsets",
+                data=np.zeros(1, dtype=np.int64),
+                maxshape=(None,),
+                chunks=(_CHUNK_PARTICLES,),
+            )
+            g.create_dataset(
+                "flat",
+                shape=(0, _CLOUD_NDIM), maxshape=(None, _CLOUD_NDIM), dtype=np.float32,
+                chunks=(_CHUNK_POINTS, _CLOUD_NDIM),
+                **ckw,
+            )
+
+    def _init_rep_group(self, group_prefix: str) -> None:
+        """Create resizable datasets for one representative level.
+
+        Layout (example for ``group_prefix="particle_fragments"``)::
+
+            /frag_events/offsets           (n_events+1,) int64   — per-event fencepost
+            /particle_fragments/id         (n_reps,)     int32
+            /particle_fragments/parent_id  (n_reps,)     int32
+            /particle_fragments/root_id    (n_reps,)     int32
+            /particle_fragments/pdg        (n_reps,)     int32
+            /particle_fragments/parent_pdg (n_reps,)     int32
+            /particle_fragments/interaction_type (n_reps,) int32
+            /particle_fragments/sem_type   (n_reps,)     int8
+            /particle_fragments/pc_offsets (n_reps+1,)   int64  — fencepost into *_points/flat
+            /particle_fragments/member_offsets (n_reps+1,) int64 — fencepost into *_members/flat
+            /particle_fragments_points/flat (total_pts, dims) float32
+            /particle_fragments_members/flat (total_members,) int32
+        """
+        f   = self._f
+        ckw = self._ckw
+
+        # Derive event-offset group name from prefix
+        # "particle_fragments" → "frag_events", "particle_instances" → "inst_events"
+        short = group_prefix.split("_", 1)[1]  # "fragments" or "instances"
+        ev_group = f"{short[:4]}_events"        # "frag_events" or "inst_events"
+
+        eg = f.create_group(ev_group)
+        eg.create_dataset(
+            "offsets",
+            data=np.zeros(1, dtype=np.int64),
+            maxshape=(None,),
+            chunks=(_CHUNK_PARTICLES,),
+        )
+
+        pg = f.create_group(group_prefix)
+        for name in self._SCALAR_FIELDS:
+            pg.create_dataset(
+                name,
+                shape=(0,), maxshape=(None,), dtype=np.int32,
+                chunks=(_CHUNK_PARTICLES,),
+                **ckw,
+            )
+        pg.create_dataset(
+            "sem_type",
+            shape=(0,), maxshape=(None,), dtype=np.int8,
+            chunks=(_CHUNK_PARTICLES,),
+            **ckw,
+        )
+        for _name in ("parent_frag_id", "parent_inst_id"):
+            pg.create_dataset(
+                _name,
+                shape=(0,), maxshape=(None,), dtype=np.int32,
+                chunks=(_CHUNK_PARTICLES,),
+                **ckw,
+            )
+        pg.create_dataset(
+            "pc_offsets",
+            data=np.zeros(1, dtype=np.int64),
+            maxshape=(None,),
+            chunks=(_CHUNK_PARTICLES,),
+        )
+        pg.create_dataset(
+            "member_offsets",
+            data=np.zeros(1, dtype=np.int64),
+            maxshape=(None,),
+            chunks=(_CHUNK_PARTICLES,),
+        )
+
+        pts_g = f.create_group(f"{group_prefix}_points")
+        pts_g.create_dataset(
+            "flat",
+            shape=(0, _PC_NDIM), maxshape=(None, _PC_NDIM), dtype=np.float32,
+            chunks=(_CHUNK_POINTS, _PC_NDIM),
+            **ckw,
+        )
+
+        mem_g = f.create_group(f"{group_prefix}_members")
+        mem_g.create_dataset(
+            "flat",
+            shape=(0,), maxshape=(None,), dtype=np.int32,
+            chunks=(_CHUNK_PARTICLES,),
+            **ckw,
+        )
+
+    # ------------------------------------------------------------------
+    # Public API: representative levels
+    # ------------------------------------------------------------------
+
+    def append_fragments(self, reps: List) -> None:
+        """Append step-1 fragment representatives for the current event.
+
+        Must be called **before** :meth:`append_event` for the same event
+        (both methods share the event counter; only :meth:`append_event`
+        increments it).
+
+        Parameters
+        ----------
+        reps : list of Particle
+            Step-1 representative particles with ``member_ids`` populated.
+        """
+        self._append_rep_level(
+            "particle_fragments",
+            reps,
+            "_n_fragments", "_n_frag_points", "_n_frag_members",
+        )
+
+    def append_instances(self, reps: List) -> None:
+        """Append step-2 shower-instance representatives for the current event.
+
+        Must be called **before** :meth:`append_event` for the same event.
+
+        Parameters
+        ----------
+        reps : list of Particle
+            Step-2 instance representatives with ``member_ids`` populated.
+        """
+        self._append_rep_level(
+            "particle_instances",
+            reps,
+            "_n_instances", "_n_inst_points", "_n_inst_members",
+        )
+
+    def append_event_clouds(
+        self,
+        non_le_cloud: "np.ndarray",
+        le_cloud:     "np.ndarray",
+    ) -> None:
+        """Append event-level union point clouds for the current event.
+
+        Must be called **before** :meth:`append_event` for the same event.
+
+        Each cloud has 9 columns:
+        ``x, y, z, t, energy, interaction_id, root_id, frag_id, inst_id``.
+        All values are stored as float32.  Integer-valued columns
+        (``interaction_id``, ``root_id``, ``frag_id``, ``inst_id``) should be
+        cast by the caller.  Use ``-1`` as a sentinel for absent frag/inst IDs.
+        When voxelization is active the spatial columns are voxel-centre
+        coordinates; ``interaction_id`` / ``root_id`` are taken from the
+        dominant particle across merged points.
+
+        Parameters
+        ----------
+        non_le_cloud : np.ndarray, shape (N, 9)
+            Union of point clouds from particles whose ``sem_type`` is **not**
+            ``kLEScatter`` for this event (already voxelized if applicable).
+            May be empty (shape ``(0, 9)``).
+        le_cloud : np.ndarray, shape (M, 9)
+            Union of point clouds from ``kLEScatter`` particles for this event
+            (already voxelized if applicable).  May be empty.
+        """
+        for cloud, grp, n_attr in (
+            (non_le_cloud, "non_le_cloud",      "_n_event_cloud_pts"),
+            (le_cloud,     "le_scatter_cloud",  "_n_le_cloud_pts"),
+        ):
+            n_prev = getattr(self, n_attr)
+            n_pts  = len(cloud)
+
+            off_ds = self._f[f"{grp}/offsets"]
+            off_ds.resize(self._n_events + 2, axis=0)
+            off_ds[self._n_events + 1] = np.int64(n_prev + n_pts)
+
+            if n_pts > 0:
+                flat_ds = self._f[f"{grp}/flat"]
+                flat_ds.resize(n_prev + n_pts, axis=0)
+                # Ensure float32 and exactly _CLOUD_NDIM columns.
+                c = np.asarray(cloud, dtype=np.float32)
+                if c.shape[1] < _CLOUD_NDIM:
+                    pad = np.zeros((len(c), _CLOUD_NDIM - c.shape[1]), dtype=np.float32)
+                    c = np.concatenate([c, pad], axis=1)
+                elif c.shape[1] > _CLOUD_NDIM:
+                    c = c[:, :_CLOUD_NDIM]
+                flat_ds[n_prev : n_prev + n_pts] = c
+
+            setattr(self, n_attr, n_prev + n_pts)
+
+    def _append_rep_level(
+        self,
+        group_prefix: str,
+        reps: List,
+        n_attr: str,
+        npt_attr: str,
+        nmem_attr: str,
+    ) -> None:
+        """Generic incremental writer for a representative level.
+
+        Parameters
+        ----------
+        group_prefix : str
+            HDF5 group path prefix (``"particle_fragments"`` or
+            ``"particle_instances"``).
+        reps : list of Particle
+            Representative particles for this event.
+        n_attr, npt_attr, nmem_attr : str
+            Names of the instance-level running counters on ``self``
+            (number of reps, total point-cloud entries, total member IDs).
+        """
+        n_r   = len(reps)
+        n_pt  = sum(len(r.point_cloud) for r in reps)
+        n_mem = sum(
+            len(r.member_ids) if r.member_ids is not None else 1
+            for r in reps
+        )
+
+        n_r_prev   = getattr(self, n_attr)
+        n_pt_prev  = getattr(self, npt_attr)
+        n_mem_prev = getattr(self, nmem_attr)
+
+        # Derive event-offset group name (mirrors _init_rep_group logic)
+        short    = group_prefix.split("_", 1)[1]   # "fragments" / "instances"
+        ev_group = f"{short[:4]}_events"            # "frag_events" / "inst_events"
+
+        # ---- extend event fencepost ----------------------------------------
+        ev_ds = self._f[f"{ev_group}/offsets"]
+        ev_ds.resize(self._n_events + 2, axis=0)
+        ev_ds[self._n_events + 1] = np.int64(n_r_prev + n_r)
+
+        if n_r > 0:
+            new_start = n_r_prev
+            new_end   = n_r_prev + n_r
+
+            # ---- extend scalar datasets -----------------------------------
+            for name in self._SCALAR_FIELDS:
+                self._f[f"{group_prefix}/{name}"].resize(new_end, axis=0)
+            self._f[f"{group_prefix}/sem_type"].resize(new_end, axis=0)
+            self._f[f"{group_prefix}/parent_frag_id"].resize(new_end, axis=0)
+            self._f[f"{group_prefix}/parent_inst_id"].resize(new_end, axis=0)
+
+            # Build scalar arrays
+            r_id             = np.empty(n_r, dtype=np.int32)
+            r_parent_id      = np.empty(n_r, dtype=np.int32)
+            r_root_id        = np.empty(n_r, dtype=np.int32)
+            r_pdg            = np.empty(n_r, dtype=np.int32)
+            r_parent_pdg     = np.empty(n_r, dtype=np.int32)
+            r_int_id         = np.empty(n_r, dtype=np.int32)
+            r_itype          = np.empty(n_r, dtype=np.int32)
+            r_sem_type       = np.empty(n_r, dtype=np.int8)
+            r_parent_frag_id = np.empty(n_r, dtype=np.int32)
+            r_parent_inst_id = np.empty(n_r, dtype=np.int32)
+            pc_lengths       = np.empty(n_r, dtype=np.int64)
+            mem_lengths      = np.empty(n_r, dtype=np.int64)
+
+            for k, r in enumerate(reps):
+                r_id[k]             = r.id
+                r_parent_id[k]      = r.parent_id
+                r_root_id[k]        = r.root_id
+                r_pdg[k]            = r.pdg
+                r_parent_pdg[k]     = r.parent_pdg
+                r_int_id[k]         = int(r._interaction_id)
+                r_itype[k]          = int(r._interaction_type)
+                r_sem_type[k]       = int(r.sem_type.value)
+                _pfid = getattr(r, "parent_frag_id", None)
+                _piid = getattr(r, "parent_inst_id", None)
+                r_parent_frag_id[k] = int(_pfid) if _pfid is not None else -1
+                r_parent_inst_id[k] = int(_piid) if _piid is not None else -1
+                pc_lengths[k]       = len(r.point_cloud)
+                mem_lengths[k]      = (len(r.member_ids)
+                                       if r.member_ids is not None else 1)
+
+            self._f[f"{group_prefix}/id"               ][new_start:new_end] = r_id
+            self._f[f"{group_prefix}/parent_id"        ][new_start:new_end] = r_parent_id
+            self._f[f"{group_prefix}/root_id"          ][new_start:new_end] = r_root_id
+            self._f[f"{group_prefix}/pdg"              ][new_start:new_end] = r_pdg
+            self._f[f"{group_prefix}/parent_pdg"       ][new_start:new_end] = r_parent_pdg
+            self._f[f"{group_prefix}/interaction_id"   ][new_start:new_end] = r_int_id
+            self._f[f"{group_prefix}/interaction_type" ][new_start:new_end] = r_itype
+            self._f[f"{group_prefix}/sem_type"         ][new_start:new_end] = r_sem_type
+            self._f[f"{group_prefix}/parent_frag_id"   ][new_start:new_end] = r_parent_frag_id
+            self._f[f"{group_prefix}/parent_inst_id"   ][new_start:new_end] = r_parent_inst_id
+
+            # ---- extend pc_offsets ----------------------------------------
+            pc_ds = self._f[f"{group_prefix}/pc_offsets"]
+            pc_ds.resize(new_end + 1, axis=0)
+            new_pc_offsets = np.empty(n_r, dtype=np.int64)
+            running = n_pt_prev
+            for k in range(n_r):
+                running += pc_lengths[k]
+                new_pc_offsets[k] = running
+            pc_ds[new_start + 1 : new_end + 1] = new_pc_offsets
+
+            # ---- extend member_offsets ------------------------------------
+            mem_ds = self._f[f"{group_prefix}/member_offsets"]
+            mem_ds.resize(new_end + 1, axis=0)
+            new_mem_offsets = np.empty(n_r, dtype=np.int64)
+            running = n_mem_prev
+            for k in range(n_r):
+                running += mem_lengths[k]
+                new_mem_offsets[k] = running
+            mem_ds[new_start + 1 : new_end + 1] = new_mem_offsets
+
+            # ---- extend flat point array (single bulk write) --------------
+            if n_pt > 0:
+                pt_flat = self._f[f"{group_prefix}_points/flat"]
+                pt_flat.resize(n_pt_prev + n_pt, axis=0)
+                bulk_pts = np.empty((n_pt, _PC_NDIM), dtype=np.float32)
+                cursor = 0
+                for r in reps:
+                    n = len(r.point_cloud)
+                    if n > 0:
+                        bulk_pts[cursor : cursor + n] = _normalize_cloud(r.point_cloud)
+                    cursor += n
+                pt_flat[n_pt_prev : n_pt_prev + n_pt] = bulk_pts
+
+            # ---- extend flat member array (single bulk write) -------------
+            mem_flat = self._f[f"{group_prefix}_members/flat"]
+            mem_flat.resize(n_mem_prev + n_mem, axis=0)
+            if n_mem > 0:
+                bulk_mem = np.empty(n_mem, dtype=np.int32)
+                cursor = 0
+                for r in reps:
+                    ids = r.member_ids if r.member_ids is not None else [r.id]
+                    n = len(ids)
+                    bulk_mem[cursor : cursor + n] = ids
+                    cursor += n
+                mem_flat[n_mem_prev : n_mem_prev + n_mem] = bulk_mem
+
+        setattr(self, n_attr,   n_r_prev   + n_r)
+        setattr(self, npt_attr, n_pt_prev  + n_pt)
+        setattr(self, nmem_attr, n_mem_prev + n_mem)
+
 
 def read_events(path: str) -> "EventStore":
     """
@@ -542,12 +919,24 @@ class EventStore:
     ----------
     path : str
         Path to HDF5 file written by :func:`write_events`.
+    chunk_cache_mb : int, optional
+        Size of the HDF5 chunk cache in **megabytes**.  Larger values
+        speed up sequential or repeated reads by keeping more decompressed
+        chunks in RAM.  Default ``256`` (256 MB).
     """
 
-    def __init__(self, path: str) -> None:
+    def __init__(self, path: str, chunk_cache_mb: int = 256) -> None:
         import h5py
         self._path = path
-        self._f = h5py.File(path, "r")
+        rdcc_nbytes = chunk_cache_mb * 1024 * 1024
+        # rdcc_nslots: prime slightly larger than (cache_bytes / chunk_bytes).
+        # With 5 MB chunks and 256 MB cache that's ~51 chunks; use 127.
+        rdcc_nslots = max(127, rdcc_nbytes // (_CHUNK_POINTS * _PC_NDIM * 4) * 3 + 1)
+        self._f = h5py.File(
+            path, "r",
+            rdcc_nbytes=rdcc_nbytes,
+            rdcc_nslots=int(rdcc_nslots),
+        )
         self._n_events: int = int(self._f["n_events"][()])
 
         # Cache both offset arrays — O(n_events) + O(n_particles) ints
@@ -606,13 +995,14 @@ class EventStore:
             return []
 
         # ---- read scalar metadata in 7 contiguous array slices ------------
-        ids          = self._f["particles/id"               ][p_start:p_end]
-        parent_ids   = self._f["particles/parent_id"        ][p_start:p_end]
-        root_ids     = self._f["particles/root_id"          ][p_start:p_end]
-        pdgs         = self._f["particles/pdg"              ][p_start:p_end]
-        parent_pdgs  = self._f["particles/parent_pdg"       ][p_start:p_end]
-        itypes       = self._f["particles/interaction_type" ][p_start:p_end]
-        sem_types    = self._f["particles/sem_type"         ][p_start:p_end]
+        ids             = self._f["particles/id"               ][p_start:p_end]
+        parent_ids      = self._f["particles/parent_id"        ][p_start:p_end]
+        root_ids        = self._f["particles/root_id"          ][p_start:p_end]
+        pdgs            = self._f["particles/pdg"              ][p_start:p_end]
+        parent_pdgs     = self._f["particles/parent_pdg"       ][p_start:p_end]
+        interaction_ids = self._f["particles/interaction_id"   ][p_start:p_end]
+        itypes          = self._f["particles/interaction_type" ][p_start:p_end]
+        sem_types       = self._f["particles/sem_type"         ][p_start:p_end]
 
         # ---- read point-cloud data in one contiguous slice ----------------
         pc_bounds = self._pc_offsets[p_start : p_end + 1]  # (n_parts+1,)
@@ -632,6 +1022,7 @@ class EventStore:
                 root_id          = int(root_ids[k]),
                 pdg              = int(pdgs[k]),
                 parent_pdg       = int(parent_pdgs[k]),
+                interaction_id   = int(interaction_ids[k]),
                 interaction_type = int(itypes[k]),
                 point_cloud      = cloud,
             )
@@ -651,16 +1042,127 @@ class EventStore:
     # Convenience
     # ------------------------------------------------------------------
 
-    def iter_events(self):
+    def read_bulk(self, start: int = 0, stop: int = -1,
+                  indices=None) -> List[List]:
+        """
+        Read a batch of events with a fixed number of HDF5 reads.
+
+        All scalar datasets and the flat point array are loaded in **9 HDF5
+        reads total**, then split into per-event lists in NumPy/Python.
+
+        Parameters
+        ----------
+        start : int, optional
+            First event index (inclusive).  Ignored when *indices* is given.
+            Default ``0``.
+        stop : int, optional
+            Last event index (exclusive).  ``-1`` means ``len(store)``.
+            Ignored when *indices* is given.  Default ``-1``.
+        indices : sequence of int, optional
+            Explicit list (or array) of event indices to fetch, in any order
+            and with duplicates allowed.  The returned list preserves the
+            order of *indices*.  When given, *start* and *stop* are ignored.
+
+        Returns
+        -------
+        list of list of Particle
+            One entry per requested event, in the same order as *indices*
+            (or sequential order when using *start*/*stop*).
+        """
+        from .data import Particle
+        from .utils import SemanticType
+
+        # ---- resolve the set of event indices to load ---------------------
+        if indices is not None:
+            req = list(indices)
+            if not req:
+                return []
+            unique_sorted = sorted(set(req))
+            ev_min, ev_max = unique_sorted[0], unique_sorted[-1]
+            if ev_min < 0 or ev_max >= self._n_events:
+                raise IndexError(
+                    f"Index out of range [0, {self._n_events}): "
+                    f"got min={ev_min}, max={ev_max}"
+                )
+            span_start, span_stop = ev_min, ev_max + 1
+        else:
+            if stop < 0:
+                stop = self._n_events
+            stop = min(stop, self._n_events)
+            if start >= stop:
+                return []
+            req = list(range(start, stop))
+            span_start, span_stop = start, stop
+
+        # ---- one contiguous particle range covers the whole span ----------
+        p_start = int(self._ev_offsets[span_start])
+        p_end   = int(self._ev_offsets[span_stop])
+        n_parts = p_end - p_start
+
+        if n_parts == 0:
+            return [[] for _ in req]
+
+        # 8 scalar reads + 1 pc_offsets slice + 1 flat-points read = 10 HDF5 ops
+        ids             = self._f["particles/id"               ][p_start:p_end]
+        parent_ids      = self._f["particles/parent_id"        ][p_start:p_end]
+        root_ids        = self._f["particles/root_id"          ][p_start:p_end]
+        pdgs            = self._f["particles/pdg"              ][p_start:p_end]
+        parent_pdgs     = self._f["particles/parent_pdg"       ][p_start:p_end]
+        interaction_ids = self._f["particles/interaction_id"   ][p_start:p_end]
+        itypes          = self._f["particles/interaction_type" ][p_start:p_end]
+        sem_types       = self._f["particles/sem_type"         ][p_start:p_end]
+
+        pc_bounds = self._pc_offsets[p_start : p_end + 1]   # (n_parts+1,)
+        pt_start  = int(pc_bounds[0])
+        pt_end    = int(pc_bounds[-1])
+        flat_all  = self._f["points/flat"][pt_start:pt_end]  # single read
+        local_pc  = pc_bounds - pt_start                     # zero-indexed
+
+        # ---- helper: build particle list for one event index --------------
+        def _build_event(ev):
+            ep_start = int(self._ev_offsets[ev])     - p_start
+            ep_end   = int(self._ev_offsets[ev + 1]) - p_start
+            particles = []
+            for k in range(ep_start, ep_end):
+                cloud = flat_all[local_pc[k] : local_pc[k + 1]]
+                p = Particle(
+                    id               = int(ids[k]),
+                    parent_id        = int(parent_ids[k]),
+                    root_id          = int(root_ids[k]),
+                    pdg              = int(pdgs[k]),
+                    parent_pdg       = int(parent_pdgs[k]),
+                    interaction_id   = int(interaction_ids[k]),
+                    interaction_type = int(itypes[k]),
+                    point_cloud      = cloud,
+                )
+                p.sem_type = SemanticType(int(sem_types[k]))
+                particles.append(p)
+            return particles
+
+        return [_build_event(ev) for ev in req]
+
+    def iter_events(self, batch_size: int = 64):
         """
         Iterate over all events in file order.
+
+        Reads events in batches of *batch_size* to amortise HDF5 overhead
+        while keeping memory bounded.  Each ``yield`` still returns a single
+        event's particle list.
+
+        Parameters
+        ----------
+        batch_size : int, optional
+            Number of events to pre-fetch per HDF5 batch.  Default ``64``.
+            Set to ``1`` to reproduce the old one-at-a-time behaviour.
 
         Yields
         ------
         list of Particle
         """
-        for i in range(self._n_events):
-            yield self[i]
+        for batch_start in range(0, self._n_events, batch_size):
+            batch_stop = min(batch_start + batch_size, self._n_events)
+            for ev in self.read_bulk(batch_start, batch_stop):
+                yield ev
 
     @property
     def n_events(self) -> int:
@@ -681,9 +1183,10 @@ def _normalize_cloud(pc) -> np.ndarray:
     * A 1-D array of length 0 (e.g. ``np.array([])``) — converted to
       ``np.empty((0, _PC_NDIM), float32)``.
     * A properly-shaped 2-D array with 0 rows — returned as-is (after
-      dtype cast).
+      dtype cast and column adjustment).
 
-    Non-empty 2-D arrays are returned unchanged (modulo dtype cast).
+    Non-empty 2-D arrays are trimmed to ``_PC_NDIM`` columns when they have
+    more, or zero-padded on the right when they have fewer.
 
     Raises
     ------
@@ -703,7 +1206,16 @@ def _normalize_cloud(pc) -> np.ndarray:
         raise ValueError(
             f"point_cloud must be a 2-D array, got shape {pc.shape}."
         )
-    return pc.astype(np.float32)
+    pc = pc.astype(np.float32)
+    n_cols = pc.shape[1]
+    if n_cols == _PC_NDIM:
+        return pc
+    if n_cols > _PC_NDIM:
+        return pc[:, :_PC_NDIM]
+    # Fewer columns than _PC_NDIM — zero-pad on the right
+    padded = np.zeros((pc.shape[0], _PC_NDIM), dtype=np.float32)
+    padded[:, :n_cols] = pc
+    return padded
 
 
 def _compress_kwargs(compression: Optional[str],
@@ -711,29 +1223,271 @@ def _compress_kwargs(compression: Optional[str],
     """
     Build h5py dataset keyword arguments for the requested filter.
 
-    Falls back gracefully if ``hdf5plugin`` is unavailable (required for
-    lz4/blosc) and the user requested lz4.
+    Supported values for *compression*:
+
+    * ``None``        — no compression; fastest reads, largest files.
+    * ``"lzf"``       — LZF filter built into h5py; always available;
+                        fast decompression, moderate ratio.  **Default.**
+    * ``"lz4"``       — LZ4 via ``hdf5plugin``; faster than LZF for large
+                        arrays with byte-shuffle.  Falls back to LZF if
+                        ``hdf5plugin`` is not installed.
+    * ``"blosc_lz4"`` — Blosc+LZ4 via ``hdf5plugin``; supports parallel
+                        decompression (set ``HDF5_PLUGIN_PATH`` or install
+                        the Blosc plugin).  Falls back to LZF.
+    * ``"gzip"``      — Standard DEFLATE; good ratio, slowest reads.
     """
     if compression is None:
         return {}
 
-    if compression == "lz4":
+    if compression in ("lz4", "blosc_lz4"):
         try:
-            import hdf5plugin  # noqa: F401 — registers the filter
-            return {"compression": "lz4"}
+            import hdf5plugin
+            if compression == "blosc_lz4":
+                return dict(hdf5plugin.Blosc(cname="lz4", shuffle=hdf5plugin.Blosc.BYTE_SHUFFLE))
+            else:
+                return dict(hdf5plugin.LZ4())
         except ImportError:
             import warnings
             warnings.warn(
-                "hdf5plugin not installed; falling back to gzip compression. "
-                "Install with: pip install hdf5plugin",
+                f"hdf5plugin not installed; falling back to lzf compression "
+                f"(requested {compression!r}).  Install with: pip install hdf5plugin",
                 stacklevel=3,
             )
-            compression = "gzip"
+            compression = "lzf"
 
     kwargs: dict = {"compression": compression}
     if compression_opts is not None:
         kwargs["compression_opts"] = compression_opts
     return kwargs
+
+
+def inspect_compression(path: str) -> dict:
+    """
+    Report the HDF5 filter and chunk geometry for the key datasets in *path*.
+
+    Useful for diagnosing read performance::
+
+        >>> from pysupera.io import inspect_compression
+        >>> inspect_compression("output.h5")
+        {'points/flat':    {'compression': 'gzip', 'compression_opts': 1, 'chunks': (65536, 5)},
+         'particles/id':   {'compression': 'gzip', 'compression_opts': 1, 'chunks': (256,)}, ...}
+
+    Parameters
+    ----------
+    path : str
+        Path to any HDF5 file written by this library.
+
+    Returns
+    -------
+    dict
+        ``{dataset_path: {"compression": ..., "compression_opts": ..., "chunks": ...}}``
+    """
+    import h5py
+    keys = [
+        "points/flat",
+        "particles/id",
+        "particles/pc_offsets",
+    ]
+    result = {}
+    with h5py.File(path, "r") as f:
+        for k in keys:
+            if k not in f:
+                continue
+            ds = f[k]
+            result[k] = {
+                "compression":      ds.compression,
+                "compression_opts": ds.compression_opts,
+                "chunks":           ds.chunks,
+                "shape":            ds.shape,
+            }
+    return result
+
+
+def recompress(src: str, dst: str,
+               compression: str = "lzf",
+               compression_opts: Optional[int] = None,
+               batch_size: int = 256) -> None:
+    """
+    Rewrite *src* into *dst* with a different compression filter.
+
+    Copies particle events **and** event-level point clouds
+    (``non_le_cloud`` / ``le_scatter_cloud``).
+    Fragment and instance representative groups are also copied when
+    present in the source file.
+
+    Parameters
+    ----------
+    src : str
+        Path to the source HDF5 file (any supported compression).
+    dst : str
+        Path for the output file (will be overwritten if it exists).
+    compression : str, optional
+        Compression for the output file.  Default ``"lzf"``.
+        Use ``"gzip"`` to produce a file readable by h5wasm in the browser.
+    compression_opts : int or None, optional
+        Compression level for the output filter.
+    batch_size : int, optional
+        Events per read batch.  Default ``256``.
+    """
+    import h5py as _h5
+    import numpy as _np
+
+    with EventStore(src) as src_store, \
+         _h5.File(src, "r") as src_f, \
+         open_writer(dst, compression=compression,
+                     compression_opts=compression_opts) as w:
+
+        n_ev = len(src_store)
+
+        # Pre-read cloud offset arrays if present
+        _has_nle = "non_le_cloud/offsets" in src_f
+        _has_le  = "le_scatter_cloud/offsets" in src_f
+        if _has_nle:
+            _nle_off = src_f["non_le_cloud/offsets"][:]
+        if _has_le:
+            _le_off  = src_f["le_scatter_cloud/offsets"][:]
+
+        # Pre-read fragment / instance event-offset arrays if present
+        _has_frags = "frag_events/offsets" in src_f
+        _has_insts = "inst_events/offsets" in src_f
+        if _has_frags:
+            _fr_ev_off  = src_f["frag_events/offsets"][:]
+        if _has_insts:
+            _in_ev_off  = src_f["inst_events/offsets"][:]
+
+        for batch_start in range(0, n_ev, batch_size):
+            batch_stop = min(batch_start + batch_size, n_ev)
+
+            for ev_idx, particles in zip(
+                range(batch_start, batch_stop),
+                src_store.read_bulk(batch_start, batch_stop),
+            ):
+                # ---- event-level clouds -----------------------------------
+                if _has_nle or _has_le:
+                    nle_cloud = (
+                        src_f["non_le_cloud/flat"][
+                            int(_nle_off[ev_idx]) : int(_nle_off[ev_idx + 1])
+                        ] if _has_nle
+                        else _np.empty((0, _CLOUD_NDIM), dtype=_np.float32)
+                    )
+                    le_cloud  = (
+                        src_f["le_scatter_cloud/flat"][
+                            int(_le_off[ev_idx]) : int(_le_off[ev_idx + 1])
+                        ] if _has_le
+                        else _np.empty((0, _CLOUD_NDIM), dtype=_np.float32)
+                    )
+                    w.append_event_clouds(nle_cloud, le_cloud)
+
+                # ---- fragment representatives -----------------------------
+                if _has_frags:
+                    _fr_s = int(_fr_ev_off[ev_idx])
+                    _fr_e = int(_fr_ev_off[ev_idx + 1])
+                    frags = _read_rep_level(src_f, "particle_fragments", _fr_s, _fr_e)
+                    w.append_fragments(frags)
+
+                # ---- instance representatives ----------------------------
+                if _has_insts:
+                    _in_s = int(_in_ev_off[ev_idx])
+                    _in_e = int(_in_ev_off[ev_idx + 1])
+                    insts = _read_rep_level(src_f, "particle_instances", _in_s, _in_e)
+                    w.append_instances(insts)
+
+                w.append_event(particles)
+
+
+def _read_rep_level(f, group: str, r_start: int, r_end: int) -> list:
+    """Reconstruct minimal Particle-like objects from a stored representative group.
+
+    Used internally by :func:`recompress`.
+    """
+    from .data import Particle
+    from .utils import SemanticType
+
+    n_r = r_end - r_start
+    if n_r == 0:
+        return []
+
+    ids    = f[f"{group}/id"              ][r_start:r_end]
+    pids   = f[f"{group}/parent_id"       ][r_start:r_end]
+    rids   = f[f"{group}/root_id"         ][r_start:r_end]
+    pdgs   = f[f"{group}/pdg"             ][r_start:r_end]
+    ppdgs  = f[f"{group}/parent_pdg"      ][r_start:r_end]
+    intids = f[f"{group}/interaction_id"  ][r_start:r_end]
+    itypes = f[f"{group}/interaction_type"][r_start:r_end]
+    stypes = f[f"{group}/sem_type"        ][r_start:r_end]
+    pfids  = f[f"{group}/parent_frag_id"  ][r_start:r_end] if f"{group}/parent_frag_id" in f else None
+    piids  = f[f"{group}/parent_inst_id"  ][r_start:r_end] if f"{group}/parent_inst_id" in f else None
+
+    pc_off   = f[f"{group}/pc_offsets"    ][r_start : r_end + 1]
+    mem_off  = f[f"{group}/member_offsets"][r_start : r_end + 1]
+
+    pt_start = int(pc_off[0])
+    pt_end   = int(pc_off[-1])
+    pts_flat = f[f"{group}_points/flat"][pt_start:pt_end] if pt_end > pt_start else None
+
+    mem_start = int(mem_off[0])
+    mem_end   = int(mem_off[-1])
+    mem_flat  = f[f"{group}_members/flat"][mem_start:mem_end] if mem_end > mem_start else None
+
+    reps = []
+    for k in range(n_r):
+        cloud = pts_flat[int(pc_off[k]) - pt_start : int(pc_off[k + 1]) - pt_start] \
+                if pts_flat is not None else __import__('numpy').empty((0, _PC_NDIM), dtype='float32')
+        ms = int(mem_off[k]) - mem_start
+        me = int(mem_off[k + 1]) - mem_start
+        mids = list(mem_flat[ms:me].astype(int)) if mem_flat is not None and me > ms else None
+        p = Particle(
+            id               = int(ids[k]),
+            parent_id        = int(pids[k]),
+            root_id          = int(rids[k]),
+            pdg              = int(pdgs[k]),
+            parent_pdg       = int(ppdgs[k]),
+            interaction_id   = int(intids[k]),
+            interaction_type = int(itypes[k]),
+            point_cloud      = cloud,
+        )
+        p.sem_type   = SemanticType(int(stypes[k]))
+        p.member_ids = mids
+        if pfids is not None:
+            p.parent_frag_id = int(pfids[k])
+        if piids is not None:
+            p.parent_inst_id = int(piids[k])
+        reps.append(p)
+    return reps
+
+
+def recompress_cli() -> None:
+    """Entry point for the ``pysupera-recompress`` shell command.
+
+    Usage::
+
+        pysupera-recompress src.h5 dst.h5 [--compression gzip] [--level 1]
+
+    Rewrites *src.h5* into *dst.h5* with the chosen compression filter.
+    Use ``--compression gzip`` to produce a browser-compatible file for
+    the WebGL viewer (h5wasm only supports gzip).
+    """
+    import argparse
+    parser = argparse.ArgumentParser(
+        prog="pysupera-recompress",
+        description="Recompress a pysupera HDF5 file with a different filter.",
+    )
+    parser.add_argument("src",  help="Source HDF5 file")
+    parser.add_argument("dst",  help="Output HDF5 file (will be overwritten)")
+    parser.add_argument("-c", "--compression", default="gzip",
+                        help="Compression filter: gzip, lzf, lz4, blosc_lz4, none  (default: gzip)")
+    parser.add_argument("-l", "--level", type=int, default=None,
+                        help="Compression level (gzip: 1-9; default: filter default)")
+    parser.add_argument("-b", "--batch-size", type=int, default=256,
+                        help="Events per read batch (default: 256)")
+    args = parser.parse_args()
+    comp = None if args.compression in ("none", "~", "") else args.compression
+    print(f"[recompress] {args.src} → {args.dst}  compression={comp!r} level={args.level}")
+    recompress(args.src, args.dst,
+               compression=comp,
+               compression_opts=args.level,
+               batch_size=args.batch_size)
+    print("[recompress] Done.")
 
 
 # ---------------------------------------------------------------------------
@@ -760,7 +1514,7 @@ def voxmap_path(main_path: str) -> str:
 
 def write_voxmap(main_path: str,
                  events_voxmaps,
-                 compression: str = "lz4",
+                 compression: str = "lzf",
                  compression_opts: Optional[int] = None) -> str:
     """
     Write a companion voxelization-mapping file alongside *main_path*.
@@ -909,7 +1663,7 @@ def write_voxmap(main_path: str,
 
 
 def open_voxmap_writer(main_path: str,
-                       compression: str = "lz4",
+                       compression: str = "lzf",
                        compression_opts: Optional[int] = None) -> "VoxmapWriter":
     """
     Open a :class:`VoxmapWriter` for incremental voxmap writing.
@@ -967,7 +1721,7 @@ class VoxmapWriter:
     """
 
     def __init__(self, main_path: str,
-                 compression: str = "lz4",
+                 compression: str = "lzf",
                  compression_opts: Optional[int] = None) -> None:
         import h5py
         self._ckw   = _compress_kwargs(compression, compression_opts)
@@ -1022,39 +1776,55 @@ class VoxmapWriter:
             new_vox_end  = self._n_voxels  + n_vox_total
             new_flat_end = self._n_flat    + n_flat_total
 
-            # particles/vox_offsets
+            # ---- particles/id and particles/vox_offsets (one write each) ----
+            pid_ds     = self._f["particles/id"]
             vox_off_ds = self._f["particles/vox_offsets"]
+            pid_ds.resize(new_p_end, axis=0)
             vox_off_ds.resize(new_p_end + 1, axis=0)
 
-            # voxels/input_offsets
+            bulk_pids     = np.array([r.particle_id for r in vox_records], dtype=np.int32)
+            bulk_vox_ends = np.empty(n_p, dtype=np.int64)   # absolute voxel end per particle
+            running = np.int64(self._n_voxels)
+            for k, rec in enumerate(vox_records):
+                running += np.int64(len(rec.voxel_offsets) - 1)
+                bulk_vox_ends[k] = running
+
+            pid_ds    [new_p_start : new_p_end]     = bulk_pids
+            vox_off_ds[new_p_start + 1 : new_p_end + 1] = bulk_vox_ends
+
+            # ---- voxels/input_offsets (one write) ----------------------------
             vox_inp_ds = self._f["voxels/input_offsets"]
             vox_inp_ds.resize(new_vox_end + 1, axis=0)
 
-            # flat datasets
+            bulk_inp_offs = np.empty(n_vox_total, dtype=np.int64)
+            cursor_vox = 0
+            running_flat = np.int64(self._n_flat)
+            for rec in vox_records:
+                n_vox = len(rec.voxel_offsets) - 1
+                bulk_inp_offs[cursor_vox : cursor_vox + n_vox] = (
+                    rec.voxel_offsets[1:].astype(np.int64) + running_flat
+                )
+                running_flat += np.int64(len(rec.input_ids))
+                cursor_vox   += n_vox
+            vox_inp_ds[self._n_voxels + 1 : new_vox_end + 1] = bulk_inp_offs
+
+            # ---- flat input_ids and input_energies (one write each) ----------
             flat_ids_ds = self._f["flat/input_ids"]
             flat_eng_ds = self._f["flat/input_energies"]
             flat_ids_ds.resize(new_flat_end, axis=0)
             flat_eng_ds.resize(new_flat_end, axis=0)
 
-            running_vox  = np.int64(self._n_voxels)
-            running_flat = np.int64(self._n_flat)
-
-            for k, rec in enumerate(vox_records):
-                n_vox = np.int64(len(rec.voxel_offsets) - 1)
-                p_abs = new_p_start + k
-                vox_off_ds[p_abs + 1] = running_vox + n_vox
-
-                # per-voxel fencepost into flat
-                vox_inp_ds[running_vox + 1 : running_vox + 1 + n_vox] = (
-                    rec.voxel_offsets[1:].astype(np.int64) + running_flat
-                )
-
-                n_flat = np.int64(len(rec.input_ids))
-                flat_ids_ds[running_flat : running_flat + n_flat] = rec.input_ids.astype(np.int64)
-                flat_eng_ds[running_flat : running_flat + n_flat] = rec.input_energies.astype(np.float32)
-
-                running_flat += n_flat
-                running_vox  += n_vox
+            bulk_ids = np.empty(n_flat_total, dtype=np.int64)
+            bulk_eng = np.empty(n_flat_total, dtype=np.float32)
+            cursor = 0
+            for rec in vox_records:
+                n = len(rec.input_ids)
+                if n > 0:
+                    bulk_ids[cursor : cursor + n] = rec.input_ids.astype(np.int64)
+                    bulk_eng[cursor : cursor + n] = rec.input_energies.astype(np.float32)
+                cursor += n
+            flat_ids_ds[self._n_flat : new_flat_end] = bulk_ids
+            flat_eng_ds[self._n_flat : new_flat_end] = bulk_eng
 
         self._n_events    += 1
         self._n_particles += n_p
@@ -1086,6 +1856,9 @@ class VoxmapWriter:
         pg = f.create_group("particles")
         pg.create_dataset("vox_offsets", data=np.zeros(1, dtype=np.int64),
                           maxshape=(None,), chunks=(_CHUNK_PARTICLES,))
+        pg.create_dataset("id",
+                          shape=(0,), maxshape=(None,), dtype=np.int32,
+                          chunks=(_CHUNK_PARTICLES,))
 
         vg = f.create_group("voxels")
         vg.create_dataset("input_offsets", data=np.zeros(1, dtype=np.int64),
@@ -1125,6 +1898,12 @@ class VoxmapStore:
 
         self._ev_offsets  = self._f["events/offsets"][:]
         self._vox_offsets = self._f["particles/vox_offsets"][:]
+        # particle IDs — load fully into RAM (same size as _vox_offsets)
+        self._particle_ids = (
+            self._f["particles/id"][:]
+            if "particles/id" in self._f
+            else None
+        )
         # voxels/input_offsets is potentially large — load lazily
         # (accessed via HDF5 slice in __getitem__)
 
@@ -1190,6 +1969,8 @@ class VoxmapStore:
             f_s = int(local_vox_offsets[0])
             f_e = int(local_vox_offsets[-1])
             result.append({
+                "particle_id":        int(self._particle_ids[p_start + k])
+                                      if self._particle_ids is not None else None,
                 "vox_input_offsets": local_vox_offsets - f_s,
                 "input_ids":         all_ids[f_s:f_e],
                 "input_energies":    all_eng[f_s:f_e],

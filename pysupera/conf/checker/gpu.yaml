@@ -3,4 +3,4 @@
 name: gpu
 # Rows of cloud_a per CuPy kernel launch in Stage-2 exact checks.
 # Increase for larger GPU memory / smaller clouds; decrease to avoid OOM.
-chunk_size: 512
+chunk_size: 32728

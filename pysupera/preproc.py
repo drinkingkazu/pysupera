@@ -199,13 +199,14 @@ def _split_fragments(
         else:
             frag_pc = pc[frag_mask]
             new_p = Particle(
-                id           = next_id,
-                parent_id    = p.id,
-                root_id  = p.root_id,
-                pdg          = p.pdg,
-                parent_pdg   = p.parent_pdg,
+                id               = next_id,
+                parent_id        = p.id,
+                root_id          = p.root_id,
+                pdg              = p.pdg,
+                parent_pdg       = p.parent_pdg,
+                interaction_id   = p._interaction_id,
                 interaction_type = p._interaction_type,
-                point_cloud  = frag_pc,
+                point_cloud      = frag_pc,
             )
             new_p.sem_type = SemanticType.kLEScatter
             spawned.append(new_p)
@@ -519,11 +520,11 @@ class DefragmentBase(ABC):
 #
 #   time   (col 3) — minimum: earliest hit time survives
 #   energy (col 4) — sum:     total deposited energy
-#   dedx   (col 5) — maximum: peak ionisation density
+#   dx     (col 5) — sum: additional scalar feature
 _MERGE_RULES: list = [
     (PointFeature.time,   np.inf,  np.minimum),
     (PointFeature.energy, 0.0,     np.add),
-    (PointFeature.dedx,  -np.inf,  np.maximum),
+    (PointFeature.dx,    0.0,      np.add),
 ]
 
 
@@ -533,8 +534,8 @@ def _merge_point_cloud(pc: np.ndarray) -> np.ndarray:
 
     Coordinates (columns 0–2) are used as the grouping key.  Feature
     columns beyond index 2 are aggregated according to ``_MERGE_RULES``:
-    time → min, energy → sum, dedx → max.  Any extra columns beyond
-    ``PointFeature.dedx`` are left at zero.
+    time → min, energy → sum, dx → sum.  Any extra columns beyond
+    ``PointFeature.dx`` are left at zero.
 
     Parameters
     ----------
@@ -583,7 +584,7 @@ class MergeDuplicatesProcessor:
     ============  ======================================================
     time (3)      minimum — the earliest hit time is retained
     energy (4)    sum — total deposited energy
-    dedx (5)      maximum — peak ionisation density
+    dx   (5)      sum — additional scalar feature
     any extras    zero — placeholder; extend ``_MERGE_RULES`` to change
     ============  ======================================================
 
@@ -804,7 +805,7 @@ def _voxelize_point_cloud(
         New array where each row represents one non-empty voxel.  The
         x, y, z columns hold the voxel-centre coordinates; remaining
         feature columns are aggregated by the same rules as
-        :func:`_merge_point_cloud` (time=min, energy=sum, dedx=max).
+        :func:`_merge_point_cloud` (time=min, energy=sum, dx=sum).
         Returns the original array unchanged when every voxel already
         contains exactly one point.
     """
@@ -869,7 +870,7 @@ class VoxelizeProcessor:
     Feature aggregation (columns beyond index 2)
     ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
     Identical to :class:`MergeDuplicatesProcessor`:
-    time → min, energy → sum, dedx → max.
+    time → min, energy → sum, dx → sum.
 
     Parameters
     ----------

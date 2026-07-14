@@ -7,4 +7,5 @@ from .io import (write_events, open_writer, read_events, EventStore, EventWriter
 from .config import (build_checker, build_conditions, build_preprocessor,
                      build_merge_processor, build_voxelizer, build_pipeline,
                      load_cfg, configure, check_particle_list, Pipeline)
-from .utils import trace_ancestry
+from .utils import trace_ancestry, resolve_orphans
+from .merge import merge_em_showers

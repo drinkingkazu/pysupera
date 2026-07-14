@@ -110,8 +110,9 @@ class PointFeature(int):
         Hit time.
     energy : int = 4
         Energy deposited at the hit.
-    dedx : int = 5
-        Ionisation energy loss (dE/dx) at the hit.
+    dx : int = 5
+        Additional scalar feature (e.g. a second energy-like quantity) summed
+        over all hits that merge into the same output point.
     id : int = 6
         (optional) integer hit ID, e.g. for matching to truth-level information.
     """
@@ -120,7 +121,7 @@ class PointFeature(int):
     z      = 2
     time   = 3
     energy = 4
-    dedx   = 5
+    dx     = 5
     id     = 6
 
     def __new__(cls, value):
@@ -253,6 +254,61 @@ def trace_ancestry(particle_id: int, particles, print_result: bool = True):
             print(f"\n  (no direct children of {particle_id} in this particle list)")
 
     return chain, children
+
+
+def resolve_orphans(particles, verbose: bool = False):
+    """
+    Repair dangling ``parent_id`` and ``root_id`` references in a particle list
+    so that every genealogy walk terminates at a particle that is actually
+    present in the event.
+
+    An *orphan* is a particle whose ``parent_id`` (or ``root_id``) refers to a
+    particle ID that does not appear in *particles*.  Such dangling references
+    cause :meth:`~pysupera.partitioner.ParticlePartitioner._build_relationships`
+    to build an incomplete ``children_map`` / ``ancestor_map``, and they also
+    break the ``find_initiator`` walk inside
+    :func:`~pysupera.merge.merge_em_showers`.
+
+    The repair rule is conservative:
+
+    * If ``p.parent_id`` is not in the known-ID set, reset it to ``p.id``
+      (i.e. make the particle a primary/root with respect to this event list).
+    * If ``p.root_id`` is not in the known-ID set, reset it to ``p.id``
+      as well.
+
+    This function modifies *particles* **in place** and returns the same list.
+
+    Parameters
+    ----------
+    particles : list of Particle
+        The full particle collection for one event.  Modified in place.
+    verbose : bool, optional
+        If ``True``, print a summary of how many references were repaired.
+
+    Returns
+    -------
+    list of Particle
+        The same list (modified in place) for convenient chaining.
+
+    Examples
+    --------
+    >>> particles = resolve_orphans(particles)
+    >>> partitioner = ParticlePartitioner(particles=particles, ...)
+    """
+    known_ids = {p.id for p in particles}
+    n_parent_fixed = 0
+    n_root_fixed   = 0
+    for p in particles:
+        if p.parent_id not in known_ids:
+            p.parent_id = p.id
+            n_parent_fixed += 1
+        if p.root_id not in known_ids:
+            p.root_id = p.id
+            n_root_fixed += 1
+    if verbose and (n_parent_fixed or n_root_fixed):
+        print(f"[resolve_orphans] repaired {n_parent_fixed} parent_id(s) "
+              f"and {n_root_fixed} root_id(s) out of {len(particles)} particles")
+    return particles
 
 
 def SetSemanticType(interaction_type, pdg, parent_pdg, point_cloud, point_cloud_size=-1):
