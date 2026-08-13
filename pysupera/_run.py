@@ -80,6 +80,8 @@ def main(cfg: DictConfig) -> None:
     print(f"[run] output_compact  : {bool(cfg.get('output_compact', False))}")
     print(f"[run] drop_le_scatter : {bool(cfg.get('drop_le_scatter', False))}")
     print(f"[run] write_event_clouds: {bool(cfg.get('write_event_clouds', True))}")
+    print(f"[run] allow_empty_image: {bool(cfg.get('allow_empty_image', False))}")
+    print(f"[run] repack          : {bool((cfg.get('repack', {}) or {}).get('enabled', False))}")
     print(f"[run] input           : {cfg.io.input_path}")
     print(f"[run] output          : {cfg.io.output_path}")
     _jaxtpc_seg  = cfg.reader.get("jaxtpc_seg_path",  None)
@@ -110,6 +112,10 @@ def main(cfg: DictConfig) -> None:
 
     _max_events = int(cfg.get("max_events", -1))
     _show_progress = bool(cfg.get("progress", True))
+
+    # Empty-image policy: halt by default, warn once when explicitly allowed.
+    _allow_empty_image = bool(cfg.get("allow_empty_image", False))
+    _warned_empty_image = False
 
     with build_reader(cfg) as store:
         _n_available = len(store)
@@ -180,6 +186,39 @@ def main(cfg: DictConfig) -> None:
                 # ── Particle statistics (after preprocessing, before partition) ──
                 _pc_lens = [len(p.point_cloud) for p in particles]
                 _nonzero = [s for s in _pc_lens if s > 0]
+
+                # ── Empty-image guard ───────────────────────────────────────
+                # Every particle having an empty point cloud means the event
+                # holds no charge at all.  This is nearly always a config
+                # error (wrong seg/inst file, wrong step_key) rather than
+                # physics, so halt unless explicitly allowed.
+                if not _nonzero:
+                    _msg = (
+                        f"Event {event_idx}: empty image — all "
+                        f"{len(particles)} particle(s) have an empty point "
+                        f"cloud, so the event contains no points."
+                    )
+                    if not _allow_empty_image:
+                        raise RuntimeError(
+                            f"{_msg}  This usually indicates a configuration "
+                            f"error rather than real physics: check "
+                            f"io.input_path, reader.step_key/ass_key, and (in "
+                            f"JAXTPC mode) that reader.jaxtpc_seg_path and "
+                            f"reader.jaxtpc_inst_path point at the seg/step and "
+                            f"hits/inst files respectively.  Set "
+                            f"allow_empty_image=true to downgrade this to a "
+                            f"one-time warning."
+                        )
+                    if not _warned_empty_image:
+                        import warnings
+                        warnings.warn(
+                            f"{_msg}  allow_empty_image=true, so processing "
+                            f"continues; this warning is issued only once.",
+                            UserWarning,
+                            stacklevel=2,
+                        )
+                        _warned_empty_image = True
+
                 stats['n_particles_in'].append(len(particles))
                 stats['n_nonzero_pc'].append(len(_nonzero))
                 stats['pc_size_min'].append(min(_nonzero) if _nonzero else 0)
@@ -408,6 +447,22 @@ def main(cfg: DictConfig) -> None:
                 )
 
             _bar.close()
+
+    # ── Post-run repack (opt-in) ───────────────────────────────────────────
+    # Runs only after every writer above has been closed, so the file is
+    # complete and every dataset's final length is known.
+    _repack_cfg = cfg.get("repack", {}) or {}
+    if bool(_repack_cfg.get("enabled", False)):
+        from pysupera.io import repack, voxmap_path
+        _rc_comp = _repack_cfg.get("compression", None)
+        _rc_opts = _repack_cfg.get("compression_opts", None)
+        _targets = [cfg.io.output_path]
+        if _write_voxmap:
+            _targets.append(voxmap_path(cfg.io.output_path))
+        for _tgt in _targets:
+            repack(str(_tgt),
+                   compression=None if _rc_comp in (None, "") else str(_rc_comp),
+                   compression_opts=None if _rc_opts is None else int(_rc_opts))
 
     # ── End-of-run summary report ──────────────────────────────────────────
     if n_events > 0 and cfg.get("report", True):

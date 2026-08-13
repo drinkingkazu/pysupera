@@ -40,6 +40,44 @@ report: true
 # Record every merge decision for post-hoc inspection.
 enable_diagnostics: false
 
+# ---------------------------------------------------------------------------
+# Post-run repack (opt-in)
+# ---------------------------------------------------------------------------
+# Rewrite the output file once the event loop has finished, sizing every chunk
+# from the dataset's final length.
+#
+# Why this is a separate pass: the writer creates each dataset empty and grows
+# it with resize() as events arrive, so when a chunk shape must be chosen the
+# final length is not yet known.  Chunk shapes come from a byte budget (see
+# _CHUNK_TARGET_BYTES in io.py), which bounds the waste to at most one chunk per
+# dataset -- but a dataset that ends up shorter than a single chunk still stores
+# the remainder as padding.  Repacking clamps every chunk to the real length.
+#
+# The gain is therefore largest for SHORT runs, where several datasets are
+# shorter than one chunk, and small for long production runs.  It costs one full
+# read+write of the output file.
+repack:
+  enabled: false
+  # Filter for the repacked file.  null keeps whatever each dataset already
+  # uses; set to gzip to produce a browser/h5wasm-readable file in one step.
+  compression: ~
+  # Compression level for the above (gzip: 1-9).
+  compression_opts: ~
+
+# Tolerate "empty images" — events in which every particle ends up with an
+# empty point cloud, so the event carries no reconstructable charge at all.
+#
+# false (default) — raise RuntimeError and halt on the first empty image.
+#                   An all-empty event almost always signals a configuration
+#                   mistake (e.g. the wrong reader.jaxtpc_seg_path / step_key)
+#                   rather than real physics, and silently writing thousands of
+#                   empty events is far worse than stopping early.
+# true            — allow empty images through, emitting a single warning the
+#                   first time one is encountered (not once per event).  Use
+#                   when empty events are genuinely expected, e.g. very low
+#                   readout thresholds or heavily masked detector volumes.
+allow_empty_image: false
+
 # Verify that the particle list is self-consistent before partitioning:
 # every parent_id referenced by a particle must correspond to a particle
 # in the list.  Raises ValueError listing all missing parent IDs when
