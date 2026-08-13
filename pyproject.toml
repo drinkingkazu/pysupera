@@ -12,6 +12,9 @@ dependencies = [
     "numpy",
     "scipy",
     "h5py",
+    # Registers the Blosc/LZ4 HDF5 filters.  Required to read JAXTPC seg/inst
+    # files (written with Blosc, filter 32001) and to write io.compression=lz4.
+    "hdf5plugin",
     "hydra-core>=1.3",
     "omegaconf>=2.3",
 ]

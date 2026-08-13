@@ -15,7 +15,8 @@ File                   Description
                        sub-group stores the ``group_ids`` of segments that
                        survived the signal threshold and were reconstructed.
                        Also stores the lookup tables ``segment_to_group``
-                       (segment index → group index) and ``group_to_track``
+                       (segment index → group index; newer JAXTPC output names
+                       this ``deposit_to_group``) and ``group_to_track``
                        (group index → Geant4 track ID) for each volume.
 *edepsim* (H5)         Original EDepSim HDF5 file with particle-level metadata
                        (PDG, parent/root track IDs, start vertex, interaction
@@ -33,8 +34,8 @@ Visibility logic (mirrors ``get_visible_segments_by_track`` in
        sub-group to collect the set of *active_group_ids* (groups above
        threshold).
     2. Map every segment in that volume to its group via
-       ``segment_to_group``.  A segment is *visible* if its group is in
-       ``active_group_ids``.
+       ``segment_to_group`` / ``deposit_to_group``.  A segment is *visible* if
+       its group is in ``active_group_ids``.
     3. Map visible group IDs to Geant4 track IDs via ``group_to_track``.
     4. Collect visible segments per track across all volumes, then build a
        flat point cloud and per-particle offset array for
@@ -61,6 +62,14 @@ from __future__ import annotations
 
 import numpy as np
 
+# Register HDF5 compression filters (LZ4, Blosc, etc.) if available.
+# JAXTPC seg/inst files are written with Blosc (HDF5 filter 32001), which
+# h5py cannot decode unless these filters have been registered first.
+try:
+    import hdf5plugin  # noqa: F401
+except ImportError:
+    pass
+
 from .base import EventReaderBase
 from .format_edepsim_h5 import (
     _DEFAULT_VERTEX_KEY,
@@ -72,6 +81,18 @@ from .format_edepsim_h5 import (
 )
 from ..data import Particle
 from ..utils import PointFeature
+
+
+# Per-volume table mapping segment (deposit) index → group index.  Older
+# JAXTPC output names this ``segment_to_group``; newer output writes
+# ``deposit_to_group``.  Both spellings are accepted, in this order.
+_SEG_TO_GROUP_KEYS = ('segment_to_group', 'deposit_to_group')
+
+# Datasets every non-empty seg volume must provide.
+_SEG_REQUIRED_DATASETS = ('positions', 'de', 'dx', 't0_us', 'charge')
+
+# Attributes every non-empty seg volume must provide.
+_SEG_REQUIRED_ATTRS = ('pos_step_mm', 'pos_origin_x', 'pos_origin_y', 'pos_origin_z')
 
 
 # ---------------------------------------------------------------------------
@@ -109,7 +130,12 @@ def get_visible_segment_indices_by_track(
     result: list[dict[int, np.ndarray]] = []
 
     if event_key not in inst_file:
-        return [{} for _ in seg_volumes]
+        raise KeyError(
+            f"Event group {event_key!r} not found in the JAXTPC inst file "
+            f"{inst_file.filename!r}.  Top-level groups present: "
+            f"{sorted(inst_file.keys())[:6]}.  The inst file must cover the "
+            f"same events as the EDepSim file given by io.input_path."
+        )
 
     event_group = inst_file[event_key]
 
@@ -117,8 +143,18 @@ def get_visible_segment_indices_by_track(
         track_to_indices: dict[int, np.ndarray] = {}
         vol_key = f'volume_{v}'
 
-        # Skip if inst data is missing for this volume or no segments exist.
-        if vol_key not in event_group or seg.get('n_actual', 0) == 0:
+        # A missing volume group means the inst file does not describe the same
+        # volumes as the seg file — always a configuration error, never data.
+        if vol_key not in event_group:
+            raise KeyError(
+                f"{event_key}/{vol_key} is present in the JAXTPC seg file but "
+                f"missing from the inst file {inst_file.filename!r} "
+                f"(volumes present: {sorted(event_group.keys())}).  The seg and "
+                f"inst files must come from the same JAXTPC run."
+            )
+
+        # A volume that genuinely holds zero segments is legitimately empty.
+        if seg.get('n_actual', 0) == 0:
             result.append(track_to_indices)
             continue
 
@@ -126,23 +162,45 @@ def get_visible_segment_indices_by_track(
 
         # look-up tables stored in the inst file for this volume
         # group_to_track : group index → Geant4 track ID
-        # seg_to_group   : segment index → group index
-        if 'group_to_track' not in vol_group or 'segment_to_group' not in vol_group:
-            result.append(track_to_indices)
-            continue
+        # seg_to_group   : segment index → group index (see _SEG_TO_GROUP_KEYS)
+        seg_to_group_key = next(
+            (k for k in _SEG_TO_GROUP_KEYS if k in vol_group), None
+        )
+        if 'group_to_track' not in vol_group or seg_to_group_key is None:
+            raise KeyError(
+                f"{event_key}/{vol_key} in the JAXTPC inst file "
+                f"{inst_file.filename!r} is missing the visibility lookup "
+                f"tables.  Required: 'group_to_track' plus one of "
+                f"{list(_SEG_TO_GROUP_KEYS)}; found {sorted(vol_group.keys())}.  "
+                f"Check that reader.jaxtpc_inst_path points at the JAXTPC "
+                f"hits/inst file (not the seg or sensor file)."
+            )
 
-        group_to_track = vol_group['group_to_track'][:]        # (G,)  int32
+        group_to_track = vol_group['group_to_track'][:]           # (G,)  int32
         n_segs         = seg['n_actual']
-        seg_to_group   = vol_group['segment_to_group'][:n_segs]  # (N,)  int32
+        seg_to_group   = vol_group[seg_to_group_key][:n_segs]     # (N,)  int32
 
         # Collect the group IDs that produced a readout signal above threshold
         # by scanning every readout-plane sub-group stored under this volume.
         active_group_ids: set[int] = set()
         import h5py
+        n_planes = 0
         for plane_key in vol_group:
             plane_group = vol_group[plane_key]
             if isinstance(plane_group, h5py.Group) and 'group_ids' in plane_group:
+                n_planes += 1
                 active_group_ids.update(plane_group['group_ids'][:].tolist())
+
+        # No readout-plane sub-groups at all is a schema problem; planes that
+        # exist but recorded nothing above threshold are legitimately empty.
+        if n_planes == 0:
+            raise KeyError(
+                f"{event_key}/{vol_key} in the JAXTPC inst file "
+                f"{inst_file.filename!r} contains no readout-plane sub-group "
+                f"with a 'group_ids' dataset (expected e.g. U/V/Y); found "
+                f"{sorted(vol_group.keys())}.  Without these, segment "
+                f"visibility cannot be determined."
+            )
 
         if not active_group_ids:
             result.append(track_to_indices)
@@ -304,9 +362,9 @@ class JaxtpcHDF5Reader(EventReaderBase):
         Path to the JAXTPC *seg* HDF5 file (provides per-segment truth
         quantities: positions in mm, dE, dx, t0, charge, …).
     inst_path : str
-        Path to the JAXTPC *inst* HDF5 file (provides ``segment_to_group``,
-        ``group_to_track``, and per-plane ``group_ids`` used to determine
-        which segments were detected).
+        Path to the JAXTPC *inst* HDF5 file (provides ``segment_to_group`` or
+        ``deposit_to_group``, ``group_to_track``, and per-plane ``group_ids``
+        used to determine which segments were detected).
     vertex_key : str, optional
         HDF5 dataset key for per-event vertex arrays in *edepsim_path*.
         Default: ``"vertex/geant4"``.
@@ -466,7 +524,12 @@ class JaxtpcHDF5Reader(EventReaderBase):
         return ``{'n_actual': 0}``.
         """
         if event_key not in self._seg_file:
-            return []
+            raise KeyError(
+                f"Event group {event_key!r} not found in the JAXTPC seg file "
+                f"{self._seg_path!r}.  Top-level groups present: "
+                f"{sorted(self._seg_file.keys())[:6]}.  The seg file must cover "
+                f"the same events as the EDepSim file given by io.input_path."
+            )
 
         evt = self._seg_file[event_key]
         n_volumes = int(evt.attrs.get('n_volumes', 1))
@@ -475,15 +538,42 @@ class JaxtpcHDF5Reader(EventReaderBase):
         for v in range(n_volumes):
             vol_key = f'volume_{v}'
             if vol_key not in evt:
-                volumes.append({'n_actual': 0})
-                continue
+                raise KeyError(
+                    f"{event_key}/{vol_key} missing from the JAXTPC seg file "
+                    f"{self._seg_path!r}, but {event_key} declares "
+                    f"n_volumes={n_volumes} (groups present: "
+                    f"{sorted(evt.keys())})."
+                )
 
             vg = evt[vol_key]
-            n = int(vg.attrs.get('n_actual', 0))
+
+            # A missing n_actual attribute means this is not a JAXTPC seg
+            # volume at all.  Previously it defaulted to 0, which silently
+            # produced empty point clouds for every particle in the event.
+            if 'n_actual' not in vg.attrs:
+                raise KeyError(
+                    f"{event_key}/{vol_key} in {self._seg_path!r} has no "
+                    f"'n_actual' attribute, so it is not a JAXTPC seg volume "
+                    f"(attributes present: {sorted(vg.attrs.keys())}).  Check "
+                    f"that reader.jaxtpc_seg_path points at the JAXTPC seg/step "
+                    f"file (not the hits/inst or sensor file)."
+                )
+
+            n = int(vg.attrs['n_actual'])
 
             if n == 0:
                 volumes.append({'n_actual': 0})
                 continue
+
+            _missing_ds = [k for k in _SEG_REQUIRED_DATASETS if k not in vg]
+            _missing_at = [k for k in _SEG_REQUIRED_ATTRS if k not in vg.attrs]
+            if _missing_ds or _missing_at:
+                raise KeyError(
+                    f"{event_key}/{vol_key} in the JAXTPC seg file "
+                    f"{self._seg_path!r} declares n_actual={n} but is missing "
+                    f"required datasets {_missing_ds} / attributes "
+                    f"{_missing_at}."
+                )
 
             # Positions are stored as quantised integers; reconstruct mm coords.
             pos_step = float(vg.attrs['pos_step_mm'])
