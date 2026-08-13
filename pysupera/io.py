@@ -66,13 +66,36 @@ except ImportError:
 
 FORMAT_VERSION = "2.1.0"
 
-# Chunk sizes for compressed HDF5 datasets.
-# Tuned for typical event sizes; adjust if your events are significantly
-# larger or smaller.
-_CHUNK_PARTICLES = 256      # rows per chunk in particle metadata arrays
-_CHUNK_POINTS    = 262144   # rows per chunk in the flat point array (1 chunk ≈ 5 MB)
 _PC_NDIM = 5                # number of columns in the flat point array (x,y,z,t,e)
 _CLOUD_NDIM = 9             # columns in event-cloud datasets (x,y,z,t,e,interaction_id,root_id,frag_id,inst_id)
+
+# Chunk sizing for compressed HDF5 datasets.
+#
+# Chunk shapes are derived from a *byte budget* rather than a fixed row count,
+# because the right row count depends on how wide the row is.  HDF5 reads and
+# decompresses a whole chunk to satisfy any read that touches it, so the budget
+# is what actually governs read cost.  The HDF5 docs recommend 10 KiB - 1 MiB.
+#
+# Two budgets, because the two dataset families have different shapes:
+#   * point/cloud arrays — wide rows, millions of them; a larger budget keeps
+#     the chunk count down without making single-event reads expensive.
+#   * metadata columns   — 1-D, 4 bytes per row, and there are ~20 of them per
+#     file.  A smaller budget bounds the padding waste on short runs, since the
+#     streaming writer creates these datasets empty and cannot know the final
+#     length (a chunk longer than the dataset is stored as padding).
+_CHUNK_TARGET_BYTES      = 256 * 1024   # point / cloud arrays
+_CHUNK_TARGET_BYTES_META =  64 * 1024   # 1-D metadata columns
+
+
+def _chunk_rows(ncols: int, itemsize: int = 4,
+                target_bytes: int = _CHUNK_TARGET_BYTES) -> int:
+    """Rows per chunk so that one chunk is about *target_bytes*."""
+    return max(1, target_bytes // max(1, ncols * itemsize))
+
+
+_CHUNK_PARTICLES = _chunk_rows(1, target_bytes=_CHUNK_TARGET_BYTES_META)  # 16384
+_CHUNK_POINTS    = _chunk_rows(_PC_NDIM)                                 # 13107
+_CHUNK_CLOUD     = _chunk_rows(_CLOUD_NDIM)                              #  7281
 
 # ---------------------------------------------------------------------------
 # Public helpers
@@ -549,7 +572,7 @@ class EventWriter:
             g.create_dataset(
                 "flat",
                 shape=(0, _CLOUD_NDIM), maxshape=(None, _CLOUD_NDIM), dtype=np.float32,
-                chunks=(_CHUNK_POINTS, _CLOUD_NDIM),
+                chunks=(_CHUNK_CLOUD, _CLOUD_NDIM),
                 **ckw,
             )
 
@@ -929,8 +952,10 @@ class EventStore:
         import h5py
         self._path = path
         rdcc_nbytes = chunk_cache_mb * 1024 * 1024
-        # rdcc_nslots: prime slightly larger than (cache_bytes / chunk_bytes).
-        # With 5 MB chunks and 256 MB cache that's ~51 chunks; use 127.
+        # rdcc_nslots: comfortably larger than (cache_bytes / chunk_bytes), so
+        # the slot table does not thrash before the byte budget is reached.
+        # Derived from _CHUNK_POINTS so it tracks the chunk byte budget: with
+        # 256 KiB chunks and a 256 MB cache that is ~1024 chunks -> 3073 slots.
         rdcc_nslots = max(127, rdcc_nbytes // (_CHUNK_POINTS * _PC_NDIM * 4) * 3 + 1)
         self._f = h5py.File(
             path, "r",
@@ -1454,6 +1479,148 @@ def _read_rep_level(f, group: str, r_start: int, r_end: int) -> list:
             p.parent_inst_id = int(piids[k])
         reps.append(p)
     return reps
+
+
+def repack(path: str,
+           compression: Optional[str] = None,
+           compression_opts: Optional[int] = None,
+           verbose: bool = True) -> dict:
+    """
+    Rewrite *path* in place with chunk shapes sized from the final dataset
+    lengths.
+
+    The streaming writer creates every dataset empty and grows it with
+    ``resize()``, so at creation time it cannot know how long a dataset will
+    end up.  It therefore uses the byte-budget chunk shapes from
+    ``_CHUNK_*``, and any dataset that ends up **shorter than one chunk**
+    keeps a chunk longer than itself -- stored as padding.  This function is
+    the post-pass that removes that: every chunk is clamped to the dataset's
+    actual length.
+
+    Note that the byte budget already bounds the waste to at most one chunk per
+    dataset, so this is a modest optimisation for long runs.  It matters most
+    for short runs (few events), where several datasets can be shorter than a
+    single chunk.
+
+    The rewrite is generic -- it walks every group and dataset rather than
+    reconstructing events -- so it preserves any layout the writer produced.
+    Data is copied in chunk-aligned blocks, so memory use stays bounded
+    regardless of file size.
+
+    Parameters
+    ----------
+    path : str
+        File to repack.  Replaced atomically on success via :func:`os.replace`;
+        the original is left untouched if anything raises.
+    compression : str or None, optional
+        Filter for the output.  ``None`` (default) keeps whatever filter each
+        source dataset already uses.  Pass e.g. ``"gzip"`` to switch.
+    compression_opts : int or None, optional
+        Compression level for *compression*.
+    verbose : bool, optional
+        Print a one-line before/after summary.
+
+    Returns
+    -------
+    dict
+        ``{"size_before", "size_after", "n_datasets", "n_reshaped"}``
+    """
+    import h5py
+    import numpy as _np
+
+    size_before = os.path.getsize(path)
+    tmp = f"{path}.repack-tmp"
+    n_datasets = n_reshaped = 0
+
+    try:
+        with h5py.File(path, "r") as fin, h5py.File(tmp, "w") as fout:
+            for key, val in fin.attrs.items():
+                fout.attrs[key] = val
+
+            def visit(name, obj):
+                nonlocal n_datasets, n_reshaped
+                if isinstance(obj, h5py.Group):
+                    grp = fout.require_group(name)
+                    for key, val in obj.attrs.items():
+                        grp.attrs[key] = val
+                    return
+
+                n_datasets += 1
+                src_chunks = obj.chunks
+                kwargs: dict = {}
+                chunks = None
+
+                if src_chunks is not None:
+                    # Clamp each dimension to the real shape; HDF5 rejects a
+                    # chunk larger than a fixed-size dataset.
+                    chunks = tuple(max(1, min(c, s))
+                                   for c, s in zip(src_chunks, obj.shape))
+                    if any(d == 0 for d in obj.shape):
+                        chunks = None          # cannot chunk an empty dataset
+                    elif chunks != src_chunks:
+                        n_reshaped += 1
+
+                if chunks is not None:
+                    if compression is None:
+                        # Preserve the source filter.  Third-party filters
+                        # (LZ4, Blosc) must be matched by filter ID: h5py
+                        # reports Dataset.compression as 'unknown' for those,
+                        # which is not a value it accepts on write.
+                        kwargs = _compression_kwargs_from_filters(obj)
+                        if not kwargs and obj.compression in ("gzip", "lzf",
+                                                              "szip"):
+                            kwargs = {"compression":      obj.compression,
+                                      "compression_opts": obj.compression_opts}
+                    else:
+                        kwargs = _compress_kwargs(compression,
+                                                  compression_opts)
+
+                dst = fout.create_dataset(name, shape=obj.shape,
+                                          dtype=obj.dtype, chunks=chunks,
+                                          **{k: v for k, v in kwargs.items()
+                                             if v is not None})
+                for key, val in obj.attrs.items():
+                    dst.attrs[key] = val
+
+                if obj.ndim == 0:
+                    dst[()] = obj[()]
+                    return
+                n = obj.shape[0]
+                if n == 0:
+                    return
+                step = chunks[0] if chunks else min(n, 1 << 16)
+                for start in range(0, n, step):
+                    stop = min(start + step, n)
+                    dst[start:stop] = obj[start:stop]
+
+            fin.visititems(visit)
+
+        os.replace(tmp, path)
+    except BaseException:
+        if os.path.exists(tmp):
+            os.remove(tmp)
+        raise
+
+    size_after = os.path.getsize(path)
+    if verbose:
+        # Signed relative to the original: negative means the file shrank.
+        pct = (100.0 * (size_after - size_before) / size_before) \
+            if size_before else 0.0
+        print(f"[repack] {path}: {size_before / 2**20:.2f} MiB -> "
+              f"{size_after / 2**20:.2f} MiB ({pct:+.1f}%), "
+              f"{n_reshaped}/{n_datasets} dataset(s) re-chunked")
+    return {"size_before": size_before, "size_after": size_after,
+            "n_datasets": n_datasets, "n_reshaped": n_reshaped}
+
+
+def _compression_kwargs_from_filters(ds) -> dict:
+    """Reproduce a dataset's third-party filter (LZ4 / Blosc) as kwargs."""
+    filters = dict(ds._filters or {})
+    if "32004" in filters:
+        return _compress_kwargs("lz4", None)
+    if "32001" in filters:
+        return _compress_kwargs("blosc_lz4", None)
+    return {}
 
 
 def recompress_cli() -> None:
