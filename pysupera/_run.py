@@ -108,6 +108,8 @@ def main(cfg: DictConfig) -> None:
         'pc_size_mean':   [],   # float: mean non-zero PC size in event
         'n_partitions':   [],   # int: final partition count after partition_combined
     }
+    # JAXTPC visibility counts; stays empty unless the reader supplies them.
+    mask_stats: dict = defaultdict(list)
     n_events = 0
 
     _max_events = int(cfg.get("max_events", -1))
@@ -153,6 +155,23 @@ def main(cfg: DictConfig) -> None:
                     break
                 n_events += 1
                 _ev_t: dict = {}   # per-event stage timings (seconds)
+
+                # ── JAXTPC visibility counts ────────────────────────────────
+                # Already computed by the reader from data it had in hand, so
+                # collecting them costs nothing; only the printing is gated.
+                _ms = getattr(store, 'last_mask_stats', None)
+                if _ms:
+                    for _k, _v in _ms.items():
+                        mask_stats[_k].append(_v)
+                    if cfg.verbose:
+                        _tot = max(1, _ms['n_total'])
+                        print(f"[run] event {event_idx}: segments "
+                              f"total={_ms['n_total']:,} "
+                              f"visible={_ms['n_visible']:,} "
+                              f"masked={_ms['n_masked']:,} "
+                              f"({100.0 * _ms['n_masked'] / _tot:.1f}%)"
+                              + (f" unmatched={_ms['n_unmatched']:,}"
+                                 if _ms['n_unmatched'] else ""))
 
                 # skip merge_duplicates when voxelizer subsumes it
                 if merge_processor is not None and not (voxelizer and voxelizer.merge_duplicates):
@@ -494,6 +513,32 @@ def main(cfg: DictConfig) -> None:
         print(f"  {_SEP}")
         lo, mu, hi = _agg(stats['n_partitions'])
         print(f"  {'Partitions (final)':<{_W}} {int(lo):>10,} {mu:>10.1f} {int(hi):>10,}")
+
+        # ── JAXTPC readout visibility (only when the reader reported it) ───
+        if mask_stats.get('n_total'):
+            print(f"\n[run] JAXTPC segment visibility  ({n_events} event(s))")
+            print(f"  {'Metric':<{_W}} {'min':>10} {'mean':>10} {'max':>10}")
+            print(f"  {_SEP}")
+            for label, key in (
+                ("Segments in seg file",     'n_total'),
+                ("Visible (above threshold)", 'n_visible'),
+                ("Masked out (undetected)",  'n_masked'),
+                ("Attached to a particle",   'n_attached'),
+            ):
+                lo, mu, hi = _agg(mask_stats[key])
+                print(f"  {label:<{_W}} {int(lo):>10,} {mu:>10.1f} {int(hi):>10,}")
+
+            _tot = sum(mask_stats['n_total'])
+            _msk = sum(mask_stats['n_masked'])
+            _unm = sum(mask_stats['n_unmatched'])
+            print(f"  {_SEP}")
+            print(f"  {'Masked fraction (all events)':<{_W}} "
+                  f"{100.0 * _msk / max(1, _tot):>9.2f}%")
+            if _unm:
+                # Visible in the readout but carrying a track ID absent from
+                # the EDepSim particle list, so they reach no point cloud.
+                print(f"  {'Visible but unmatched':<{_W}} "
+                      f"{_unm:>10,} ({100.0 * _unm / max(1, _tot):.2f}%)")
 
         # ── Time profile ──────────────────────────────────────────────────
         total = sum(profile.values())

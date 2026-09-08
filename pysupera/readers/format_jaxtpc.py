@@ -416,6 +416,10 @@ class JaxtpcHDF5Reader(EventReaderBase):
         self._e_thresh     = electron_energy_threshold
         self._min_pc_size  = min_pc_size
 
+        # Visibility counts for the most recently read event; populated by
+        # __getitem__.  None until the first event has been read.
+        self.last_mask_stats: dict | None = None
+
         # Open all three files for the lifetime of the reader.
         self._edepsim_file = h5py.File(edepsim_path, 'r')
         self._seg_file     = h5py.File(seg_path, 'r')
@@ -481,6 +485,27 @@ class JaxtpcHDF5Reader(EventReaderBase):
         point_cloud_flat, offsets = _build_visible_point_cloud(
             seg_volumes, visible_by_track, parts['track_id']
         )
+
+        # ── Visibility bookkeeping (free: no extra file reads) ────────────
+        # n_total comes from the per-volume 'n_actual' attributes already read
+        # in step 2; n_visible sums the index arrays step 3 already built; and
+        # n_attached is just the length of the cloud step 4 just produced.
+        # Nothing here touches the EDepSim step array.
+        _n_total = sum(int(sv.get('n_actual', 0)) for sv in seg_volumes)
+        _n_visible = sum(len(idx)
+                         for vol in visible_by_track
+                         for idx in vol.values())
+        _n_attached = len(point_cloud_flat)
+        self.last_mask_stats = {
+            'n_total':    _n_total,     # deposits in the seg file
+            'n_visible':  _n_visible,   # survived the readout threshold
+            'n_masked':   _n_total - _n_visible,
+            # Visible but not attached to any EDepSim particle -- a visible
+            # segment whose group_to_track ID is absent from the particle list
+            # (including the -1 sentinel for out-of-range groups).
+            'n_attached': _n_attached,
+            'n_unmatched': _n_visible - _n_attached,
+        }
 
         # ── Step 5: derive per-particle scalar labels from EDepSim data ───
         itype   = _get_interaction_type(parts, self._e_thresh)
