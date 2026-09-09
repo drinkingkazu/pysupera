@@ -64,7 +64,7 @@ try:
 except ImportError:
     pass
 
-FORMAT_VERSION = "2.1.0"
+FORMAT_VERSION = "2.2.0"
 
 _PC_NDIM = 5                # number of columns in the flat point array (x,y,z,t,e)
 _CLOUD_NDIM = 9             # columns in event-cloud datasets (x,y,z,t,e,interaction_id,root_id,frag_id,inst_id)
@@ -321,7 +321,7 @@ class EventWriter:
     # Names of the int32 particle scalar fields (sem_type handled separately
     # because it uses dtype=int8)
     _SCALAR_FIELDS = (
-        "id", "parent_id", "root_id", "pdg", "parent_pdg",
+        "id", "geant4_id", "parent_id", "root_id", "pdg", "parent_pdg",
         "interaction_id", "interaction_type"
     )
 
@@ -428,6 +428,7 @@ class EventWriter:
 
             # Build scalar arrays for this event
             p_id             = np.empty(n_p, dtype=np.int32)
+            p_geant4_id      = np.empty(n_p, dtype=np.int32)
             p_parent_id      = np.empty(n_p, dtype=np.int32)
             p_root_id        = np.empty(n_p, dtype=np.int32)
             p_pdg            = np.empty(n_p, dtype=np.int32)
@@ -439,6 +440,7 @@ class EventWriter:
 
             for k, p in enumerate(particles):
                 p_id[k]          = p.id
+                p_geant4_id[k]   = getattr(p, "geant4_id", p.id)
                 p_parent_id[k]   = p.parent_id
                 p_root_id[k]     = p.root_id
                 p_pdg[k]         = p.pdg
@@ -449,6 +451,7 @@ class EventWriter:
                 pc_lengths[k]    = len(p.point_cloud)
 
             self._f["particles/id"               ][new_p_start:new_p_end] = p_id
+            self._f["particles/geant4_id"        ][new_p_start:new_p_end] = p_geant4_id
             self._f["particles/parent_id"        ][new_p_start:new_p_end] = p_parent_id
             self._f["particles/root_id"          ][new_p_start:new_p_end] = p_root_id
             self._f["particles/pdg"              ][new_p_start:new_p_end] = p_pdg
@@ -805,6 +808,7 @@ class EventWriter:
 
             # Build scalar arrays
             r_id             = np.empty(n_r, dtype=np.int32)
+            r_geant4_id      = np.empty(n_r, dtype=np.int32)
             r_parent_id      = np.empty(n_r, dtype=np.int32)
             r_root_id        = np.empty(n_r, dtype=np.int32)
             r_pdg            = np.empty(n_r, dtype=np.int32)
@@ -819,6 +823,7 @@ class EventWriter:
 
             for k, r in enumerate(reps):
                 r_id[k]             = r.id
+                r_geant4_id[k]      = getattr(r, "geant4_id", r.id)
                 r_parent_id[k]      = r.parent_id
                 r_root_id[k]        = r.root_id
                 r_pdg[k]            = r.pdg
@@ -835,6 +840,7 @@ class EventWriter:
                                        if r.member_ids is not None else 1)
 
             self._f[f"{group_prefix}/id"               ][new_start:new_end] = r_id
+            self._f[f"{group_prefix}/geant4_id"        ][new_start:new_end] = r_geant4_id
             self._f[f"{group_prefix}/parent_id"        ][new_start:new_end] = r_parent_id
             self._f[f"{group_prefix}/root_id"          ][new_start:new_end] = r_root_id
             self._f[f"{group_prefix}/pdg"              ][new_start:new_end] = r_pdg
@@ -1021,6 +1027,10 @@ class EventStore:
 
         # ---- read scalar metadata in 7 contiguous array slices ------------
         ids             = self._f["particles/id"               ][p_start:p_end]
+        # geant4_id arrived in format 2.2.0; older files fall back to `id`,
+        # where the two coincided because track IDs were used as the key.
+        geant4_ids      = (self._f["particles/geant4_id"       ][p_start:p_end]
+                           if "particles/geant4_id" in self._f else ids)
         parent_ids      = self._f["particles/parent_id"        ][p_start:p_end]
         root_ids        = self._f["particles/root_id"          ][p_start:p_end]
         pdgs            = self._f["particles/pdg"              ][p_start:p_end]
@@ -1043,6 +1053,7 @@ class EventStore:
             cloud = flat_chunk[local_offsets[k] : local_offsets[k + 1]]
             p = Particle(
                 id               = int(ids[k]),
+                geant4_id        = int(geant4_ids[k]),
                 parent_id        = int(parent_ids[k]),
                 root_id          = int(root_ids[k]),
                 pdg              = int(pdgs[k]),
@@ -1129,6 +1140,10 @@ class EventStore:
 
         # 8 scalar reads + 1 pc_offsets slice + 1 flat-points read = 10 HDF5 ops
         ids             = self._f["particles/id"               ][p_start:p_end]
+        # geant4_id arrived in format 2.2.0; older files fall back to `id`,
+        # where the two coincided because track IDs were used as the key.
+        geant4_ids      = (self._f["particles/geant4_id"       ][p_start:p_end]
+                           if "particles/geant4_id" in self._f else ids)
         parent_ids      = self._f["particles/parent_id"        ][p_start:p_end]
         root_ids        = self._f["particles/root_id"          ][p_start:p_end]
         pdgs            = self._f["particles/pdg"              ][p_start:p_end]
@@ -1152,6 +1167,7 @@ class EventStore:
                 cloud = flat_all[local_pc[k] : local_pc[k + 1]]
                 p = Particle(
                     id               = int(ids[k]),
+                    geant4_id        = int(geant4_ids[k]),
                     parent_id        = int(parent_ids[k]),
                     root_id          = int(root_ids[k]),
                     pdg              = int(pdgs[k]),
@@ -1433,6 +1449,8 @@ def _read_rep_level(f, group: str, r_start: int, r_end: int) -> list:
         return []
 
     ids    = f[f"{group}/id"              ][r_start:r_end]
+    g4ids  = (f[f"{group}/geant4_id"      ][r_start:r_end]
+              if f"{group}/geant4_id" in f else ids)
     pids   = f[f"{group}/parent_id"       ][r_start:r_end]
     rids   = f[f"{group}/root_id"         ][r_start:r_end]
     pdgs   = f[f"{group}/pdg"             ][r_start:r_end]
@@ -1463,6 +1481,7 @@ def _read_rep_level(f, group: str, r_start: int, r_end: int) -> list:
         mids = list(mem_flat[ms:me].astype(int)) if mem_flat is not None and me > ms else None
         p = Particle(
             id               = int(ids[k]),
+            geant4_id        = int(g4ids[k]),
             parent_id        = int(pids[k]),
             root_id          = int(rids[k]),
             pdg              = int(pdgs[k]),
@@ -1484,10 +1503,13 @@ def _read_rep_level(f, group: str, r_start: int, r_end: int) -> list:
 def repack(path: str,
            compression: Optional[str] = None,
            compression_opts: Optional[int] = None,
+           dst: Optional[str] = None,
+           rechunk: bool = False,
+           verify: bool = False,
            verbose: bool = True) -> dict:
     """
-    Rewrite *path* in place with chunk shapes sized from the final dataset
-    lengths.
+    Rewrite *path* with chunk shapes sized from the final dataset lengths,
+    optionally changing the compression filter at the same time.
 
     The streaming writer creates every dataset empty and grows it with
     ``resize()``, so at creation time it cannot know how long a dataset will
@@ -1510,13 +1532,27 @@ def repack(path: str,
     Parameters
     ----------
     path : str
-        File to repack.  Replaced atomically on success via :func:`os.replace`;
-        the original is left untouched if anything raises.
+        Source file.
     compression : str or None, optional
         Filter for the output.  ``None`` (default) keeps whatever filter each
-        source dataset already uses.  Pass e.g. ``"gzip"`` to switch.
+        source dataset already uses.  Pass e.g. ``"gzip"`` to switch -- which is
+        how to produce a file the browser viewer can read, since h5wasm handles
+        gzip only.
     compression_opts : int or None, optional
-        Compression level for *compression*.
+        Compression level for *compression* (gzip: 1-9).
+    dst : str or None, optional
+        Output path.  ``None`` (default) rewrites *path* in place, via a
+        temporary file swapped in with :func:`os.replace`, so the original
+        survives untouched if anything raises.
+    rechunk : bool, optional
+        Let h5py choose chunk shapes instead of clamping the source's.  On
+        pysupera output this tends to win on both size and row-range read
+        speed, because h5py picks smaller column-wise chunks, but it does
+        change the layout rather than only the filter.
+    verify : bool, optional
+        After writing, compare every dataset against the source and raise
+        ``ValueError`` on any mismatch.  For an in-place repack the check runs
+        *before* the original is replaced.
     verbose : bool, optional
         Print a one-line before/after summary.
 
@@ -1524,16 +1560,29 @@ def repack(path: str,
     -------
     dict
         ``{"size_before", "size_after", "n_datasets", "n_reshaped"}``
+
+    Raises
+    ------
+    ValueError
+        If *verify* is set and any dataset differs from the source.
     """
     import h5py
     import numpy as _np
 
+    if dst is not None and os.path.abspath(dst) == os.path.abspath(path):
+        raise ValueError(
+            f"dst must differ from path; pass dst=None to repack in place "
+            f"({path!r})"
+        )
+
     size_before = os.path.getsize(path)
-    tmp = f"{path}.repack-tmp"
+    in_place = dst is None
+    # In place: build beside the original and swap only once it is complete.
+    out = f"{path}.repack-tmp" if in_place else dst
     n_datasets = n_reshaped = 0
 
     try:
-        with h5py.File(path, "r") as fin, h5py.File(tmp, "w") as fout:
+        with h5py.File(path, "r") as fin, h5py.File(out, "w") as fout:
             for key, val in fin.attrs.items():
                 fout.attrs[key] = val
 
@@ -1551,14 +1600,18 @@ def repack(path: str,
                 chunks = None
 
                 if src_chunks is not None:
-                    # Clamp each dimension to the real shape; HDF5 rejects a
-                    # chunk larger than a fixed-size dataset.
-                    chunks = tuple(max(1, min(c, s))
-                                   for c, s in zip(src_chunks, obj.shape))
                     if any(d == 0 for d in obj.shape):
                         chunks = None          # cannot chunk an empty dataset
-                    elif chunks != src_chunks:
+                    elif rechunk:
+                        chunks = True          # let h5py choose
                         n_reshaped += 1
+                    else:
+                        # Clamp each dimension to the real shape; HDF5 rejects
+                        # a chunk larger than a fixed-size dataset.
+                        chunks = tuple(max(1, min(c, s))
+                                       for c, s in zip(src_chunks, obj.shape))
+                        if chunks != src_chunks:
+                            n_reshaped += 1
 
                 if chunks is not None:
                     if compression is None:
@@ -1571,46 +1624,103 @@ def repack(path: str,
                                                               "szip"):
                             kwargs = {"compression":      obj.compression,
                                       "compression_opts": obj.compression_opts}
+                    elif str(compression).lower() in ("none", "~", ""):
+                        kwargs = {}     # explicitly store uncompressed
                     else:
                         kwargs = _compress_kwargs(compression,
                                                   compression_opts)
 
-                dst = fout.create_dataset(name, shape=obj.shape,
-                                          dtype=obj.dtype, chunks=chunks,
-                                          **{k: v for k, v in kwargs.items()
-                                             if v is not None})
+                dset = fout.create_dataset(name, shape=obj.shape,
+                                           dtype=obj.dtype, chunks=chunks,
+                                           **{k: v for k, v in kwargs.items()
+                                              if v is not None})
                 for key, val in obj.attrs.items():
-                    dst.attrs[key] = val
+                    dset.attrs[key] = val
 
                 if obj.ndim == 0:
-                    dst[()] = obj[()]
+                    dset[()] = obj[()]
                     return
                 n = obj.shape[0]
                 if n == 0:
                     return
-                step = chunks[0] if chunks else min(n, 1 << 16)
+                # Copy in chunk-aligned blocks so memory stays bounded.
+                step = dset.chunks[0] if dset.chunks else min(n, 1 << 16)
                 for start in range(0, n, step):
                     stop = min(start + step, n)
-                    dst[start:stop] = obj[start:stop]
+                    dset[start:stop] = obj[start:stop]
 
             fin.visititems(visit)
 
-        os.replace(tmp, path)
+        if verify:
+            _verify_same_datasets(path, out)
+
+        if in_place:
+            os.replace(out, path)
     except BaseException:
-        if os.path.exists(tmp):
-            os.remove(tmp)
+        # Only ever clean up our own temporary; never an explicit dst.
+        if in_place and os.path.exists(out):
+            os.remove(out)
         raise
 
-    size_after = os.path.getsize(path)
+    size_after = os.path.getsize(path if in_place else out)
     if verbose:
         # Signed relative to the original: negative means the file shrank.
         pct = (100.0 * (size_after - size_before) / size_before) \
             if size_before else 0.0
-        print(f"[repack] {path}: {size_before / 2**20:.2f} MiB -> "
+        _where = path if in_place else f"{path} -> {out}"
+        print(f"[repack] {_where}: {size_before / 2**20:.2f} MiB -> "
               f"{size_after / 2**20:.2f} MiB ({pct:+.1f}%), "
-              f"{n_reshaped}/{n_datasets} dataset(s) re-chunked")
+              f"{n_reshaped}/{n_datasets} dataset(s) re-chunked"
+              + ("  [verified]" if verify else ""))
     return {"size_before": size_before, "size_after": size_after,
             "n_datasets": n_datasets, "n_reshaped": n_reshaped}
+
+
+def _verify_same_datasets(src: str, dst: str) -> None:
+    """
+    Raise ValueError unless *dst* holds the same datasets, byte for byte, as
+    *src*.  Compression and chunking are irrelevant here -- only values.
+    """
+    import h5py
+    import numpy as _np
+
+    problems: list = []
+
+    with h5py.File(src, "r") as fa, h5py.File(dst, "r") as fb:
+        def check(name, obj):
+            if not isinstance(obj, h5py.Dataset):
+                return
+            if name not in fb:
+                problems.append(f"{name}: missing in output")
+                return
+            other = fb[name]
+            if obj.shape != other.shape or obj.dtype != other.dtype:
+                problems.append(
+                    f"{name}: shape/dtype {obj.shape}/{obj.dtype} != "
+                    f"{other.shape}/{other.dtype}"
+                )
+                return
+            if obj.ndim == 0:
+                same = _np.array_equal(_np.asarray(obj[()]),
+                                       _np.asarray(other[()]))
+            elif obj.shape[0] == 0:
+                same = True
+            else:
+                try:
+                    same = _np.array_equal(obj[...], other[...], equal_nan=True)
+                except TypeError:
+                    # equal_nan is rejected for non-float dtypes.
+                    same = _np.array_equal(obj[...], other[...])
+            if not same:
+                problems.append(f"{name}: data differs")
+
+        fa.visititems(check)
+
+    if problems:
+        raise ValueError(
+            f"repack verification failed for {dst!r}: "
+            f"{len(problems)} problem(s); first few: {problems[:5]}"
+        )
 
 
 def _compression_kwargs_from_filters(ds) -> dict:
@@ -1621,6 +1731,62 @@ def _compression_kwargs_from_filters(ds) -> dict:
     if "32001" in filters:
         return _compress_kwargs("blosc_lz4", None)
     return {}
+
+
+def repack_cli() -> None:
+    """Entry point for the ``pysupera-repack`` shell command.
+
+    Usage::
+
+        # rewrite in place, clamping chunks, keeping each dataset's filter
+        pysupera-repack out.h5
+
+        # write a gzip copy the browser viewer can read
+        pysupera-repack out.h5 out_vis.h5 --compression gzip
+
+        # smallest and fastest for row-range reads, at the cost of relayout
+        pysupera-repack out.h5 out_vis.h5 --compression gzip --rechunk
+
+    Unlike ``pysupera-recompress``, this walks the file generically instead of
+    reconstructing events, so it can resize chunks and handles any layout --
+    including the voxmap companion file.  Prefer it unless you specifically
+    need the event-by-event rewrite.
+    """
+    import argparse
+    parser = argparse.ArgumentParser(
+        prog="pysupera-repack",
+        description="Resize HDF5 chunks (and optionally change the "
+                    "compression filter) in a pysupera output file.",
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+    )
+    parser.add_argument("src", help="Source HDF5 file")
+    parser.add_argument("dst", nargs="?", default=None,
+                        help="Output file; omit to rewrite src in place")
+    parser.add_argument("-c", "--compression", default=None,
+                        help="Filter for the output: gzip, lzf, lz4, "
+                             "blosc_lz4, none.  Omit to keep each dataset's "
+                             "existing filter")
+    parser.add_argument("-l", "--level", type=int, default=None,
+                        help="Compression level (gzip: 1-9)")
+    parser.add_argument("--rechunk", action="store_true",
+                        help="Let h5py choose chunk shapes rather than "
+                             "clamping the source's; usually smaller and "
+                             "faster for row-range reads, but relayouts")
+    parser.add_argument("--no-verify", dest="verify", action="store_false",
+                        help="Skip the post-write dataset equality check")
+    args = parser.parse_args()
+
+    if args.level is not None and not 1 <= args.level <= 9:
+        parser.error("--level must be between 1 and 9")
+
+    # Note the distinction: omitting --compression preserves each dataset's
+    # existing filter, whereas "--compression none" stores them uncompressed.
+    repack(args.src,
+           compression=args.compression,
+           compression_opts=args.level,
+           dst=args.dst,
+           rechunk=args.rechunk,
+           verify=args.verify)
 
 
 def recompress_cli() -> None:
