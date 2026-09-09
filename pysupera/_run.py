@@ -59,7 +59,9 @@ def main(cfg: DictConfig) -> None:
     from pysupera.merge import merge_em_showers
     from pysupera.config import build_conditions, build_preprocessor, build_merge_processor, build_voxelizer, build_reader, configure
     from pysupera.preproc import _voxelize_point_cloud
-    from pysupera.utils import resolve_orphans
+    from pysupera.utils import (resolve_orphans, validate_interaction_ids,
+                                validate_root_ids,
+                                select_traceable_instances)
 
     configure(cfg)  # set module-level defaults (e.g. min_pc_size) before any Particle is created
 
@@ -79,8 +81,12 @@ def main(cfg: DictConfig) -> None:
     print(f"[run] preprocessor    : {cfg.particle.get('preprocessor', {}).get('name', 'scipy') if cfg.particle.get('defragment', False) else 'disabled'}")
     print(f"[run] output_compact  : {bool(cfg.get('output_compact', False))}")
     print(f"[run] drop_le_scatter : {bool(cfg.get('drop_le_scatter', False))}")
+    print(f"[run] write_fragments  : {bool(cfg.get('write_fragments', False))}")
     print(f"[run] write_event_clouds: {bool(cfg.get('write_event_clouds', True))}")
     print(f"[run] allow_empty_image: {bool(cfg.get('allow_empty_image', False))}")
+    print(f"[run] check_interaction_id: {bool(cfg.get('check_interaction_id', True))}")
+    print(f"[run] check_root_id     : {bool(cfg.get('check_root_id', True))}")
+    print(f"[run] instance_output : {str(cfg.get('instance_output', 'traceable')).lower()}")
     print(f"[run] repack          : {bool((cfg.get('repack', {}) or {}).get('enabled', False))}")
     print(f"[run] input           : {cfg.io.input_path}")
     print(f"[run] output          : {cfg.io.output_path}")
@@ -119,6 +125,19 @@ def main(cfg: DictConfig) -> None:
     _allow_empty_image = bool(cfg.get("allow_empty_image", False))
     _warned_empty_image = False
 
+    # Interaction-ID validation: raise by default, warn once when relaxed.
+    _check_int_id = bool(cfg.get("check_interaction_id", True))
+    _warned_int_id = False
+    _check_root_id = bool(cfg.get("check_root_id", True))
+    _warned_root_id = False
+
+    _instance_output = str(cfg.get("instance_output", "traceable")).lower()
+    if _instance_output not in ("all", "traceable"):
+        raise ValueError(
+            f"instance_output must be 'all' or 'traceable', "
+            f"got {_instance_output!r}"
+        )
+
     with build_reader(cfg) as store:
         _n_available = len(store)
         _n_to_process = _n_available if _max_events < 0 else min(_max_events, _n_available)
@@ -127,6 +146,7 @@ def main(cfg: DictConfig) -> None:
         _output_compact     = bool(cfg.get('output_compact',     False))
         _drop_le_scatter    = bool(cfg.get('drop_le_scatter',    False))
         _write_event_clouds = bool(cfg.get('write_event_clouds', True))
+        _write_frags        = bool(cfg.get('write_fragments',    False))
         # _is_le is always defined: used independently by drop_le_scatter output
         # filtering AND by event-cloud LE/non-LE splitting (write_event_clouds).
         from pysupera.utils import SemanticType as _ST
@@ -201,6 +221,26 @@ def main(cfg: DictConfig) -> None:
                 # Must run before ParticlePartitioner so the genealogy tree is
                 # consistent for all conditions and merge_em_showers.
                 resolve_orphans(particles, verbose=cfg.verbose)
+
+                # ── Interaction-ID completeness ─────────────────────────────
+                # Runs after resolve_orphans so the parent chains reported in
+                # the diagnostic are the repaired ones.
+                if _check_int_id:
+                    validate_interaction_ids(particles,
+                                             raise_on_missing=True,
+                                             verbose=cfg.verbose)
+                elif not _warned_int_id:
+                    _miss = validate_interaction_ids(particles,
+                                                     raise_on_missing=False)
+                    if _miss:
+                        _warned_int_id = True
+
+                if _check_root_id:
+                    validate_root_ids(particles, raise_on_missing=True,
+                                      verbose=cfg.verbose)
+                elif not _warned_root_id:
+                    if validate_root_ids(particles, raise_on_missing=False):
+                        _warned_root_id = True
 
                 # ── Particle statistics (after preprocessing, before partition) ──
                 _pc_lens = [len(p.point_cloud) for p in particles]
@@ -308,14 +348,27 @@ def main(cfg: DictConfig) -> None:
                 # particle_id lookup for parent-chain walks
                 _part_by_id: dict = {int(_p.id): _p for _p in particles}
 
-                def _find_parent_idx(_start_pid, _lookup, _pby):
-                    """Walk parent_id chain; return first valid hit index, or -1."""
+                def _find_parent_idx(_start_pid, _lookup, _pby, _exclude=None):
+                    """Walk the parent_id chain for the producer of a rep.
+
+                    Returns the index of the nearest ancestor that belongs to a
+                    *different* group than *_exclude*, or -1 if none exists.
+
+                    Skipping _exclude matters: when a rep's parent was merged
+                    into the rep's own group -- routine for an EM shower whose
+                    initiator is a late photon -- the lookup resolves to the
+                    rep itself, and without the skip the walk terminates there,
+                    reporting the rep as its own producer and dead-ending the
+                    production history.  Continuing past its own group finds
+                    the group the shower actually came from.
+                    """
                     _visited: set = set()
                     _pid = _start_pid
                     while _pid is not None and _pid not in _visited:
                         _visited.add(_pid)
-                        if _pid in _lookup:
-                            return _lookup[_pid]
+                        _hit = _lookup.get(int(_pid))
+                        if _hit is not None and _hit != _exclude:
+                            return _hit
                         _pp = _pby.get(int(_pid))
                         if _pp is None or _pp.parent_id == _pp.id:
                             break
@@ -323,11 +376,14 @@ def main(cfg: DictConfig) -> None:
                     return -1
 
                 for _fi, _fr in enumerate(_frags_out):
-                    _pfid = _find_parent_idx(_fr.parent_id, _frag_lookup, _part_by_id)
+                    _pfid = _find_parent_idx(_fr.parent_id, _frag_lookup,
+                                             _part_by_id, _exclude=_fi)
                     _fr.parent_frag_id = _pfid if _pfid >= 0 else _fi  # fallback = own
 
                 _t = time.perf_counter()
-                writer.append_fragments(_frags_out)
+                # An empty list still advances the fragment event offsets, so
+                # the file stays internally consistent with zero rows written.
+                writer.append_fragments(_frags_out if _write_frags else [])
                 _ev_t['write_frags'] = time.perf_counter() - _t
                 profile['write_fragments'] += _ev_t['write_frags']
 
@@ -340,6 +396,13 @@ def main(cfg: DictConfig) -> None:
                 # Output filtering only — does not affect algorithm logic.
                 _insts_out = [i for i in instances if not _is_le(i)] if _drop_le_scatter else instances
 
+                # Drop instances that nothing visible depends on.  Applied
+                # before _inst_lookup is built so parent_inst_id is stamped
+                # against the rows that actually get written.
+                if _instance_output == 'traceable':
+                    _insts_out = select_traceable_instances(
+                        _insts_out, particles, verbose=cfg.verbose)
+
                 # Build inst_lookup and stamp parent_inst_id (and parent_frag_id
                 # for the instance rep's own fragment) before writing.
                 _inst_lookup: dict = {}  # particle_id → instance index (in event)
@@ -348,9 +411,12 @@ def main(cfg: DictConfig) -> None:
                         _inst_lookup[int(_pid)] = _ii
 
                 for _ii, _inst in enumerate(_insts_out):
-                    _piid = _find_parent_idx(_inst.parent_id, _inst_lookup, _part_by_id)
+                    _piid = _find_parent_idx(_inst.parent_id, _inst_lookup,
+                                             _part_by_id, _exclude=_ii)
                     _inst.parent_inst_id = _piid if _piid >= 0 else _ii  # fallback = own
-                    _inst.parent_frag_id = _frag_lookup.get(int(_inst.id), -1)
+                    _inst.parent_frag_id = (
+                        _frag_lookup.get(int(_inst.id), -1) if _write_frags else -1
+                    )
 
                 _t = time.perf_counter()
                 writer.append_instances(_insts_out)

@@ -411,3 +411,278 @@ def SetSemanticType(interaction_type, pdg, parent_pdg, point_cloud, point_cloud_
         
     else:
         raise Exception("Unexpected interaction type ("+str(interaction_type)+") encountered")
+
+
+def validate_interaction_ids(particles,
+                             raise_on_missing: bool = True,
+                             max_report: int = 10,
+                             verbose: bool = False) -> list:
+    """
+    Check that every particle in *particles* carries an interaction ID.
+
+    A particle with ``_interaction_id < 0`` was never associated with any
+    vertex.  That is almost always a genealogy problem rather than physics:
+    :func:`~pysupera.readers.format_edepsim_h5._get_interaction_id` seeds
+    interaction IDs from particles whose start position coincides with a
+    vertex and then propagates them down the tree, so a broken or
+    self-referential ancestor link strands a particle *and every descendant of
+    it* at -1.  Because the strand is silent, the loss is easy to miss until
+    something downstream indexes by interaction.
+
+    For each offender the diagnostic walks ``parent_id`` upwards and reports
+    the chain with each ancestor's PDG and interaction ID, which is normally
+    enough to see where the assignment stopped.
+
+    Parameters
+    ----------
+    particles : list of Particle
+        Particle collection for one event.  Not modified.
+    raise_on_missing : bool, optional
+        ``True`` (default) raises :class:`ValueError` when any particle lacks
+        an interaction ID.  ``False`` issues a :class:`UserWarning` instead and
+        lets the caller decide.
+    max_report : int, optional
+        Number of offending particles described in detail.  Default ``10``.
+    verbose : bool, optional
+        Print a one-line confirmation when every particle is assigned.
+
+    Returns
+    -------
+    list of Particle
+        The offending particles, empty when all are assigned.
+
+    Raises
+    ------
+    ValueError
+        If *raise_on_missing* and at least one particle lacks an ID.
+    """
+    missing = [p for p in particles if int(getattr(p, '_interaction_id', -1)) < 0]
+
+    if not missing:
+        if verbose:
+            print(f"[validate] all {len(particles)} particle(s) carry an "
+                  f"interaction ID")
+        return []
+
+    by_id = {int(p.id): p for p in particles}
+
+    def _chain(p, limit: int = 12) -> str:
+        """Render the parent chain of *p* as id(pdg)=interaction_id links."""
+        out, seen, cur = [], set(), p
+        while cur is not None and int(cur.id) not in seen and len(out) < limit:
+            seen.add(int(cur.id))
+            out.append(f"{int(cur.id)}(pdg={int(cur.pdg)})"
+                       f"=int{int(getattr(cur, '_interaction_id', -1))}")
+            nxt = int(cur.parent_id)
+            cur = None if nxt == int(cur.id) else by_id.get(nxt)
+        return " <- ".join(out) + (" <- ..." if len(out) >= limit else "")
+
+    lines = [_chain(p) for p in missing[:max_report]]
+    msg = (
+        f"{len(missing)} of {len(particles)} particle(s) have no interaction ID "
+        f"(_interaction_id < 0).  Every particle must be associated with an "
+        f"interaction.  Parent chains of the first {len(lines)}:\n  "
+        + "\n  ".join(lines)
+    )
+    if len(missing) > len(lines):
+        msg += f"\n  ... and {len(missing) - len(lines)} more"
+
+    if raise_on_missing:
+        raise ValueError(msg)
+
+    import warnings
+    warnings.warn(msg, UserWarning, stacklevel=2)
+    return missing
+
+
+def validate_root_ids(particles,
+                      raise_on_missing: bool = True,
+                      max_report: int = 10,
+                      verbose: bool = False) -> list:
+    """
+    Check that every particle's ``root_id`` is the primary it descends from.
+
+    The invariant checked is that walking ``parent_id`` upwards from a particle
+    terminates at exactly ``root_id``.  It is worth checking because the
+    ancestor field in EDepSim files is not always consistent with the parent
+    links: a secondary written with ``ancestor_track_id == its own track_id``
+    becomes a false root, and every descendant inherits it, so a handful of bad
+    entries can put a third of an event on the wrong root.  See
+    :func:`~pysupera.readers.format_edepsim_h5._get_root_id`, which derives
+    ``root_id`` from the parent chain for this reason.
+
+    Two failure modes are reported: a ``root_id`` naming a particle absent from
+    the event, and a ``root_id`` that disagrees with the primary the parent
+    chain actually leads to.
+
+    Run this **after** :func:`resolve_orphans`, which legitimately re-roots
+    particles whose references dangle; before that, its repairs look like
+    violations.
+
+    Parameters
+    ----------
+    particles : list of Particle
+        Particle collection for one event.  Not modified.
+    raise_on_missing : bool, optional
+        ``True`` (default) raises :class:`ValueError`; ``False`` warns instead.
+    max_report : int, optional
+        Number of offenders described in detail.  Default ``10``.
+    verbose : bool, optional
+        Print a one-line confirmation when every root is consistent.
+
+    Returns
+    -------
+    list of Particle
+        The offending particles, empty when all roots are consistent.
+
+    Raises
+    ------
+    ValueError
+        If *raise_on_missing* and at least one root is inconsistent.
+    """
+    by_id = {int(p.id): p for p in particles}
+
+    def _walk_primary(p):
+        """Primary reached from *p* via parent_id; own id on a cycle."""
+        seen = set()
+        cur = p
+        while True:
+            cid = int(cur.id)
+            if cid in seen:
+                return cid                      # cycle: no primary reachable
+            seen.add(cid)
+            pid = int(cur.parent_id)
+            if pid == cid or pid not in by_id:
+                return cid
+            cur = by_id[pid]
+
+    offenders, reasons = [], []
+    for p in particles:
+        rid = int(p.root_id)
+        if rid not in by_id:
+            offenders.append(p)
+            reasons.append(f"{int(p.id)}(pdg={int(p.pdg)}): root_id={rid} "
+                           f"is not a particle in this event")
+            continue
+        primary = _walk_primary(p)
+        if primary != rid:
+            offenders.append(p)
+            reasons.append(
+                f"{int(p.id)}(pdg={int(p.pdg)}): root_id={rid} but the "
+                f"parent chain leads to {primary}"
+                f"(pdg={int(by_id[primary].pdg)})"
+            )
+
+    if not offenders:
+        if verbose:
+            print(f"[validate] all {len(particles)} particle(s) have a "
+                  f"consistent root_id")
+        return []
+
+    shown = reasons[:max_report]
+    msg = (f"{len(offenders)} of {len(particles)} particle(s) have an "
+           f"inconsistent root_id.  First {len(shown)}:\n  "
+           + "\n  ".join(shown))
+    if len(reasons) > len(shown):
+        msg += f"\n  ... and {len(reasons) - len(shown)} more"
+
+    if raise_on_missing:
+        raise ValueError(msg)
+
+    import warnings
+    warnings.warn(msg, UserWarning, stacklevel=2)
+    return offenders
+
+
+def select_traceable_instances(instances, particles, verbose: bool = False):
+    """
+    Reduce an instance list to those needed to describe the visible event.
+
+    An event's instance list contains many representatives that deposited
+    nothing: neutral particles, absorbed shower members, recoil nuclei.  Most
+    are of no interest, but a few are indispensable -- a pi0 deposits no energy
+    yet is the only link between its two visible photons, so dropping it breaks
+    the production history of particles that *are* visible.
+
+    Three rules decide what stays:
+
+    1. Every instance with a non-empty point cloud (*visible*).
+    2. Every ancestor of a visible instance, so each kept row's parent is also
+       kept and the genealogy is closed.  These are the zero-point links.
+    3. The primaries of every interaction that has at least one visible
+       instance, even without visible descendants of their own, so the primary
+       list of a detected interaction stays complete.  An interaction with no
+       visible instance at all is dropped entirely -- it left no trace, so
+       nothing represents it.
+
+    Ancestry is resolved through the particle ``parent_id`` chain rather than
+    the instance list, skipping ancestors that belong to the instance's *own*
+    group: when a rep's parent was merged into the rep's own shower, the naive
+    lookup answers with the rep itself and the walk dead-ends.
+
+    Parameters
+    ----------
+    instances : list of Particle
+        Instance representatives, e.g. from
+        :func:`~pysupera.merge.merge_em_showers`.  Not modified.
+    particles : list of Particle
+        The event's full particle list, used for the ``parent_id`` chains.
+    verbose : bool, optional
+        Print a one-line summary of what was kept.
+
+    Returns
+    -------
+    list of Particle
+        The retained instances, in their original relative order.
+    """
+    if not instances:
+        return list(instances)
+
+    by_id = {int(p.id): p for p in particles}
+
+    # member particle id -> index in *instances*
+    inst_of: dict = {}
+    for k, inst in enumerate(instances):
+        members = inst.member_ids if inst.member_ids is not None else [inst.id]
+        for pid in members:
+            inst_of[int(pid)] = k
+
+    def _parent_index(k):
+        """Nearest ancestor instance of *k*, or None when *k* is a primary."""
+        inst = instances[k]
+        pid = int(inst.parent_id)
+        seen = set()
+        while pid not in seen:
+            seen.add(pid)
+            hit = inst_of.get(pid)
+            if hit is not None and hit != k:
+                return hit
+            p = by_id.get(pid)
+            if p is None or int(p.parent_id) == int(p.id):
+                return None
+            pid = int(p.parent_id)
+        return None
+
+    parent_idx = [_parent_index(k) for k in range(len(instances))]
+
+    visible = {k for k, i in enumerate(instances) if len(i.point_cloud) > 0}
+    visible_interactions = {int(instances[k]._interaction_id) for k in visible}
+
+    keep = set(visible)
+    for k in visible:                       # rule 2: walk to the root
+        cur = parent_idx[k]
+        while cur is not None and cur not in keep:
+            keep.add(cur)
+            cur = parent_idx[cur]
+
+    for k in range(len(instances)):         # rule 3: primaries of live interactions
+        if parent_idx[k] is None and \
+                int(instances[k]._interaction_id) in visible_interactions:
+            keep.add(k)
+
+    out = [instances[k] for k in range(len(instances)) if k in keep]
+    if verbose:
+        print(f"[instances] kept {len(out)} of {len(instances)} "
+              f"({len(visible)} visible, {len(out) - len(visible)} genealogy/primary), "
+              f"{len(visible_interactions)} interaction(s) with signal")
+    return out

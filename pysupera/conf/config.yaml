@@ -40,6 +40,27 @@ report: true
 # Record every merge decision for post-hoc inspection.
 enable_diagnostics: false
 
+# Verify that every particle carries an interaction ID before partitioning.
+#
+# Interaction IDs are seeded from particles whose start point coincides with a
+# vertex and then propagated down the genealogy, so one broken ancestor link
+# strands a particle and all of its descendants at -1.  That loss is silent,
+# which is why it is checked rather than assumed.
+#
+# true (default) — raise ValueError listing the offenders and their parent
+#                  chains, so the assignment can be traced.
+# false          — warn once per event and continue.
+check_interaction_id: true
+
+# Verify that every particle's root_id is the primary its parent chain leads
+# to.  Guards the same class of upstream defect as check_interaction_id: an
+# EDepSim ancestor field that disagrees with parent_track_id puts whole
+# subtrees on a false root.
+#
+# true (default) — raise ValueError listing the inconsistent particles.
+# false          — warn once per event and continue.
+check_root_id: true
+
 # ---------------------------------------------------------------------------
 # Post-run repack (opt-in)
 # ---------------------------------------------------------------------------
@@ -100,6 +121,40 @@ output_compact: true
 # fragments, instances, and (when output_compact is false) raw particles.
 # Useful when low-energy scatter products are not needed downstream.
 drop_le_scatter: false
+
+# Which particle instances to write.
+#
+# all       — every instance the step-2 merger produced, including the many
+#             that deposited nothing (63% of them in a typical event).
+# traceable — instances with a non-empty point cloud, plus the zero-point
+#             ancestors needed to complete their genealogy (a pi0 linking two
+#             visible photons, say), plus the primaries of every interaction
+#             that has at least one visible instance.  An interaction with no
+#             visible instance is dropped entirely: it left no trace, so
+#             nothing in the detector represents it.
+#
+# 'traceable' keeps every row reachable from a visible one, so walking
+# parent_inst_id still terminates at a primary.  On a sample event it retains
+# 207 of 535 instances.
+instance_output: traceable
+
+# Write the step-1 fragment level (particle_fragments, its point clouds and
+# member lists).
+#
+# Fragments are an intermediate product: step-2 merging groups them into
+# instances, and most analyses work at the instance level.  Their point payload
+# is a second copy of the same points the instance level already stores, so
+# skipping them is the single largest space saving available -- roughly 20% of
+# a typical output file.
+#
+# false (default) — particle_fragments and friends are created but left empty,
+#                   exactly as particles/ behaves under output_compact.  The
+#                   fragment stage still runs; only the output is skipped.
+# true            — write the fragment level too.
+#
+# When false, instance parent_frag_id is set to -1 rather than pointing into a
+# table that was not written.
+write_fragments: false
 
 # Write event-level union point clouds (event_cloud and le_scatter_cloud).
 # event_cloud     : union of all particles' point clouds for each event,
