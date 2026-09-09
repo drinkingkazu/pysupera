@@ -78,6 +78,8 @@ from .format_edepsim_h5 import (
     _get_parent_pdg,
     _get_interaction_id,
     _get_interaction_type,
+    _get_root_id,
+    _to_index_space,
 )
 from ..data import Particle
 from ..utils import PointFeature
@@ -511,12 +513,13 @@ class JaxtpcHDF5Reader(EventReaderBase):
         itype   = _get_interaction_type(parts, self._e_thresh)
         int_ids = _get_interaction_id(parts, verts)
 
-        _root_field = 'root_track_id' if 'root_track_id' in parts.dtype.names else 'ancestor_track_id'
+
+        _ids, _par, _root, _g4 = _to_index_space(parts, _get_root_id(parts))
 
         return Particle.from_flat_arrays(
-            ids                 = parts['track_id'],
-            parent_ids          = parts['parent_track_id'],
-            root_ids            = parts[_root_field],
+            ids                 = _ids,
+            parent_ids          = _par,
+            root_ids            = _root,
             pdgs                = parts['pdg'],
             parent_pdgs         = _get_parent_pdg(parts),
             interaction_ids     = int_ids,
@@ -524,6 +527,7 @@ class JaxtpcHDF5Reader(EventReaderBase):
             point_cloud_flat    = point_cloud_flat,
             point_cloud_offsets = offsets,
             min_pc_size         = self._min_pc_size,
+            geant4_ids          = _g4,
         )
 
     def close(self) -> None:

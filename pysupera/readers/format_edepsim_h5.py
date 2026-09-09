@@ -13,9 +13,13 @@ Expected HDF5 layout
     ============= ======================================================
     Field         Description
     ============= ======================================================
-    track_id      Geant4 track ID  (used as pysupera *id*)
+    track_id      Geant4 track ID.  Kept as pysupera *geant4_id*; it is NOT
+                  used as the pysupera *id*, because track IDs are not
+                  guaranteed contiguous.  pysupera assigns its own 0-based
+                  per-event particle index instead (see _to_index_space).
     parent_track_id  Immediate parent track ID
-    root_track_id     Root ancestor track ID
+    root_track_id     Root ancestor track ID.  Unreliable in some files -- see
+                  _get_root_id, which re-derives it from the parent chain.
     pdg           PDG Monte Carlo particle code
     proc_start    G4 process type integer at particle start vertex
     subproc_start G4 process subtype integer at particle start vertex
@@ -254,6 +258,109 @@ def _get_parent_pdg(parts: np.ndarray) -> np.ndarray:
     return np.where(parent_valid, parts["pdg"][parent_zfill], 0)
 
 
+def _to_index_space(parts: np.ndarray, root_track_ids: np.ndarray):
+    """
+    Translate Geant4 track IDs into contiguous per-event particle indices.
+
+    pysupera addresses particles by their position in the event's particle
+    list, not by Geant4 track ID: track IDs are not guaranteed contiguous --
+    an upstream stage may drop particles before pysupera ever sees them -- so
+    they cannot be used as direct array indices.  The track IDs are preserved
+    separately as provenance.
+
+    Returns
+    -------
+    ids : ndarray of int32
+        ``arange(len(parts))``.
+    parent_idx : ndarray of int32
+        Index of each particle's parent.  A particle whose parent is absent
+        from this list (a primary, or one whose parent was dropped upstream)
+        becomes its own parent, which is the convention every genealogy walk
+        in pysupera terminates on.
+    root_idx : ndarray of int32
+        Index of each particle's primary ancestor.
+    geant4_ids : ndarray of int32
+        The original ``track_id`` values, unchanged.
+    """
+    n = len(parts)
+    track_ids = parts['track_id']
+    index_of = {int(t): i for i, t in enumerate(track_ids)}
+
+    ids = np.arange(n, dtype=np.int32)
+    parent_idx = np.empty(n, dtype=np.int32)
+    root_idx = np.empty(n, dtype=np.int32)
+    for i in range(n):
+        parent_idx[i] = index_of.get(int(parts['parent_track_id'][i]), i)
+        root_idx[i] = index_of.get(int(root_track_ids[i]), i)
+    return ids, parent_idx, root_idx, track_ids.astype(np.int32)
+
+
+def _get_root_id(parts: np.ndarray) -> np.ndarray:
+    """
+    Return the true primary ancestor track ID of every particle.
+
+    The stored ancestor field (``root_track_id`` / ``ancestor_track_id``) is not
+    reliable in every EDepSim file: a secondary is sometimes written with
+    ``ancestor_track_id == its own track_id`` despite having a real parent.
+    Every descendant of such a particle then inherits that wrong ancestor, so a
+    single bad entry strands a whole subtree.  In one 13.5k-particle event, 15
+    such entries put 4,423 particles (33%) on the wrong root.
+
+    ``parent_track_id`` is trustworthy in those files, so the primary is found
+    by walking it upwards until reaching a particle that has no parent, is its
+    own parent, or whose parent is absent from this event's list.  Results are
+    memoised along each chain, keeping the pass O(n).
+
+    Parameters
+    ----------
+    parts : structured ndarray
+        Must contain fields ``track_id`` and ``parent_track_id``.
+
+    Returns
+    -------
+    ndarray of int32, shape (N,)
+        Primary ancestor track ID per particle.  A particle caught in a
+        ``parent_track_id`` cycle is reported as its own root, since no primary
+        is reachable.
+    """
+    n = len(parts)
+    roots = np.full(n, -1, dtype=np.int32)
+    if n == 0:
+        return roots
+
+    track_ids = parts['track_id']
+    parent_ids = parts['parent_track_id']
+    index_of = {int(t): i for i, t in enumerate(track_ids)}
+
+    for start in range(n):
+        if roots[start] >= 0:
+            continue
+        chain = []
+        i = start
+        seen = set()
+        answer = -1
+        while True:
+            if i in seen:
+                # parent_track_id cycle: no primary is reachable, so every
+                # particle in the loop becomes its own root.
+                answer = int(track_ids[i])
+                break
+            if roots[i] >= 0:
+                answer = int(roots[i])
+                break
+            seen.add(i)
+            chain.append(i)
+            p = int(parent_ids[i])
+            if p < 0 or p == int(track_ids[i]) or p not in index_of:
+                answer = int(track_ids[i])   # reached a primary
+                break
+            i = index_of[p]
+        for j in chain:
+            roots[j] = answer
+
+    return roots
+
+
 def _get_interaction_id(parts: np.ndarray, verts: np.ndarray) -> np.ndarray:
     """
     Look up the interaction ID of every particle
@@ -274,13 +381,18 @@ def _get_interaction_id(parts: np.ndarray, verts: np.ndarray) -> np.ndarray:
     """
 
     interaction_ids = np.full(len(parts), -1, dtype=np.int32)
+    if len(parts) == 0:
+        return interaction_ids
 
-    # Resolve the root-ancestor field name (two conventions exist).
-    _root_field = 'root_track_id' if 'root_track_id' in parts.dtype.names else 'ancestor_track_id'
+    track_ids = parts['track_id']
+    parent_ids = parts['parent_track_id']
+    # Use the walked primary rather than the stored ancestor field, which is
+    # unreliable -- see _get_root_id.
+    root_refs = _get_root_id(parts)
+    index_of = {int(t): i for i, t in enumerate(track_ids)}
 
     # Step 0: loop over root particles and match to one of vertices by (x,y,z,t) proximity.
-    root_indices = np.where(parts['track_id'] == parts[_root_field])[0]
-    root_ids = parts['track_id'][root_indices]
+    root_indices = np.where(track_ids == root_refs)[0]
 
     for index in root_indices:
         p = parts[index]
@@ -293,14 +405,44 @@ def _get_interaction_id(parts: np.ndarray, verts: np.ndarray) -> np.ndarray:
                 interaction_ids[index] = vtx['interaction_id']
                 break
 
-    # Step 1: for non-root particles, assign the same interaction ID as their root particle.
+    # Step 1: for non-root particles, assign the same interaction ID as their
+    # root particle.  A root reference that is absent from this event list is
+    # left for step 2 rather than raising.
     for i in range(len(parts)):
-        p = parts[i]
-        if p['track_id'] == p[_root_field]:
+        if track_ids[i] == root_refs[i]:
             continue
+        root_index = index_of.get(int(root_refs[i]))
+        if root_index is not None:
+            interaction_ids[i] = interaction_ids[root_index]
 
-        root_index = root_indices[np.where(p[_root_field] == root_ids)[0][0]]
-        interaction_ids[i] = interaction_ids[root_index]
+    # Step 2: fall back to the parent chain for anything still unassigned.
+    #
+    # Steps 0-1 trust the root/ancestor field, which is not always the true
+    # primary: EDepSim files are seen in which a secondary carries
+    # ancestor_track_id == its own track_id, or points at another secondary that
+    # never started at a vertex.  Either way the particle is treated as a root,
+    # fails the vertex match because it was born mid-event, and inherits -1 --
+    # as do all of its descendants.
+    #
+    # parent_track_id is reliable in those files, so walk it upwards until an
+    # already-assigned ancestor is found.  Results are memoised onto every
+    # particle visited along the way, which keeps the whole pass O(n) even for
+    # long decay chains.
+    for i in np.where(interaction_ids < 0)[0]:
+        chain = [i]
+        found = -1
+        node = index_of.get(int(parent_ids[i]))
+        seen = {i}
+        while node is not None and node not in seen:
+            seen.add(node)
+            if interaction_ids[node] >= 0:
+                found = interaction_ids[node]
+                break
+            chain.append(node)
+            node = index_of.get(int(parent_ids[node]))
+        if found >= 0:
+            for j in chain:
+                interaction_ids[j] = found
 
     return interaction_ids
 
@@ -523,12 +665,13 @@ class EDepSimHDF5Reader(EventReaderBase):
             ass["end"][:num_parts],
         ])
 
-        _root_field = 'root_track_id' if 'root_track_id' in parts.dtype.names else 'ancestor_track_id'
+
+        _ids, _par, _root, _g4 = _to_index_space(parts, _get_root_id(parts))
 
         return Particle.from_flat_arrays(
-            ids                  = parts["track_id"],
-            parent_ids           = parts["parent_track_id"],
-            root_ids             = parts[_root_field],
+            ids                  = _ids,
+            parent_ids           = _par,
+            root_ids             = _root,
             pdgs                 = parts["pdg"],
             parent_pdgs          = _get_parent_pdg(parts),
             interaction_ids      = int_ids,
@@ -536,6 +679,7 @@ class EDepSimHDF5Reader(EventReaderBase):
             point_cloud_flat     = _steps_to_plain_array(steps),
             point_cloud_offsets  = offsets,
             min_pc_size          = self._min_pc_size,
+            geant4_ids           = _g4,
         )
 
     def close(self) -> None:

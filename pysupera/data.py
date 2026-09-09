@@ -158,16 +158,21 @@ class Particle:
         member_ids=None,
         parent_frag_id=None,
         parent_inst_id=None,
+        geant4_id=None,
     ):
         """
         Parameters
         ----------
         id : int
-            Unique particle identifier within an event.
+            Index of this particle within its event, assigned by the reader.
+            Contiguous and 0-based, so it doubles as a direct row index into
+            the event's particle table.  Geant4 track IDs are *not* guaranteed
+            contiguous (particles may be dropped upstream), which is why they
+            are kept separately in ``geant4_id`` rather than used as the key.
         parent_id : int
-            ID of the direct parent particle.
+            Index of the direct parent particle.  A primary is its own parent.
         root_id : int
-            ID of the root ancestor particle.
+            Index of the primary ancestor particle.
         pdg : int
             PDG Monte Carlo particle code.
         parent_pdg : int
@@ -190,6 +195,10 @@ class Particle:
         """
         # --- required fields -----------------------------------------------
         self.id         = id
+        # Geant4 provenance: the original track ID this particle came from.
+        # Defaults to `id` so a caller that has no separate track ID (tests,
+        # synthetic particles) still gets a self-consistent object.
+        self.geant4_id  = id if geant4_id is None else geant4_id
         self.parent_id  = parent_id
         self.root_id    = root_id
         self.pdg        = pdg
@@ -278,6 +287,7 @@ class Particle:
         interaction_types,
         point_clouds,
         min_pc_size=None,
+        geant4_ids=None,
     ):
         """
         Construct a list of :class:`Particle` objects from columnar arrays.
@@ -366,6 +376,7 @@ class Particle:
         return [
             cls(
                 id=ids[i],
+                geant4_id=(None if geant4_ids is None else geant4_ids[i]),
                 parent_id=parent_ids[i],
                 root_id=root_ids[i],
                 pdg=pdgs[i],
@@ -391,6 +402,7 @@ class Particle:
         point_cloud_flat,
         point_cloud_offsets,
         min_pc_size=None,
+        geant4_ids=None,
     ):
         """
         Construct a list of :class:`Particle` objects from columnar arrays
@@ -514,6 +526,7 @@ class Particle:
         return [
             cls(
                 id=ids[i],
+                geant4_id=(None if geant4_ids is None else geant4_ids[i]),
                 parent_id=parent_ids[i],
                 root_id=root_ids[i],
                 pdg=pdgs[i],
