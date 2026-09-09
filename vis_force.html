@@ -1,0 +1,3346 @@
+<!DOCTYPE html>
+<!--  pysupera viewer  ·  Style: TACTICAL OVERLAY
+      Top bar layout, amber accent, keycap buttons, monospace military-HUD feel.
+      Same data logic as vis.html — load aho_vis.h5 (gzip, not LZ4).
+-->
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>pysupera · meat slicer</title>
+<style>
+@import url('https://fonts.googleapis.com/css2?family=Share+Tech+Mono&display=swap');
+*{box-sizing:border-box;margin:0;padding:0}
+:root{
+  --bg:     #070a06;
+  --bg2:    #0e1209;
+  --bg3:    #171d0e;
+  --bg4:    #1d2412;
+  --amber:  #e8961e;
+  --amber2: #c07010;
+  --red:    #c83020;
+  --dim:    #35421e;
+  --dim2:   #222d12;
+  --text:   #c8b898;
+  --text2:  #7a7050;
+  --font:   'Share Tech Mono', 'Courier New', monospace;
+}
+body{display:flex;flex-direction:column;height:100vh;overflow:hidden;
+     font:18px/1.5 var(--font);background:var(--bg);color:var(--text)}
+
+/* ── TOP BAR ── */
+#topbar{
+  display:flex;align-items:center;flex-wrap:nowrap;gap:7px;
+  background:var(--bg2);
+  border-bottom:1px solid var(--amber);
+  box-shadow:0 2px 0 var(--amber2),inset 0 1px 0 #ffffff0a;
+  padding:9px 15px;
+  height:72px;
+  position:relative;
+  flex-shrink:0;
+  overflow:visible;
+}
+#url-bar{
+  display:none;align-items:center;gap:8px;
+  background:var(--bg2);border-bottom:1px solid var(--amber2);
+  padding:5px 14px;flex-shrink:0;
+  font:11px var(--font);color:var(--text2);
+}
+#url-bar.visible{display:flex;}
+#url-inp{
+  flex:1;background:var(--bg3);border:1px solid var(--dim);border-bottom:2px solid #2a5a2a;
+  color:var(--text);font:12px var(--font);padding:4px 8px;
+}
+#url-inp:focus{outline:none;border-color:var(--amber2);}
+#url-inp::placeholder{color:var(--text2);opacity:.5;}
+#file-browser{
+  position:fixed;z-index:500;
+  top:50%;left:50%;transform:translate(-50%,-50%);
+  width:min(860px,92vw);max-height:80vh;
+  background:#0a0f06;border:1px solid var(--amber);
+  display:none;flex-direction:column;
+  border-radius:6px;overflow:hidden;
+  box-shadow:0 8px 48px #000e;
+}
+#file-browser.visible{display:flex;}
+#fb-hdr{
+  display:flex;align-items:center;gap:10px;
+  padding:10px 16px;background:#0e1209;
+  border-bottom:1px solid var(--dim);
+  font:22px var(--font);flex-shrink:0;
+}
+#fb-path{flex:1;color:var(--amber);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:20px;}
+#fb-remote-label{display:flex;align-items:center;gap:6px;cursor:pointer;color:var(--text2);font:20px var(--font);white-space:nowrap;flex-shrink:0;user-select:none;}
+#fb-remote-label:hover{color:var(--text);}
+#fb-remote-label input{accent-color:var(--amber);width:18px;height:18px;cursor:pointer;}
+#fb-close-btn{background:none;border:none;color:var(--text2);font:24px monospace;cursor:pointer;padding:0 4px;line-height:1;}
+#fb-close-btn:hover{color:var(--text);}
+#fb-list{overflow-y:auto;flex:1;padding:4px 0;}
+.fb-item{padding:12px 22px;cursor:pointer;font:28px var(--font);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+.fb-item:hover{background:#172610;}
+.fb-item.fb-dir{color:var(--amber2);}
+.fb-item.fb-h5{color:#50c8c8;}
+.fb-item.fb-up{color:var(--text2);}
+#fb-status{padding:8px 16px;font:22px var(--font);color:var(--text2);border-top:1px solid var(--dim);flex-shrink:0;}
+#fb-backdrop{position:fixed;inset:0;z-index:499;background:#0007;display:none;}
+#fb-backdrop.visible{display:block;}
+
+.tdiv{width:1px;height:33px;background:var(--dim);flex-shrink:0;align-self:center}
+.tgrp{display:flex;align-items:center;gap:6px;position:relative;flex-shrink:0}
+
+/* keycap buttons */
+.tbtn{
+  background:var(--bg3);
+  border:1px solid var(--dim);
+  border-bottom:3px solid var(--amber2);
+  color:var(--amber);
+  font:16px var(--font);
+  padding:6px 18px;
+  cursor:pointer;
+  border-radius:3px;
+  letter-spacing:.07em;
+  transition:border-bottom-width .07s,transform .07s,background .1s;
+  white-space:nowrap;
+}
+.tbtn:hover{background:var(--bg4);border-color:var(--amber);border-bottom-color:var(--amber2)}
+.tbtn:active{border-bottom-width:1px;transform:translateY(2px)}
+.tbtn.active{background:var(--bg4);border-color:var(--amber);box-shadow:0 0 4px #e8961e66}
+.tbtn.dim{border-color:var(--dim);border-bottom-color:var(--dim2);color:var(--text2)}
+.tbtn.dim:hover{border-color:var(--text2);color:var(--text)}
+
+label.tbtn{display:inline-block}
+
+/* event input */
+#ev-input{
+  width:70px;background:var(--bg3);border:1px solid var(--dim);
+  color:var(--amber);font:18px var(--font);
+  padding:5px 8px;text-align:center;border-radius:3px;
+}
+#ev-input:focus{outline:none;border-color:var(--amber);box-shadow:inset 0 0 4px #e8961e33}
+#ev-total{color:var(--text2);font-size:17px;white-space:nowrap}
+#filename{max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:17px;color:var(--text2)}
+
+/* status right */
+#status{margin-left:auto;font-size:17px;color:var(--amber2);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:720px}
+
+/* ── DROPDOWN PANELS ── */
+.panel{
+  visibility:hidden;opacity:0;transform:translateY(-6px);
+  transition:opacity .18s ease,transform .18s ease;
+  pointer-events:none;
+  position:absolute;top:calc(100% + 5px);left:0;
+  background:var(--bg2);
+  border:1px solid var(--amber);
+  border-left:3px solid var(--amber);
+  border-radius:0 4px 4px 0;
+  padding:15px 18px;
+  min-width:330px;z-index:300;
+  box-shadow:4px 4px 0 #00000044;
+}
+.panel.open{visibility:visible;opacity:1;transform:translateY(0);pointer-events:auto}
+
+.phdr{
+  font-size:15px;color:var(--amber);letter-spacing:.15em;
+  text-transform:uppercase;padding-bottom:6px;margin-bottom:9px;
+  border-bottom:1px solid var(--dim);
+}
+
+.prow{display:flex;align-items:center;gap:12px;padding:5px 0;font-size:18px}
+.prow label{color:var(--text2);min-width:80px;flex-shrink:0;font-size:17px}
+.prow .val{color:var(--amber);min-width:32px;text-align:right}
+.prow input[type=range]{flex:1;accent-color:var(--amber);cursor:pointer}
+.prow select{
+  flex:1;background:var(--bg3);border:1px solid var(--dim);
+  color:var(--text);font:17px var(--font);padding:5px 9px;border-radius:2px;
+}
+.prow select:focus{outline:none;border-color:var(--amber)}
+.prow input[type=number]{
+  width:108px;background:var(--bg3);border:1px solid var(--dim);
+  color:var(--text);font:17px var(--font);padding:3px 9px;border-radius:2px;
+}
+.prow input[type=checkbox]{accent-color:var(--amber);cursor:pointer}
+.cnt-badge{font-size:17px;color:var(--amber2);margin-left:auto}
+
+.stat-block{padding-top:6px;margin-top:6px;border-top:1px solid var(--dim)}
+.srow{display:flex;justify-content:space-between;font-size:17px;padding:2px 0}
+.srow span:first-child{color:var(--text2)}
+.srow span:last-child{color:var(--amber)}
+
+/* LE scatter accent */
+#chk-le{accent-color:var(--red)}
+.cnt-badge.le{color:#e07050}
+
+/* Tooltips */
+[data-tip]{position:relative}
+[data-tip]::after{
+  content:attr(data-tip);
+  position:absolute;top:calc(100% + 7px);left:50%;transform:translateX(-50%);
+  background:#0a0e07ee;border:1px solid var(--amber2);color:var(--text);
+  font:15px var(--font);padding:5px 12px;border-radius:2px;
+  white-space:nowrap;pointer-events:none;opacity:0;
+  transition:opacity .15s .3s;z-index:500;
+}
+[data-tip]:hover::after{opacity:1}
+
+/* Collapsible topbar */
+#topbar.collapsed .tgrp:not(.always-show),
+#topbar.collapsed .tdiv:not(.always-show){display:none}
+#topbar.collapsed #status{display:none}
+
+/* Coord-read hover card */
+#coord-read{
+  display:none;
+  position:absolute;top:10px;right:10px;
+  font:22px/1.75 var(--font);letter-spacing:.05em;
+  background:#07090af0;padding:14px 24px 15px;
+  border:1px solid #ffffff22;border-left:3px solid var(--amber);
+  border-radius:0 5px 5px 0;pointer-events:none;
+  min-width:340px;z-index:50;
+}
+.ch-hdr{font-size:17px;color:var(--text2);margin-bottom:6px;letter-spacing:.12em;text-transform:uppercase;}
+.ch-div{border-top:1px solid #ffffff18;margin:5px 0 4px;}
+.ch-row{display:flex;justify-content:space-between;gap:24px;}
+.ch-key{color:var(--text2);font-size:20px;}
+.ch-val{color:#c8a84b;font-variant-numeric:tabular-nums;font-size:21px;}
+.ch-val.ch-active{color:#ffe066;font-weight:bold;text-shadow:0 0 8px #ffe06688;}
+
+/* Shortcut help overlay */
+#help-overlay{
+  display:none;position:absolute;inset:0;
+  align-items:center;justify-content:center;
+  background:#07090abb;z-index:500;
+}
+#help-overlay.open{display:flex}
+.help-box{
+  background:var(--bg2);border:1px solid var(--amber);border-left:3px solid var(--amber);
+  border-radius:0 4px 4px 0;padding:30px 42px;min-width:405px;
+  font:17px var(--font);box-shadow:6px 6px 0 #00000055;
+}
+.help-box h3{color:var(--amber);letter-spacing:.15em;margin-bottom:15px;font-size:17px;text-transform:uppercase}
+.help-row{display:flex;justify-content:space-between;align-items:center;padding:3px 0;color:var(--text2);border-bottom:1px solid var(--dim2)}
+.help-row:last-of-type{border:none}
+.help-row kbd{background:var(--bg3);border:1px solid var(--dim);border-bottom:2px solid var(--amber2);padding:2px 12px;border-radius:2px;color:var(--amber);font:17px var(--font);margin-left:24px}
+.help-close{margin-top:15px;font-size:15px;color:var(--text2);text-align:center}
+
+.cbar{height:18px;border-radius:2px;margin:6px 0;border:1px solid var(--dim)}
+
+/* ── ANIMATION BUTTON STATE ── */
+.tbtn.playing{background:var(--bg4);border-color:#50c050;border-bottom-color:#30a030;color:#90ff90;box-shadow:0 0 8px #50c05066;}
+
+/* ── HISTOGRAM ── */
+#hist-canvas{
+  display:block;width:100%;height:195px;cursor:crosshair;
+  background:var(--bg3);border:1px solid var(--dim);border-radius:2px;
+  margin-top:6px;touch-action:none;
+}
+.hist-axis{display:flex;justify-content:space-between;font-size:15px;color:var(--text2);margin-top:3px;}
+.hist-axis span{max-width:90px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+
+/* ── INSTANCE POINT-COUNT HISTOGRAM (inside ip-detail) ── */
+#ip-pt-hist-canvas{
+  display:block;width:100%;flex:1;min-height:80px;cursor:crosshair;
+  background:var(--bg3);border:1px solid var(--dim);border-radius:2px;
+  margin-top:6px;touch-action:none;
+}
+.ip-hist-section{margin-top:14px;padding-top:10px;border-top:1px solid var(--dim);
+  flex:1;display:flex;flex-direction:column;min-height:0;}
+.ip-hist-hdr{font-size:15px;color:var(--text2);letter-spacing:.1em;text-transform:uppercase;margin-bottom:5px;}
+.ip-hist-thr-row{display:flex;align-items:center;gap:8px;margin-top:4px;font-size:16px;}
+.ip-hist-thr-val{color:#50c8c8;min-width:60px;}
+.ip-hist-thr-inp{background:var(--bg3);border:1px solid var(--dim);border-bottom:2px solid #2a5a2a;color:#50c8c8;font:11px var(--font);padding:2px 5px;width:62px;text-align:right;}
+.ip-hist-thr-inp:focus{outline:none;border-color:var(--amber2);}
+.ip-hist-thr-inp::-webkit-inner-spin-button,.ip-hist-thr-inp::-webkit-outer-spin-button{opacity:0.4;}
+.ip-hist-axis{display:flex;justify-content:space-between;font-size:13px;color:var(--text2);margin-top:3px;}
+.ip-hist-reset{background:var(--bg3);border:1px solid var(--dim);border-bottom:2px solid var(--dim2);
+  color:var(--text2);font:13px var(--font);padding:2px 10px;cursor:pointer;border-radius:2px;margin-left:auto;}
+.ip-hist-reset:hover{border-color:var(--text2);color:var(--text);}
+
+/* ── INTERACTION PANEL ── */
+#interact-panel{
+  position:absolute;left:0;top:0;bottom:0;width:720px;
+  background:#05080af0;border-right:1px solid var(--dim);
+  z-index:20;display:none;flex-direction:column;pointer-events:auto;
+}
+#ip-bubbles{
+  flex:0 0 50%;position:relative;overflow:hidden;
+  border-bottom:1px solid #1e2d1e66;
+}
+#ip-bubbles svg{display:block;width:100%;height:100%}
+#ip-detail{
+  flex:1;overflow-y:auto;padding:16px 18px;
+  display:flex;flex-direction:column;
+  scrollbar-width:thin;scrollbar-color:var(--dim) transparent;
+}
+#ip-detail::-webkit-scrollbar{width:3px}
+#ip-detail::-webkit-scrollbar-thumb{background:var(--dim);border-radius:2px}
+.ip-empty-msg{
+  font:26px var(--font);color:var(--text2);opacity:.4;
+  text-align:center;margin-top:28%;line-height:1.9;
+}
+.ip-det-hdr{
+  font:20px var(--font);letter-spacing:.12em;
+  text-transform:uppercase;padding-bottom:14px;margin-bottom:16px;
+  border-bottom:1px solid;opacity:.95;
+}
+.ip-det-num{
+  font-size:52px;font-weight:bold;letter-spacing:-.01em;
+  margin-bottom:20px;line-height:1;
+}
+.ip-det-row{
+  display:flex;justify-content:space-between;align-items:baseline;
+  padding:10px 0;font:25px var(--font);gap:14px;
+  border-bottom:1px solid #1e2a1e33;
+}
+.ip-det-row:last-child{border-bottom:none}
+.ip-det-key{color:var(--text2);flex-shrink:0;font-size:22px}
+.ip-det-val{color:#dfc882;font-variant-numeric:tabular-nums;text-align:right;word-break:break-all;font-size:23px}
+.ip-det-pdg{font-size:20px;color:#a0c0a0;margin-top:16px;padding-top:12px;
+  border-top:1px solid var(--dim);line-height:1.7}
+.ip-bub{cursor:pointer}
+.ip-bub .ip-ring{transition:stroke-width .15s,opacity .2s}
+.ip-bub:hover .ip-ring,.ip-bub.active .ip-ring{stroke-width:2.8;filter:drop-shadow(0 0 6px #ffffff88)}
+.ip-bub.dimmed .ip-ring{opacity:.12}
+.ip-bub.locked .ip-ring{stroke-width:3.5 !important;filter:drop-shadow(0 0 10px #ffffffaa) !important}
+#ip-close-btn{
+  display:none; /* shown only on mobile */
+  position:absolute;top:6px;right:10px;z-index:35;
+  background:#0a140a99;border:1px solid var(--dim);
+  color:var(--text2);font:20px monospace;
+  cursor:pointer;padding:3px 10px;line-height:1;border-radius:2px;
+}
+#ip-close-btn:hover{color:var(--text);border-color:var(--amber2);}
+#ip-zoom-btn{
+  position:absolute;top:8px;right:10px;z-index:5;
+  background:#0a140ab8;border:1px solid var(--dim);
+  color:var(--text2);font:22px var(--font);padding:6px 18px;
+  cursor:pointer;border-radius:2px;letter-spacing:.07em;
+  transition:background .15s,color .15s,border-color .15s;
+  user-select:none;white-space:nowrap;
+}
+#ip-zoom-btn:hover{background:#112211cc;border-color:var(--amber2);color:var(--text)}
+#ip-zoom-btn.active{background:#163a16cc;color:#9ed49e;border-color:#4a8a4a}
+.ip-stats-default{
+  display:flex;flex-direction:column;height:100%;
+}
+.ip-stats-default .ip-det-row{padding:12px 0;font:25px var(--font)}
+.ip-stats-hint{
+  margin-top:auto;padding-top:18px;
+  font:20px var(--font);color:var(--text2);opacity:.3;
+  text-align:center;line-height:1.9;
+}
+
+/* ── INSTANCE GRAPH OVERLAY (opt2: popover near bubble) ── */
+#graph-overlay{
+  position:absolute;z-index:60;
+  bottom:10px;right:10px;
+  width:700px;height:680px;
+  background:#060e06cc;border:1px solid var(--dim);
+  display:none;flex-direction:column;
+  border-radius:6px;overflow:hidden;
+  box-shadow:0 6px 40px #000c,0 0 0 1px #2a5a2a44;
+  pointer-events:auto;
+  min-width:280px;min-height:180px;
+  backdrop-filter:blur(2px);
+}
+#graph-overlay.visible{display:flex;}
+#graph-hdr{
+  display:flex;align-items:center;justify-content:space-between;
+  padding:5px 10px;background:#0e1e0ebb;border-bottom:1px solid var(--dim);
+  cursor:grab;flex-shrink:0;
+  font:22px var(--font);color:var(--text2);letter-spacing:.1em;
+}
+#graph-hdr:active{cursor:grabbing;}
+#graph-hdr-left{display:flex;align-items:center;gap:8px;}
+#graph-title{pointer-events:none;}
+#graph-inst-count{
+  font:20px var(--font);color:var(--amber2);opacity:.8;pointer-events:none;
+}
+#graph-close{
+  background:none;border:none;color:var(--text2);font:16px monospace;
+  cursor:pointer;padding:0 4px;line-height:1;flex-shrink:0;
+}
+#graph-close:hover{color:var(--text);}
+#graph-canvas{width:100%;flex:1;display:block;cursor:default;height:0;min-height:0;}
+#graph-msg{
+  flex:1;display:flex;align-items:center;justify-content:center;
+  color:var(--text2);font:12px var(--font);opacity:.4;
+}
+#graph-legend{
+  display:flex;flex-wrap:wrap;gap:4px 14px;
+  padding:6px 11px;background:#0a160acc;border-bottom:1px solid var(--dim);
+  font:18px var(--font);flex-shrink:0;letter-spacing:.04em;
+  align-items:center;
+}
+.gl-item{display:flex;align-items:center;gap:5px;color:var(--text2);opacity:.75;cursor:pointer;user-select:none;}
+.gl-item.dimmed{opacity:.2;}.gl-item:hover{opacity:1;}
+.gl-dot{width:12px;height:12px;border-radius:50%;flex-shrink:0;}
+.gl-hint{font:12px var(--font);color:var(--text2);opacity:.85;margin-left:6px;letter-spacing:0;pointer-events:none;}
+.gr-edge{position:absolute;z-index:15;pointer-events:auto;}
+.gr-edge[data-edge="n"]{top:0;left:14px;right:14px;height:6px;cursor:n-resize;}
+.gr-edge[data-edge="s"]{bottom:0;left:14px;right:14px;height:6px;cursor:s-resize;}
+.gr-edge[data-edge="e"]{right:0;top:14px;bottom:14px;width:6px;cursor:e-resize;}
+.gr-edge[data-edge="w"]{left:0;top:14px;bottom:14px;width:6px;cursor:w-resize;}
+.gr-edge[data-edge="ne"]{top:0;right:0;width:14px;height:14px;cursor:ne-resize;}
+.gr-edge[data-edge="nw"]{top:0;left:0;width:14px;height:14px;cursor:nw-resize;}
+.gr-edge[data-edge="se"]{bottom:0;right:0;width:18px;height:18px;cursor:se-resize;
+  background:linear-gradient(135deg,transparent 55%,var(--dim2) 55%);border-radius:0 0 6px 0;}
+.gr-edge[data-edge="sw"]{bottom:0;left:0;width:14px;height:14px;cursor:sw-resize;}
+#graph-tooltip{
+  position:fixed;background:#07090aee;
+  border:1px solid #ffffff22;border-left:2px solid var(--amber);
+  font:22px var(--font);color:var(--text);
+  padding:6px 11px;pointer-events:none;z-index:200;
+  display:none;white-space:nowrap;
+  border-radius:0 3px 3px 0;line-height:1.7;
+}
+#graph-locked-bar{
+  display:none;flex-shrink:0;padding:6px 12px;
+  background:#100d00ee;border-top:1px solid #ffffaa44;
+  font:13px var(--font);color:var(--text);line-height:1.8;
+}
+
+/* ── CANVAS ── */
+#canvas-wrap{flex:1;position:relative;background:var(--bg)}
+canvas{display:block;width:100%;height:100%}
+
+#overlay{
+  position:absolute;top:8px;right:10px;
+  font:15px var(--font);color:var(--text2);
+  background:#0000007a;padding:3px 12px;
+  border:1px solid var(--dim);
+  border-left:2px solid var(--amber2);
+  border-radius:0 3px 3px 0;
+}
+
+#btn-scene-reset{
+  position:absolute;top:40px;left:10px;z-index:50;
+  font:26px var(--font);color:var(--amber);background:#0b140bcc;
+  border:1px solid var(--amber2);border-radius:3px;
+  padding:8px 24px;cursor:pointer;letter-spacing:.06em;
+  pointer-events:auto;
+}
+#btn-scene-reset:hover{background:#162016cc;color:var(--text);}
+
+#scene-logo{
+  position:absolute;top:100px;left:10px;z-index:50;
+  width:240px;opacity:.75;pointer-events:none;
+  filter:drop-shadow(0 0 4px #000a);
+}
+
+/* corner decoration on canvas */
+#canvas-wrap::before{
+  content:'REC ●';
+  position:absolute;top:10px;left:10px;
+  font:15px var(--font);color:var(--red);
+  opacity:.7;pointer-events:none;
+  animation:blink 1.4s step-start infinite;
+}
+@keyframes blink{0%,100%{opacity:.7}50%{opacity:.15}}
+
+/* drag-over */
+body.dragover #canvas-wrap::after{
+  content:'DROP FILE';
+  position:absolute;inset:0;display:flex;align-items:center;justify-content:center;
+  font:32px var(--font);color:var(--amber);letter-spacing:.3em;
+  background:#07090688;pointer-events:none;
+  border:2px dashed var(--amber);
+}
+/* ── Log bar ── */
+#log-bar{
+  flex-shrink:0;height:88px;background:#020602cc;
+  border-top:1px solid var(--dim);display:flex;flex-direction:column;
+  font:11px var(--font);color:var(--text2);z-index:10;
+  transition:height .15s ease;
+}
+#log-bar.collapsed{height:18px;}
+#log-bar.collapsed #log-progress-wrap,
+#log-bar.collapsed #log-text{display:none;}
+#log-header{
+  display:flex;align-items:center;gap:6px;
+  padding:0 8px;height:18px;flex-shrink:0;
+  cursor:pointer;user-select:none;
+  border-bottom:1px solid var(--dim);
+}
+#log-header:hover{background:#0a150acc;}
+#log-toggle{font:11px var(--font);color:var(--text2);opacity:.7;}
+#log-header-label{font:10px var(--font);color:var(--text2);opacity:.5;letter-spacing:.08em;flex:1;}
+#log-progress-wrap{height:3px;background:#ffffff09;flex-shrink:0;}
+#log-progress-bar{
+  height:100%;width:0%;background:var(--amber);
+  box-shadow:0 0 6px var(--amber);transition:width .1s linear;
+}
+#log-text{
+  flex:1;overflow-y:auto;padding:2px 12px;
+  display:flex;flex-direction:column;
+  scrollbar-width:thin;scrollbar-color:var(--dim) transparent;
+}
+#log-text::-webkit-scrollbar{width:3px}
+#log-text::-webkit-scrollbar-thumb{background:var(--dim);border-radius:2px}
+.log-line{line-height:1.55;white-space:pre;font-size:11px;}
+.log-ok{color:#6ec86e;}
+.log-err{color:#e05050;}
+.log-warn{color:var(--amber2);}
+
+/* ── MOBILE RESPONSIVE ── */
+@media (max-width:600px){
+  /* Topbar: allow wrapping so buttons don't scroll off-screen */
+  #topbar{
+    flex-wrap:wrap;
+    height:auto;
+    min-height:44px;
+    padding:6px 8px;
+    gap:5px;
+    overflow:visible;
+  }
+  /* Smaller buttons */
+  .tbtn{
+    font:13px var(--font);
+    padding:5px 10px;
+  }
+  /* Hide less-critical topbar items to save space */
+  #filename{display:none;}
+  #ev-total{display:none;}
+  #status{display:none;}
+  /* Compact event input */
+  #ev-input{
+    width:52px;
+    font:15px var(--font);
+    padding:4px 5px;
+  }
+  /* File browser: never wider than screen */
+  #file-browser{
+    width:min(860px, 95vw);
+    max-height:85vh;
+  }
+  /* Dropdown panels: fit phone width, scrollable if tall */
+  .panel{
+    min-width:min(330px, calc(100vw - 16px));
+    max-width:calc(100vw - 16px);
+    max-height:70vh;
+    overflow-y:auto;
+    left:0;
+  }
+  /* Interact panel → bottom sheet on mobile */
+  #interact-panel{
+    top:auto;
+    left:0;right:0;bottom:0;
+    width:auto;
+    height:55vh;
+    border-right:none;
+    border-top:2px solid var(--amber2);
+    flex-direction:row;
+  }
+  #ip-bubbles{
+    flex:0 0 44vw;
+    border-bottom:none;
+    border-right:1px solid #1e2d1e66;
+  }
+  #ip-close-btn{display:block;top:6px;right:auto;left:10px;}
+  /* Topbar/url-bar stay above graph overlay */
+  #topbar{z-index:200;}
+  #url-bar{z-index:200;}
+  /* Graph overlay: fixed in the canvas slab above interact-panel, no overlap */
+  #graph-overlay{
+    position:fixed;
+    top:var(--tb-h,60px);
+    bottom:55vh;
+    left:0;right:0;
+    width:auto;
+    height:auto;
+    max-height:none;
+    border-radius:0 0 4px 4px;
+    border-left:none;border-right:none;border-top:none;
+  }
+  /* RESET VIEW: smaller font, tighter padding */
+  #btn-scene-reset{
+    font:18px var(--font);
+    padding:5px 14px;
+  }
+  /* Logo: hide on mobile to save space */
+  #scene-logo{display:none;}
+  /* Coord-read card: compact */
+  #coord-read{
+    font:16px/1.6 var(--font);
+    min-width:200px;
+    padding:10px 14px;
+    right:5px;
+    top:5px;
+  }
+  .ch-key{font-size:15px;}
+  .ch-val{font-size:16px;}
+  /* Help overlay: fit phone */
+  .help-box{
+    min-width:min(405px, calc(100vw - 30px));
+    padding:20px 18px;
+    font:15px var(--font);
+  }
+  /* Zoom button: smaller */
+  #ip-zoom-btn{
+    font:16px var(--font);
+    padding:4px 10px;
+  }
+  /* Topology details: smaller row text */
+  .ip-det-row{font:18px var(--font);}
+  .ip-det-num{font-size:36px;}
+  .ip-det-key{font-size:17px;}
+  .ip-det-val{font-size:18px;}
+  /* Panel rows: smaller font */
+  .prow{font-size:15px;}
+  .prow label{font-size:14px;min-width:64px;}
+  .prow select{font:14px var(--font);}
+  .prow input[type=number]{font:14px var(--font);width:80px;}
+  /* Graph tooltip */
+  #graph-tooltip{font:16px var(--font);}
+  /* Keep INTER button visible even when topbar is collapsed */
+  #topbar.collapsed .tgrp:has(#btn-inter){display:flex !important;}
+  #log-bar.collapsed{height:18px;}
+}
+</style>
+
+<script type="importmap">
+{"imports":{
+  "three":"https://cdn.jsdelivr.net/npm/three@0.163.0/build/three.module.js",
+  "three/addons/":"https://cdn.jsdelivr.net/npm/three@0.163.0/examples/jsm/"
+}}
+</script>
+</head>
+<body>
+
+<div id="topbar">
+
+  <!-- COLLAPSE TOGGLE -->
+  <div class="tgrp always-show">
+    <button class="tbtn dim" id="btn-collapse" data-tip="Collapse / expand bar" style="padding:4px 9px;font-size:14px;line-height:1">≡</button>
+  </div>
+  <div class="tdiv always-show"></div>
+
+  <!-- FILE -->
+  <div class="tgrp">
+    <label class="tbtn" for="file-input" data-tip="Open HDF5 file">OPEN</label>
+    <input type="file" id="file-input" accept=".h5,.hdf5" style="display:none">
+    <button class="tbtn" id="btn-url" data-tip="Open a file from a URL or server path">URL</button>
+    <button class="tbtn" id="btn-browse" data-tip="Browse files on this server">BROWSE</button>
+    <span id="filename">no file</span>
+  </div>
+  <div class="tdiv"></div>
+
+  <!-- EVENT -->
+  <div class="tgrp">
+    <button id="btn-prev" class="tbtn" data-tip="Previous event [←]">◄</button>
+    <input type="number" id="ev-input" value="0" min="0" max="0">
+    <span id="ev-total">/ —</span>
+    <button id="btn-next" class="tbtn" data-tip="Next event [→]">►</button>
+  </div>
+  <div class="tdiv"></div>
+
+  <!-- LAYERS -->
+  <div class="tgrp">
+    <button class="tbtn" data-toggle="panel-layers" data-tip="Layer visibility">LAYERS ▾</button>
+    <div class="panel" id="panel-layers">
+      <div class="phdr">&#x25a6; Visibility</div>
+      <div class="prow">
+        <input type="checkbox" id="chk-nle" checked>
+        <label for="chk-nle" style="color:var(--amber)">Non-LE cloud</label>
+        <span class="cnt-badge" id="cnt-nle">—</span>
+      </div>
+      <div class="prow">
+        <input type="checkbox" id="chk-le" checked>
+        <label for="chk-le" style="color:var(--red)">LE scatter</label>
+        <span class="cnt-badge le" id="cnt-le">—</span>
+      </div>
+      <div class="stat-block">
+        <div class="srow"><span>Non-LE pts</span><span id="cnt2-nle">—</span></div>
+        <div class="srow"><span>LE pts</span><span id="cnt2-le">—</span></div>
+        <div class="srow"><span>Total</span><span id="cnt2-tot">—</span></div>
+      </div>
+    </div>
+  </div>
+  <div class="tdiv"></div>
+
+  <!-- INTER -->
+  <div class="tgrp">
+    <button class="tbtn dim" id="btn-inter" data-tip="Interaction panel [I]">INTER</button>
+  </div>
+  <div class="tdiv"></div>
+
+  <!-- STYLE -->
+  <div class="tgrp">
+    <button class="tbtn" data-toggle="panel-style" data-tip="Point appearance">STYLE ▾</button>
+    <div class="panel" id="panel-style">
+      <div class="phdr">&#x25a6; Appearance</div>
+      <div class="prow">
+        <label>Size</label>
+        <input type="range" id="sl-size" min="0.5" max="10" step="0.5" value="2">
+        <span class="val" id="lbl-size">2</span>
+      </div>
+      <div class="prow">
+        <label>Opacity</label>
+        <input type="range" id="sl-opacity" min="0.05" max="1" step="0.05" value="1">
+        <span class="val" id="lbl-opacity">1.00</span>
+      </div>
+    </div>
+  </div>
+  <div class="tdiv"></div>
+
+  <!-- COLOR -->
+  <div class="tgrp">
+    <button class="tbtn" data-toggle="panel-color" data-tip="Color mapping">COLOR ▾</button>
+    <div class="panel" id="panel-color" style="min-width:260px">
+      <div class="phdr">&#x25a6; Color mapping</div>
+      <div class="prow">
+        <label>Color by</label>
+        <select id="sel-col">
+          <option value="4">Energy</option>
+          <option value="3">Time</option>
+          <option value="5">Interaction ID</option>
+          <option value="6">Root Track ID</option>
+          <option value="7">Fragment ID</option>
+          <option value="8" selected>Instance ID</option>
+          <option value="9">PDG code</option>
+        </select>
+      </div>
+      <div class="prow">
+        <label>Colormap</label>
+        <select id="sel-cmap">
+          <option value="0" selected>Viridis</option>
+          <option value="1">Plasma</option>
+          <option value="2">Turbo</option>
+          <option value="3">Hot</option>
+          <option value="4">Cool</option>
+          <option value="5">Grayscale</option>
+        </select>
+      </div>
+      <div id="cbar" class="cbar"></div>
+      <div class="prow">
+        <label>Auto range</label>
+        <input type="checkbox" id="chk-auto" checked>
+      </div>
+      <div class="prow">
+        <label>Min</label>
+        <input type="number" id="rng-min" step="any" value="0">
+        <label>Max</label>
+        <input type="number" id="rng-max" step="any" value="1">
+      </div>
+      <div class="prow" id="log-scale-row" style="display:none">
+        <label>Log scale</label>
+        <input type="checkbox" id="chk-log-scale">
+        <span style="font-size:10px;color:var(--text2);margin-left:4px">log(E) color axis</span>
+      </div>
+    </div>
+  </div>
+  <div class="tdiv"></div>
+
+  <!-- ENERGY THRESHOLD -->
+  <div class="tgrp">
+    <button class="tbtn" data-toggle="panel-energy" data-tip="Energy threshold + histogram">ENERGY &#9660;</button>
+    <div class="panel" id="panel-energy" style="min-width:320px">
+      <div class="phdr">&#x26a1; Energy Threshold</div>
+      <div class="prow">
+        <label>Min E</label>
+        <span id="lbl-ethr-val" style="color:var(--amber);min-width:70px">— (off)</span>
+        <button class="tbtn dim" id="btn-ethr-reset" style="padding:3px 12px;font-size:15px;margin-left:auto">RESET</button>
+      </div>
+      <canvas id="hist-canvas" height="195"></canvas>
+      <div class="hist-axis">
+        <span id="hist-xmin">—</span>
+        <span style="opacity:.45">&#8592; click/drag = threshold</span>
+        <span id="hist-xmax">—</span>
+      </div>
+    </div>
+  </div>
+  <div class="tdiv"></div>
+
+  <!-- SCENE -->
+  <div class="tgrp">
+    <button class="tbtn" id="btn-center" data-tip="Center camera [C]">CENTER</button>
+    <button class="tbtn" id="btn-axes" data-tip="Toggle axes [A]">AXES</button>
+    <button class="tbtn" id="btn-shot" data-tip="Save PNG screenshot [S]">SHOT</button>
+    <button class="tbtn dim" id="btn-debug" data-tip="Log debug info [D]">DBG</button>
+    <button class="tbtn dim" id="btn-help" data-tip="Keyboard shortcuts [?]" style="padding:4px 9px">?</button>
+    <button class="tbtn" id="btn-rot" data-tip="Toggle auto-rotation [O]">&#10227; ROT</button>
+    <button class="tbtn dim" data-toggle="panel-rot" data-tip="Rotation speed">&#9660;</button>
+    <div class="panel" id="panel-rot" style="min-width:200px">
+      <div class="phdr">&#10227; Auto-Rotate</div>
+      <div class="prow">
+        <label>Speed</label>
+        <input type="range" id="sl-rot-speed" min="4" max="120" step="2" value="30">
+        <span class="val" id="lbl-rot-speed">30 s/rev</span>
+      </div>
+    </div>
+  </div>
+  <div class="tdiv"></div>
+
+  <!-- BBOX -->
+  <div class="tgrp">
+    <button class="tbtn" data-toggle="panel-bbox" data-tip="Bounding box display">BBOX &#9660;</button>
+    <div class="panel" id="panel-bbox" style="min-width:300px">
+      <div class="phdr">&#9633; Bounding Box</div>
+      <div class="prow">
+        <label>Visible</label>
+        <input type="checkbox" id="chk-bbox" checked>
+      </div>
+      <div class="prow">
+        <label>X range</label>
+        <input type="number" id="bbox-xmin" value="-2160" step="10" style="width:86px">
+        <span style="color:var(--text2)">&#8594;</span>
+        <input type="number" id="bbox-xmax" value="2160" step="10" style="width:86px">
+      </div>
+      <div class="prow">
+        <label>Y range</label>
+        <input type="number" id="bbox-ymin" value="-2160" step="10" style="width:86px">
+        <span style="color:var(--text2)">&#8594;</span>
+        <input type="number" id="bbox-ymax" value="2160" step="10" style="width:86px">
+      </div>
+      <div class="prow">
+        <label>Z range</label>
+        <input type="number" id="bbox-zmin" value="-2160" step="10" style="width:86px">
+        <span style="color:var(--text2)">&#8594;</span>
+        <input type="number" id="bbox-zmax" value="2160" step="10" style="width:86px">
+      </div>
+      <div class="prow" style="justify-content:flex-end;gap:8px">
+        <button class="tbtn dim" id="btn-bbox-reset">RESET</button>
+        <button class="tbtn" id="btn-bbox-apply">APPLY</button>
+      </div>
+    </div>
+  </div>
+  <div class="tdiv"></div>
+
+  <!-- ANIM -->
+  <div class="tgrp">
+    <button class="tbtn" id="btn-play" data-tip="Play/pause time animation [Space]">&#9654; PLAY</button>
+    <button class="tbtn dim" data-toggle="panel-anim" data-tip="Animation settings">&#9201; &#9660;</button>
+    <button class="tbtn dim" id="btn-anim-reset" data-tip="Reset animation [R]" style="padding:4px 9px">&#9646;</button>
+    <div class="panel" id="panel-anim" style="min-width:240px">
+      <div class="phdr">&#9193; Time Animation</div>
+      <div class="prow">
+        <label>Duration</label>
+        <input type="range" id="sl-anim-dur" min="2" max="120" step="1" value="30">
+        <span class="val" id="lbl-anim-dur">30 s</span>
+      </div>
+      <div class="prow">
+        <label>Time mode</label>
+        <select id="sel-anim-mode">
+          <option value="0" selected>Absolute</option>
+          <option value="1">Norm. per interact.</option>
+        </select>
+      </div>
+      <div class="prow" id="anim-spread-row" style="display:none">
+        <label>Spread</label>
+        <input type="range" id="sl-anim-spread" min="1" max="100" step="1" value="100">
+        <span class="val" id="lbl-anim-spread">100%</span>
+      </div>
+      <div class="stat-block">
+        <div class="srow"><span>t min</span><span id="anim-tmin">—</span></div>
+        <div class="srow"><span>t max</span><span id="anim-tmax">—</span></div>
+        <div class="srow"><span>t current</span><span id="anim-tcur">—</span></div>
+        <div class="srow" id="anim-int-row" style="display:none"><span>interactions</span><span id="anim-nint">—</span></div>
+      </div>
+      <div class="phdr" style="margin-top:8px">&#10148; X-Drift (cathode projection)</div>
+      <div class="prow">
+        <label>Enable</label>
+        <input type="checkbox" id="chk-drift">
+        <span style="font-size:14px;color:var(--text2);margin-left:4px">enable drift animation</span>
+      </div>
+      <div class="prow" id="drift-speed-row" style="display:none">
+        <label>Speed</label>
+        <input type="number" id="inp-drift-speed" value="0.0016" step="0.0001" min="0" style="width:80px">
+        <span style="font-size:14px;color:var(--text2)">m/µs</span>
+      </div>
+    </div>
+  </div>
+
+  <div id="status">Open a file to begin.</div>
+</div>
+<div id="url-bar">
+  <span style="flex-shrink:0;opacity:.7">URL:</span>
+  <input id="url-inp" type="text" spellcheck="false" placeholder="relative path (e.g. data.h5) or full URL">
+  <label id="lbl-remote-mode" title="Use HTTP Range requests — only fetches the bytes needed (no full download). Requires server CORS Range support."
+    style="flex-shrink:0;display:flex;align-items:center;gap:5px;cursor:pointer;white-space:nowrap;font:11px var(--font);color:var(--text2);opacity:.85;padding:0 4px">
+    <input type="checkbox" id="chk-remote-mode" style="accent-color:var(--amber);cursor:pointer">
+    <span>&#x26A1; range request</span>
+  </label>
+  <button class="tbtn" id="btn-url-go" style="flex-shrink:0">GO</button>
+  <button class="tbtn dim" id="btn-url-cancel" style="flex-shrink:0;padding:4px 9px">&#x2715;</button>
+</div>
+<div id="fb-backdrop"></div>
+<div id="file-browser">
+  <div id="fb-hdr">
+    <span style="color:var(--text2);flex-shrink:0;letter-spacing:.08em">&#x25a6; SERVER FILES &nbsp;</span>
+    <span id="fb-path"></span>
+    <label id="fb-remote-label" title="Use HTTP Range requests — load only the requested event, not the full file">
+      <input type="checkbox" id="chk-fb-remote">
+      <span>&#x26a1; range request</span>
+    </label>
+    <button id="fb-close-btn" title="Close">&#x2715;</button>
+  </div>
+  <div id="fb-list"></div>
+  <div id="fb-status">&mdash;</div>
+</div>
+
+<!-- ── Canvas ── -->
+<div id="canvas-wrap">
+  <!-- Instance graph overlay -->
+  <div id="graph-overlay">
+    <div id="graph-hdr">
+      <div id="graph-hdr-left">
+        <span id="graph-title">⬡ FORCE GRAPH</span>
+        <span id="graph-inst-count"></span>
+      </div>
+      <button id="graph-close" title="Close">&#x2715;</button>
+    </div>
+    <div id="graph-legend">
+      <span class="gl-item" data-sem="1" title="Shower — click to toggle filter"><span class="gl-dot" style="background:#4fc3f7"></span>Shower</span>
+      <span class="gl-item" data-sem="2" title="Track — click to toggle filter"><span class="gl-dot" style="background:#ef5350"></span>Track</span>
+      <span class="gl-item" data-sem="3" title="Delta — click to toggle filter"><span class="gl-dot" style="background:#ff9800"></span>Delta</span>
+      <span class="gl-item" data-sem="4" title="Michel — click to toggle filter"><span class="gl-dot" style="background:#ab47bc"></span>Michel</span>
+      <span class="gl-item" data-sem="5" title="LE — click to toggle filter"><span class="gl-dot" style="background:#66bb6a"></span>LE</span>
+      <span class="gl-hint">(click to show/hide)</span>
+    </div>
+    <canvas id="graph-canvas"></canvas>
+    <div id="graph-locked-bar"></div>
+    <div id="graph-msg" style="display:none">load an event</div>
+    <div class="gr-edge" data-edge="n"></div>
+    <div class="gr-edge" data-edge="s"></div>
+    <div class="gr-edge" data-edge="e"></div>
+    <div class="gr-edge" data-edge="w"></div>
+    <div class="gr-edge" data-edge="ne"></div>
+    <div class="gr-edge" data-edge="nw"></div>
+    <div class="gr-edge" data-edge="se"></div>
+    <div class="gr-edge" data-edge="sw"></div>
+  </div>
+  <div id="graph-tooltip"></div>
+  <div id="interact-panel">
+    <button id="ip-close-btn" title="Close panel — tap INTER in toolbar to reopen">&#x2715;</button>
+    <div id="ip-bubbles"><div class="ip-empty-msg">load an<br>event</div></div>
+    <div id="ip-zoom-btn" class="active" title="Adaptive zoom: zoom in on hover / click">⎲ ZOOM</div>
+    <div id="ip-detail"><div class="ip-empty-msg">hover a<br>circle</div></div>
+  </div>
+  <div id="anim-bar" style="display:none;position:absolute;top:0;left:0;right:0;height:3px;z-index:100;pointer-events:none;background:#ffffff0a;"><div class="af" style="height:100%;width:0%;background:var(--amber);box-shadow:0 0 8px var(--amber);transition:none;"></div></div>
+  <div id="overlay">&#8212; fps</div>
+  <div id="coord-read">x:&#8212; y:&#8212; z:&#8212;</div>
+  <button id="btn-scene-reset" title="Reset animation &amp; drift">&#9646; RESET VIEW</button>
+  <img id="scene-logo" src="https://raw.githubusercontent.com/drinkingkazu/pysupera/develop/figures/supera.png" alt="supera">
+  <!-- Shortcut help overlay -->
+  <div id="help-overlay">
+    <div class="help-box">
+      <h3>⌨ Keyboard Shortcuts</h3>
+      <div class="help-row"><span>Previous event</span><kbd>←</kbd></div>
+      <div class="help-row"><span>Next event</span><kbd>→</kbd></div>
+      <div class="help-row"><span>Center camera</span><kbd>C</kbd></div>
+      <div class="help-row"><span>Toggle axes</span><kbd>A</kbd></div>
+      <div class="help-row"><span>Screenshot</span><kbd>S</kbd></div>
+      <div class="help-row"><span>Play / pause anim</span><kbd>Space</kbd></div>
+      <div class="help-row"><span>Reset animation</span><kbd>R</kbd></div>
+      <div class="help-row"><span>Toggle auto-rotate</span><kbd>O</kbd></div>
+      <div class="help-row"><span>Interaction panel</span><kbd>I</kbd></div>
+      <div class="help-row"><span>Toggle instance graph</span><kbd>G</kbd></div>
+      <div class="help-row"><span>This help</span><kbd>?</kbd></div>
+      <div class="help-row"><span>Close / dismiss</span><kbd>Esc</kbd></div>
+      <div class="help-close">click anywhere to close</div>
+    </div>
+  </div>
+</div>
+<div id="log-bar">
+  <div id="log-header">
+    <span id="log-toggle">&#x25bc;</span>
+    <span id="log-header-label">LOG</span>
+  </div>
+  <div id="log-progress-wrap"><div id="log-progress-bar"></div></div>
+  <div id="log-text"></div>
+</div>
+
+<!-- ── App ── -->
+<script type="module">
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+
+let H5File, FS, _h5LoadError=null;
+try {
+  const h5wasm = (await import('https://cdn.jsdelivr.net/npm/h5wasm@0.7.3/dist/esm/hdf5_hl.js')).default;
+  const Module = await h5wasm.ready;
+  H5File = h5wasm.File; FS = Module.FS;
+  setStatus('Ready — open a file.');
+} catch(e) {
+  _h5LoadError = e.message;
+  setStatus('h5wasm load error: '+e.message);
+  console.error('h5wasm failed to load:', e);
+}
+
+const CMAP_CSS = [
+  'linear-gradient(to right,#440154,#31688e,#35b779,#fde725)',
+  'linear-gradient(to right,#0d0887,#7e03a8,#cc4778,#f89540,#f0f921)',
+  'linear-gradient(to right,#23171b,#4076f4,#29efb1,#fdb830,#900c00)',
+  'linear-gradient(to right,#000,#f00,#ff0,#fff)',
+  'linear-gradient(to right,#0ff,#f0f)',
+  'linear-gradient(to right,#000,#fff)',
+];
+
+// Cloud columns (NCOLS=9):
+// pos  : 0=x  1=y  2=z
+// extra: 3=t  4=energy  5=interaction_id
+// extr2: 6=root_id  7=frag_id  8=inst_id
+const NCOLS = 9;
+
+const VERT_SHADER = `
+attribute vec3 extra;
+attribute vec3 extra2;
+attribute float animT;
+attribute float instPts;
+attribute float pdg;
+uniform float uColorCol,uMin,uMax,uSize,uTimeThresh,uAnimUseNorm,uLogScale;
+uniform float uDriftSpeed,uBboxXMin,uBboxXMax;
+varying float vN,vTime,vEnergy,vIntId,vInstId,vRawVal,vInstPts,vPdg;
+void main(){
+  vTime=uAnimUseNorm>0.5?animT:extra.x;
+  vEnergy=extra.y; vIntId=extra.z; vInstId=extra2.z; vInstPts=instPts; vPdg=pdg;
+  float v;
+  if(uColorCol<0.5)      v=position.x;
+  else if(uColorCol<1.5) v=position.y;
+  else if(uColorCol<2.5) v=position.z;
+  else if(uColorCol<3.5) v=extra.x;
+  else if(uColorCol<4.5) v=extra.y;
+  else if(uColorCol<5.5) v=extra.z;
+  else if(uColorCol<6.5) v=extra2.x;
+  else if(uColorCol<7.5) v=extra2.y;
+  else                   v=extra2.z;
+  vRawVal=v;
+  if(uLogScale>0.5) v=log(max(v,1e-30));
+  vN=clamp((v-uMin)/max(uMax-uMin,1e-10),0.,1.);
+  float px=position.x;
+  if(uDriftSpeed>0.0&&uTimeThresh<1e20){
+    float tv=max(uTimeThresh-vTime,0.0);
+    px+=sign(px)*tv*uDriftSpeed;
+    px=clamp(px,uBboxXMin,uBboxXMax);
+  }
+  gl_Position=projectionMatrix*modelViewMatrix*vec4(px,position.y,position.z,1.);
+  gl_PointSize=uSize;
+}`;
+
+const FRAG_SHADER = `
+uniform float uCmap,uOpacity,uTimeThresh,uAnimUseNorm,uEnergyThresh,uHighlightId,uHighlightInstId,uDiscreteColor,uInstPtThresh,uViewMode;
+varying float vN,vTime,vEnergy,vIntId,vInstId,vRawVal,vInstPts,vPdg;
+vec3 viridis(float t){vec3 c0=vec3(.277,.0054,.334),c1=vec3(.105,1.404,1.384),c2=vec3(-.331,.215,.095),c3=vec3(-4.63,-5.80,-19.33),c4=vec3(6.23,14.18,56.69),c5=vec3(4.78,-13.74,-65.35),c6=vec3(-5.44,4.65,26.31);return clamp(c0+t*(c1+t*(c2+t*(c3+t*(c4+t*(c5+t*c6))))),0.,1.);}
+vec3 plasma(float t){vec3 c0=vec3(.059,.023,.543),c1=vec3(2.177,.238,.754),c2=vec3(-2.689,-7.456,3.110),c3=vec3(6.130,42.35,-28.52),c4=vec3(-11.11,-82.67,60.14),c5=vec3(10.02,71.41,-54.07),c6=vec3(-3.66,-22.93,18.19);return clamp(c0+t*(c1+t*(c2+t*(c3+t*(c4+t*(c5+t*c6))))),0.,1.);}
+vec3 turbo(float t){vec3 c0=vec3(.114,.063,.225),c1=vec3(6.716,3.182,7.572),c2=vec3(-66.09,-4.928,-10.09),c3=vec3(228.77,25.05,-91.54),c4=vec3(-334.84,-69.32,288.59),c5=vec3(218.76,67.52,-305.20),c6=vec3(-52.89,-21.55,110.52);return clamp(c0+t*(c1+t*(c2+t*(c3+t*(c4+t*(c5+t*c6))))),0.,1.);}
+vec3 hot(float t){return clamp(vec3(t*3.,t*3.-1.,t*3.-2.),0.,1.);}
+vec3 cool(float t){return vec3(t,1.-t,1.);}
+vec3 disc16(float id){int i=int(mod(max(id,0.),16.));if(i==0)return vec3(.910,.588,.118);else if(i==1)return vec3(.314,.784,.471);else if(i==2)return vec3(.310,.765,.969);else if(i==3)return vec3(1.,.420,.616);else if(i==4)return vec3(.753,.518,.988);else if(i==5)return vec3(1.,.835,.310);else if(i==6)return vec3(.937,.325,.314);else if(i==7)return vec3(.149,.776,.855);else if(i==8)return vec3(.612,.800,.396);else if(i==9)return vec3(1.,.439,.263);else if(i==10)return vec3(.259,.647,.961);else if(i==11)return vec3(.925,.251,.478);else if(i==12)return vec3(.400,.733,.416);else if(i==13)return vec3(.671,.278,.737);else if(i==14)return vec3(1.,.541,.396);else return vec3(.149,.651,.604);}
+vec3 pdgColor(float pid){int id=int(abs(pid));if(id==11)return vec3(0.31,0.76,0.97);if(id==13)return vec3(0.67,0.28,0.74);if(id==15)return vec3(0.93,0.40,0.74);if(id==22)return vec3(0.91,0.59,0.12);if(id==211)return vec3(0.31,0.78,0.47);if(id==111)return vec3(0.60,0.90,0.40);if(id==2212)return vec3(0.94,0.33,0.31);if(id==2112)return vec3(0.50,0.50,0.50);if(id==321)return vec3(1.00,0.54,0.40);if(id==3122)return vec3(0.99,0.85,0.37);return vec3(0.80,0.80,0.80);}
+void main(){
+  if(vTime>uTimeThresh)discard;
+  if(vEnergy<uEnergyThresh)discard;
+  if(vInstPts>0.0&&vInstPts<uInstPtThresh)discard;
+  vec2 c=gl_PointCoord-.5; if(dot(c,c)>.25) discard;
+  vec3 col;
+  if(uDiscreteColor>1.5)     col=pdgColor(vPdg);
+  else if(uDiscreteColor>0.5)col=disc16(vRawVal);
+  else if(uCmap<0.5)         col=viridis(vN);
+  else if(uCmap<1.5)         col=plasma(vN);
+  else if(uCmap<2.5)         col=turbo(vN);
+  else if(uCmap<3.5)         col=hot(vN);
+  else if(uCmap<4.5)         col=cool(vN);
+  else                       col=vec3(vN);
+  if(uHighlightInstId>=0.0){
+    bool si=abs(vInstId-uHighlightInstId)<0.5;
+    bool sx=uHighlightId>=0.0&&abs(vIntId-uHighlightId)<0.5;
+    if(uViewMode>0.5){
+      if(!sx){gl_FragColor=vec4(col*0.07,uOpacity*0.07);return;}
+      if(!si){gl_FragColor=vec4(col*0.32,uOpacity*0.32);return;}
+    }else{
+      if(!si){float f=sx?0.38:0.11;gl_FragColor=vec4(col*f,uOpacity*f);return;}
+    }
+  }else if(uHighlightId>=0.0&&abs(vIntId-uHighlightId)>0.5){
+    float f=uViewMode>0.5?0.07:0.28;
+    gl_FragColor=vec4(col*f,uOpacity*f);return;
+  }
+  gl_FragColor=vec4(col,uOpacity);
+}`;
+
+let hf=null, nEvents=0;
+const ANIM_THRESH_MAX=1e38; // sentinel: all points visible
+const S={evIdx:0,showNLE:true,showLE:true,col:8,cmap:0,autoRange:true,size:2,opacity:1,ranges:{nle:null,le:null},
+  anim:{playing:false,tMin:0,tMax:1,dur:30,t0wall:0,_pausedFrac:0,normMode:0,spread:1.0,drift:{on:false,speed:0.0016}},
+  rot:{on:false,secPerRev:30},
+  logScale:false, eThr:0, hist:null, highlight:-1, highlightLocked:false, interactions:[],
+  adaptiveZoom:true, _savedCam:null, _camLerp:null, _lockedInter:null, statsDet:null,
+  instGraph:null, instHighlight:-1, instLocked:-1, instSemFilter:null, instPtThresh:0, _instCountMap:null, _lockedDetHTML:null,
+  _cloudHoverIntId:-1, _cloudHoverInstId:-1, _curGraphParams:null,
+  bbox:{xMin:-2160,xMax:2160,yMin:-2160,yMax:2160,zMin:-2160,zMax:2160,visible:true},
+  remoteMode:false, remoteWorker:null,
+  _prefetch:{idx:-1,promise:null}};  // prefetched next-event data in range mode
+
+const wrap=document.getElementById('canvas-wrap');
+const renderer=new THREE.WebGLRenderer({antialias:false,preserveDrawingBuffer:true});
+renderer.setPixelRatio(Math.min(window.devicePixelRatio,2));
+wrap.appendChild(renderer.domElement);
+const scene=new THREE.Scene();
+scene.background=new THREE.Color(0x070a06);
+const camera=new THREE.PerspectiveCamera(55,1,0.01,1e7);
+camera.position.set(0,0,800);
+const controls=new OrbitControls(camera,renderer.domElement);
+controls.enableDamping=true; controls.dampingFactor=0.07;
+renderer.debug.onShaderError=(gl,program)=>{setStatus('GLSL error: '+gl.getProgramInfoLog(program).slice(0,120));};
+const axesHelper=new THREE.AxesHelper(200);
+scene.add(axesHelper);
+let objNLE=null, objLE=null;
+
+// ── Bounding-box helper ──
+let bboxHelper=null;
+function _buildBBoxHelper(){
+  if(bboxHelper){scene.remove(bboxHelper);bboxHelper.geometry.dispose();bboxHelper=null;}
+  if(!S.bbox.visible) return;
+  const box=new THREE.Box3(
+    new THREE.Vector3(S.bbox.xMin,S.bbox.yMin,S.bbox.zMin),
+    new THREE.Vector3(S.bbox.xMax,S.bbox.yMax,S.bbox.zMax)
+  );
+  bboxHelper=new THREE.Box3Helper(box,new THREE.Color(0x44ffaa));
+  scene.add(bboxHelper);
+}
+_buildBBoxHelper();
+
+// ── Raycaster for coordinate hover ──
+const raycaster=new THREE.Raycaster();
+const mouseNDC=new THREE.Vector2(-9999,-9999);
+const coordEl=document.getElementById('coord-read');
+wrap.addEventListener('mousemove',e=>{
+  // Don't raycast while cursor is over the interact panel — prevents
+  // auto-zoom from shifting 3D points underneath the cursor and causing
+  // erratic interaction switching.
+  if(e.target.closest('#interact-panel')){mouseNDC.set(-9999,-9999);return;}
+  const r=renderer.domElement.getBoundingClientRect();
+  mouseNDC.x=((e.clientX-r.left)/r.width)*2-1;
+  mouseNDC.y=-((e.clientY-r.top)/r.height)*2+1;
+});
+wrap.addEventListener('mouseleave',()=>{
+  mouseNDC.set(-9999,-9999); coordEl.style.display='none';
+  if(S._cloudHoverInstId>=0){_setInstHighlight(-1); S._cloudHoverInstId=-1;}
+  if(S._cloudHoverIntId>=0&&!S.highlightLocked){
+    _setHighlight(-1); S._cloudHoverIntId=-1;
+    const _b=document.getElementById('ip-bubbles');
+    if(_b) _b.querySelectorAll('.ip-bub').forEach(e=>e.classList.remove('dimmed','active'));
+    const _det=document.getElementById('ip-detail');
+    if(_det) _det.innerHTML=S.statsDet||'';
+  }
+});
+
+// Build per-interaction-normalised animT attribute.
+// Interactions are ordered by their tMin; each gets an equal slice of [0,1].
+// spread (0-1): fraction of each interaction's slot used for its internal
+//   dynamics.  The tail (1-spread)*slotWidth is a silent gap before the
+//   next interaction begins.
+// Instantaneous interactions (tRange≈0) have their points spread by
+//   arrival index so they don't all flash at once.
+function buildInteractionNormT(f32, spread){
+  const sp=(spread!=null)?Math.max(0.001,Math.min(1,spread)):1;
+  const N=f32.length/NCOLS;
+  const normT=new Float32Array(N);
+  if(!N) return normT;
+  // pass 1: gather per-interaction tMin/tMax/count (col 5=interaction_id, col 3=t)
+  const intMap=new Map();
+  for(let i=0;i<N;i++){
+    const b=i*NCOLS, id=f32[b+5], t=f32[b+3];
+    const r=intMap.get(id);
+    if(!r) intMap.set(id,{tMin:t,tMax:t,count:1});
+    else{if(t<r.tMin)r.tMin=t;if(t>r.tMax)r.tMax=t;r.count++;}
+  }
+  // sort interactions by tMin, assign equal segment [k/M,(k+1)/M]
+  const sorted=[...intMap.entries()].sort((a,b)=>a[1].tMin-b[1].tMin);
+  const M=sorted.length, segW=1/M;
+  const segMap=new Map();
+  sorted.forEach(([id,r],k)=>{
+    const tRange=r.tMax-r.tMin;
+    segMap.set(id,{s0:k*segW, sw:segW, tMin:r.tMin, tRange,
+                   isInst:tRange<1e-20, ptIdx:0, count:r.count});
+  });
+  // pass 2: map each point into its interaction's segment
+  // instantaneous interactions: spread points evenly by arrival order
+  for(let i=0;i<N;i++){
+    const b=i*NCOLS, id=f32[b+5], t=f32[b+3];
+    const seg=segMap.get(id);
+    let localNorm;
+    if(seg.isInst){
+      localNorm=seg.count>1?seg.ptIdx/(seg.count-1):0;
+      seg.ptIdx++;
+    }else{
+      localNorm=(t-seg.tMin)/seg.tRange;
+    }
+    normT[i]=seg.s0+sp*localNorm*seg.sw;
+  }
+  return normT;
+}
+
+function buildPoints(f32, instPtsBuf, pdgBuf){
+  const N=f32.length/NCOLS; if(!N) return null;
+  const pos=new Float32Array(N*3), ext=new Float32Array(N*3), ex2=new Float32Array(N*3);
+  const nt=buildInteractionNormT(f32,S.anim.spread);
+  for(let i=0;i<N;i++){
+    const b=i*NCOLS;
+    pos[i*3]=f32[b]; pos[i*3+1]=f32[b+1]; pos[i*3+2]=f32[b+2];
+    ext[i*3]=f32[b+3]; ext[i*3+1]=f32[b+4]; ext[i*3+2]=f32[b+5];
+    ex2[i*3]=f32[b+6]; ex2[i*3+1]=f32[b+7]; ex2[i*3+2]=f32[b+8];
+  }
+  const geo=new THREE.BufferGeometry();
+  geo.setAttribute('position',new THREE.BufferAttribute(pos,3));
+  geo.setAttribute('extra',new THREE.BufferAttribute(ext,3));
+  geo.setAttribute('extra2',new THREE.BufferAttribute(ex2,3));
+  geo.setAttribute('animT',new THREE.BufferAttribute(nt,1));
+  geo.setAttribute('instPts',new THREE.BufferAttribute(instPtsBuf||new Float32Array(N),1));
+  geo.setAttribute('pdg',new THREE.BufferAttribute(pdgBuf||new Float32Array(N),1));
+  geo.computeBoundingBox(); geo.computeBoundingSphere();
+  const mat=new THREE.ShaderMaterial({
+    uniforms:{uColorCol:{value:S.col},uMin:{value:0},uMax:{value:1},uSize:{value:S.size},uCmap:{value:S.cmap},uOpacity:{value:S.opacity},uTimeThresh:{value:ANIM_THRESH_MAX},uAnimUseNorm:{value:0},uLogScale:{value:0},uEnergyThresh:{value:S.eThr},uHighlightId:{value:-1},uHighlightInstId:{value:-1},uDiscreteColor:{value:0},uInstPtThresh:{value:S.instPtThresh},uViewMode:{value:0},uDriftSpeed:{value:0},uBboxXMin:{value:S.bbox.xMin},uBboxXMax:{value:S.bbox.xMax}},
+    vertexShader:VERT_SHADER,fragmentShader:FRAG_SHADER,transparent:true,depthWrite:false,
+  });
+  return {pts:new THREE.Points(geo,mat),n:N,f32};
+}
+
+// Count unique interaction IDs in a flat f32 cloud
+function countInteractions(f32){
+  const s=new Set();
+  for(let i=0;i<f32.length/NCOLS;i++) s.add(f32[i*NCOLS+5]);
+  return s.size;
+}
+
+function colStats(f32){
+  const N=f32.length/NCOLS; if(!N) return null;
+  const mn=new Float32Array(NCOLS).fill(Infinity), mx=new Float32Array(NCOLS).fill(-Infinity);
+  for(let i=0;i<N;i++) for(let c=0;c<NCOLS;c++){const v=f32[i*NCOLS+c];if(v<mn[c])mn[c]=v;if(v>mx[c])mx[c]=v;}
+  return{mn,mx};
+}
+
+function clearObjects(){
+  for(const o of[objNLE,objLE]) if(o){scene.remove(o.pts);o.pts.geometry.dispose();o.pts.material.dispose();}
+  objNLE=objLE=null;
+}
+
+// Read one event-cloud group from the HDF5 file.
+// Clouds are stored with NCOLS=9 columns: x,y,z,t,e,interaction_id,root_id,frag_id,inst_id
+function readCloud(grpName,evIdx){
+  if(!hf) return new Float32Array(0);
+  if(!hf.keys().includes(grpName)) return new Float32Array(0);
+  const grp=hf.get(grpName);
+  if(!grp.keys().includes('offsets')||!grp.keys().includes('flat')) return new Float32Array(0);
+  const offsets=grp.get('offsets').value;
+  const start=Number(offsets[evIdx]),end=Number(offsets[evIdx+1]);
+  if(start>=end) return new Float32Array(0);
+  try{return grp.get('flat').slice([[start,end],[0,NCOLS]]);}
+  catch(e){
+    const msg=`Cannot read "${grpName}": decompression failed (use gzip file).\n${e.message||e}`;
+    setStatus('Decompression error — see console'); console.error(msg); throw new Error(msg);
+  }
+}
+
+async function loadEvent(idx){
+  resetAnim();
+  logMsg('Loading event '+idx+'…'); clearObjects();
+  S.highlight=-1; S.highlightLocked=false; S.instHighlight=-1; S.instLocked=-1;
+  S._curGraphParams=null;
+  _setInstHighlight(-1); _hideLockedBar();
+  let _nleF32, _leF32, _pdgMap=null;
+  try{
+    if(S.remoteMode&&S.remoteWorker){
+      // Use prefetched data if available for this index, otherwise fetch now
+      let _dataP;
+      if(S._prefetch.idx===idx&&S._prefetch.promise){
+        logMsg('Event '+idx+' prefetched ⚡ (instant)');
+        _dataP=S._prefetch.promise;
+      }else{
+        logMsg('Fetching event '+idx+' via HTTP Range…');
+        _dataP=S.remoteWorker.load(idx);
+      }
+      S._prefetch={idx:-1,promise:null}; // consumed
+      setProgress(0.1);
+      const d=await _dataP;
+      setProgress(0.85);
+      _nleF32=d.nleF32||new Float32Array(0);
+      _leF32=d.leF32||new Float32Array(0);
+      S.instGraph=d.instGraph||null;
+      _pdgMap=d.pdgMapEntries?new Map(d.pdgMapEntries.map(([k,vs])=>[k,new Set(vs)])):null;
+    }else{
+      _nleF32=readCloud('non_le_cloud',idx); _leF32=readCloud('le_scatter_cloud',idx);
+      S.instGraph=readInstanceGraph(idx);
+    }
+    const nleF32=_nleF32, leF32=_leF32;
+    S.ranges.nle=colStats(nleF32); S.ranges.le=colStats(leF32);
+    S._instCountMap=null;
+    _setInstPtThresh(0);
+    // Count points per instance directly from the cloud data — reliable regardless
+    // of whether particle_instances_points has a representative point cloud stored.
+    // Key = inst_id (col 8, event-local 0-based index); value = {count, intId}.
+    const _instCountMap=new Map();
+    const _scanCloud=f32=>{
+      const N=f32.length/NCOLS;
+      for(let i=0;i<N;i++){
+        const id=Math.round(f32[i*NCOLS+8]);
+        if(id<0) continue;
+        const intId=Math.round(f32[i*NCOLS+5]);
+        const e=f32[i*NCOLS+4];
+        const r=_instCountMap.get(id);
+        if(!r) _instCountMap.set(id,{count:1,intId,eSum:e});
+        else{r.count++;r.eSum+=e;}
+      }
+    };
+    _scanCloud(nleF32); _scanCloud(leF32);
+    const _instPtMap=new Map();
+    for(const [id,r] of _instCountMap) _instPtMap.set(id,r.count);
+    // Store on S so _instPtCounts can read it without depending on graph node intId values.
+    S._instCountMap=_instCountMap;
+    // Patch graph node ptCounts and intIds from actual cloud counts.
+    // Always override intId from cloud col 5 — the same source buildInteractions uses —
+    // so the histogram filter (nd.intId===intId) is guaranteed to match.
+    if(S.instGraph&&S.instGraph.nodes){
+      for(const nd of S.instGraph.nodes){
+        const r=_instCountMap.get(nd.idx);
+        if(r!=null){nd.ptCount=r.count; nd.intId=r.intId; nd.eSum=r.eSum;}
+      }
+    }
+    const _mkInstPts=f32=>{
+      const N=f32.length/NCOLS; const buf=new Float32Array(N);
+      for(let i=0;i<N;i++){const id=Math.round(f32[i*NCOLS+8]);buf[i]=_instPtMap.has(id)?_instPtMap.get(id):0;}
+      return buf;
+    };
+    // Build per-point PDG code buffer from instGraph (inst_id → PDG)
+    const _instPdgMap=new Map();
+    if(S.instGraph&&S.instGraph.nodes) for(const nd of S.instGraph.nodes) _instPdgMap.set(nd.idx, nd.pdg||0);
+    const _mkPdg=f32=>{
+      const N=f32.length/NCOLS; const buf=new Float32Array(N);
+      for(let i=0;i<N;i++){const id=Math.round(f32[i*NCOLS+8]);buf[i]=_instPdgMap.has(id)?_instPdgMap.get(id):0;}
+      return buf;
+    };
+    objNLE=buildPoints(nleF32,_mkInstPts(nleF32),_mkPdg(nleF32)); objLE=buildPoints(leF32,_mkInstPts(leF32),_mkPdg(leF32));
+    if(objNLE){scene.add(objNLE.pts);objNLE.pts.visible=S.showNLE;}
+    if(objLE){scene.add(objLE.pts);objLE.pts.visible=S.showLE;}
+    _updateDriftUniforms();  // apply any active drift/bbox settings to freshly built objects
+    applyColorRange(); updateStats();
+    renderer.compile(scene,camera);
+    buildEnergyHistogram();
+    const pdgMap=S.remoteMode?_pdgMap:readParticleSlice(idx);
+    const br=buildInteractions(nleF32,leF32);
+    S.interactions=br.interactions;
+    renderInteractionPanel(S.interactions,pdgMap,br.nInstances);
+    document.getElementById('graph-overlay').classList.remove('visible');
+    _setInstHighlight(-1);
+    const npts=(objNLE?objNLE.n:0)+(objLE?objLE.n:0);
+    if(S.remoteMode) setProgress(0);
+    logMsg('Event '+idx+' ready · '+npts.toLocaleString()+' pts','log-ok');
+    setStatus('EVT '+idx+'  ·  '+npts.toLocaleString()+' pts');
+    // Prefetch next event in background so navigation is instant
+    if(S.remoteMode&&S.remoteWorker&&idx+1<nEvents){
+      S._prefetch={idx:idx+1,promise:S.remoteWorker.load(idx+1)};
+      S._prefetch.promise.catch(()=>{}); // suppress unhandled-rejection if unused
+    }
+  }catch(e){if(S.remoteMode)setProgress(0);logMsg('Error loading event: '+e.message,'log-err');console.error(e);}
+}
+
+function applyColorRange(){
+  if(S.autoRange&&S.col<NCOLS){
+    let mn=Infinity,mx=-Infinity;
+    for(const r of[S.ranges.nle,S.ranges.le]){if(!r)continue;if(r.mn[S.col]<mn)mn=r.mn[S.col];if(r.mx[S.col]>mx)mx=r.mx[S.col];}
+    if(isFinite(mn)){document.getElementById('rng-min').value=+mn.toPrecision(5);document.getElementById('rng-max').value=+mx.toPrecision(5);}
+  }
+  applyUniforms();
+}
+
+function applyUniforms(){
+  let mn=parseFloat(document.getElementById('rng-min').value)||0;
+  let mx=parseFloat(document.getElementById('rng-max').value)||1;
+  const useLog=S.logScale&&S.col===4;
+  const uLogV=useLog?1:0;
+  if(useLog){mn=Math.log(Math.max(mn,1e-30));mx=Math.log(Math.max(mx,1e-30));}
+  const isPdg=S.col===9;
+  const isDisc=!isPdg&&S.col>=5;
+  const discMode=isPdg?2:isDisc?1:0;
+  for(const o of[objNLE,objLE]){if(!o)continue;const u=o.pts.material.uniforms;u.uColorCol.value=Math.min(S.col,8);u.uMin.value=mn;u.uMax.value=mx;u.uSize.value=S.size;u.uCmap.value=S.cmap;u.uOpacity.value=S.opacity;u.uLogScale.value=uLogV;u.uDiscreteColor.value=discMode;}
+  const discBar='linear-gradient(90deg,#e8961e,#50c878,#4fc3f7,#ff6b9d,#c084fc,#ffd54f,#ef5350,#26c6da,#9ccc65,#ff7043,#42a5f5,#ec407a,#66bb6a,#ab47bc,#ff8a65,#26a69a)';
+  const pdgBar='linear-gradient(90deg,#4fc3f7 11%,#ab47bc 22%,#eda030 33%,#50c878 44%,#9ccc65 55%,#ef5350 66%,#808080 77%,#ff8a65 88%,#cccccc 100%)';
+  document.getElementById('cbar').style.background=isPdg?pdgBar:isDisc?discBar:CMAP_CSS[S.cmap];
+  const cmapProw=document.getElementById('sel-cmap').closest('.prow');
+  if(cmapProw){cmapProw.style.opacity=(isDisc||isPdg)?'0.35':'1';document.getElementById('sel-cmap').disabled=isDisc||isPdg;}
+}
+
+function _setLogScale(v){
+  for(const o of[objNLE,objLE]){if(o)o.pts.material.uniforms.uLogScale.value=v;}
+}
+
+function _setEnergyThresh(val){
+  S.eThr=val;
+  for(const o of[objNLE,objLE]){if(o)o.pts.material.uniforms.uEnergyThresh.value=val;}
+}
+
+function _setInstPtThresh(val){
+  S.instPtThresh=val;
+  for(const o of[objNLE,objLE]){if(o)o.pts.material.uniforms.uInstPtThresh.value=val;}
+  if(document.getElementById('graph-overlay').classList.contains('visible')&&S._curGraphParams){
+    const p=S._curGraphParams;renderInstanceGraph(p.graph,p.interactionId,p.label,p.color);
+  }
+}
+
+// ── Instance point-count histogram (rendered inside ip-detail) ────────────
+const INST_HIST_BINS=30;
+
+function _instPtCounts(intId){
+  // Use the cloud-scan map (same source as buildInteractions) rather than
+  // graph nodes, whose intId values may come from a different HDF5 dataset.
+  if(!S._instCountMap||!S._instCountMap.size) return [];
+  const result=[];
+  for(const [,r] of S._instCountMap){
+    if((intId<0||r.intId===Math.round(intId))&&r.count>0) result.push(r.count);
+  }
+  return result;
+}
+
+function drawInstPtHistogram(intId){
+  const cv=document.getElementById('ip-pt-hist-canvas');
+  if(!cv) return;
+  const counts=_instPtCounts(intId);
+  // Use getBoundingClientRect for reliable CSS pixel dimensions after layout.
+  const rect=cv.getBoundingClientRect();
+  const W=rect.width||280, H=rect.height||160;
+  const dpr=window.devicePixelRatio||1;
+  cv.width=Math.round(W*dpr); cv.height=Math.round(H*dpr);
+  const ctx=cv.getContext('2d');
+  ctx.scale(dpr,dpr);
+  ctx.clearRect(0,0,W,H);
+  if(!counts.length){
+    ctx.fillStyle='#778'; ctx.font='13px monospace';
+    ctx.fillText('no instances',W/2-48,H/2+5); return;
+  }
+  // Bins span [xMin, xMax] so the display range matches actual instance sizes.
+  const xMin=Math.min(...counts);
+  const xMax=Math.max(...counts)||1;
+  const xSpan=Math.max(xMax-xMin,1); // spread of displayed range
+  const bw=W/INST_HIST_BINS;
+  const bins=new Array(INST_HIST_BINS).fill(0);
+  // right edge of bin k (in point-count units) = xMin + (k+1)*xSpan/BINS
+  for(const c of counts){
+    const k=Math.min(INST_HIST_BINS-1,Math.max(0,Math.floor((c-xMin)/xSpan*INST_HIST_BINS)));
+    bins[k]++;
+  }
+  const maxB=Math.max(...bins,1);
+  // threshold line: drag range = [xMin, xMax+1], mapped to [0, W]
+  const xHiRange=xMax-xMin+1;
+  const thrVisible=S.instPtThresh>0&&S.instPtThresh>=xMin;
+  const thrPx=thrVisible?Math.max(0,Math.min(W,(S.instPtThresh-xMin)/xHiRange*W)):0;
+  const BH=H-2; // leave 2px bottom gap
+  for(let k=0;k<INST_HIST_BINS;k++){
+    const barH=Math.round(bins[k]/maxB*BH);
+    if(!barH) continue;
+    const x=Math.round(k*bw), w=Math.max(1,Math.round(bw)-1);
+    // bin right edge in point-count units
+    const binRight=xMin+(k+1)*xSpan/INST_HIST_BINS;
+    const below=S.instPtThresh>0&&binRight<=S.instPtThresh;
+    ctx.fillStyle=below?'#2e2e1a':'#1a5060';
+    ctx.fillRect(x,BH-barH,w,barH);
+    // bright 2px top edge for visibility on dark bg
+    ctx.fillStyle=below?'#777':'#50c8c8';
+    ctx.fillRect(x,BH-barH,w,2);
+  }
+  if(thrVisible){
+    ctx.strokeStyle='#50c8c8'; ctx.lineWidth=1.5; ctx.setLineDash([4,3]);
+    ctx.beginPath(); ctx.moveTo(thrPx,0); ctx.lineTo(thrPx,BH); ctx.stroke();
+    ctx.setLineDash([]);
+    ctx.fillStyle='#50c8c8'; ctx.font='bold 12px monospace';
+    const lx=thrPx+4>W-62?thrPx-62:thrPx+4;
+    ctx.fillText(Math.round(S.instPtThresh)+' pts',lx,15);
+  }
+  const thrInp=document.getElementById('ip-hist-thr-inp');
+  if(thrInp) thrInp.value=S.instPtThresh>0?Math.round(S.instPtThresh):'';
+  // Update axis labels with actual min/max
+  const axMin=document.getElementById('ip-hist-ax-min');
+  const axMax=document.getElementById('ip-hist-ax-max');
+  if(axMin) axMin.textContent=Math.round(xMin);
+  if(axMax) axMax.textContent=Math.round(xMax);
+}
+
+function wireInstPtHist(intId){
+  const cv=document.getElementById('ip-pt-hist-canvas');
+  if(!cv) return;
+  // Drag range = [xMin_local, xMax_local+1] so pixels map exactly to the
+  // displayed histogram range. The threshold is an absolute point count
+  // that applies globally to all interactions in the event.
+  const localCounts=_instPtCounts(intId);
+  const xMin=localCounts.length?Math.min(...localCounts):0;
+  const xMax=localCounts.length?Math.max(...localCounts):1;
+  const xHiRange=xMax-xMin+1;
+  const _apply=px=>{
+    // getBoundingClientRect().width is reliable after layout (offsetWidth can be 0 briefly).
+    const W=cv.getBoundingClientRect().width||cv.offsetWidth||280;
+    // Divide by (W-1) so the rightmost DOM pixel (offsetX = W-1) gives frac=1
+    // and maps to xMax+1, guaranteeing the largest instance is reachable.
+    const frac=Math.max(0,Math.min(1,px/Math.max(1,W-1)));
+    // threshold = xMin + frac*(xMax-xMin+1), clamped so full right = xMax+1
+    _setInstPtThresh(frac>=1?xMax+1:Math.round(xMin+frac*xHiRange));
+    drawInstPtHistogram(intId);
+  };
+  let _d=false;
+  cv.onmousedown=e=>{_d=true;_apply(e.offsetX);};
+  cv.onmousemove=e=>{if(_d)_apply(e.offsetX);};
+  cv.onmouseup=()=>{_d=false;};
+  cv.onmouseleave=()=>{_d=false;};
+}
+
+function _instPtHistHTML(intId){
+  const counts=_instPtCounts(intId);
+  const xMin=counts.length?Math.min(...counts):0;
+  const xMax=counts.length?Math.max(...counts):0;
+  return `<div class="ip-hist-section">`+
+    `<div class="ip-hist-hdr">&#x25a6; inst point count</div>`+
+    `<div class="ip-hist-thr-row">`+
+    `<span style="color:var(--text2);font-size:15px">Min pts</span>`+
+    `<input type="number" class="ip-hist-thr-inp" id="ip-hist-thr-inp" min="0" placeholder="off" value="${S.instPtThresh>0?Math.round(S.instPtThresh):''}">` +
+    `<button class="ip-hist-reset" id="ip-hist-reset">RESET</button>`+
+    `</div>`+
+    `<canvas id="ip-pt-hist-canvas"></canvas>`+
+    `<div class="ip-hist-axis"><span id="ip-hist-ax-min">${Math.round(xMin)}</span><span>\u2190 drag = threshold</span><span id="ip-hist-ax-max">${Math.round(xMax)}</span></div>`+
+    `</div>`;
+}
+
+function _wireHistSection(intId){
+  requestAnimationFrame(()=>{
+    wireInstPtHist(intId);
+    drawInstPtHistogram(intId);
+    const rb=document.getElementById('ip-hist-reset');
+    if(rb) rb.onclick=()=>{_setInstPtThresh(0);drawInstPtHistogram(intId);};
+    const inp=document.getElementById('ip-hist-thr-inp');
+    if(inp){
+      inp.onchange=()=>{const v=parseInt(inp.value);if(!isNaN(v)&&v>0){_setInstPtThresh(v);drawInstPtHistogram(intId);}else{_setInstPtThresh(0);inp.value='';drawInstPtHistogram(intId);}};
+      inp.onkeydown=e=>{if(e.key==='Enter'){inp.onchange();inp.blur();}};
+    }
+  });
+}
+
+// ── Energy histogram ────────────────────────────────────────────────────────
+const HIST_BINS=100;
+function buildEnergyHistogram(){
+  const arrs=[];
+  if(objNLE&&objNLE.f32) arrs.push(objNLE.f32);
+  if(objLE&&objLE.f32) arrs.push(objLE.f32);
+  if(!arrs.length){S.hist=null;drawHistogram();return;}
+  let eMin=Infinity,eMax=-Infinity;
+  for(const f32 of arrs){
+    const N=f32.length/NCOLS;
+    for(let i=0;i<N;i++){const e=f32[i*NCOLS+4];if(e<eMin)eMin=e;if(e>eMax)eMax=e;}
+  }
+  if(!isFinite(eMin)||eMin>=eMax){S.hist=null;drawHistogram();return;}
+  // Always histogram in log10(E) scale for display
+  const useLog=eMin>0;
+  const xMin=useLog?Math.log10(eMin):eMin;
+  const xMax=useLog?Math.log10(eMax):eMax;
+  const bins=new Float32Array(HIST_BINS);
+  const edges=new Float32Array(HIST_BINS+1);
+  for(let k=0;k<=HIST_BINS;k++) edges[k]=xMin+k*(xMax-xMin)/HIST_BINS;
+  for(const f32 of arrs){
+    const N=f32.length/NCOLS;
+    for(let i=0;i<N;i++){
+      let e=f32[i*NCOLS+4];
+      const x=useLog?(e>0?Math.log10(e):-Infinity):e;
+      if(!isFinite(x))continue;
+      const k=Math.min(HIST_BINS-1,Math.max(0,Math.floor((x-xMin)/(xMax-xMin)*HIST_BINS)));
+      bins[k]++;
+    }
+  }
+  // log-scale the bar heights for display (count of counts)
+  const binsDisp=new Float32Array(HIST_BINS);
+  let maxB=0;
+  for(let k=0;k<HIST_BINS;k++){binsDisp[k]=bins[k]>0?Math.log1p(bins[k]):0;if(binsDisp[k]>maxB)maxB=binsDisp[k];}
+  S.hist={binsDisp,maxB,edges,eMin,eMax,xMin,xMax,useLog};
+  drawHistogram();
+}
+
+function drawHistogram(){
+  const cv=document.getElementById('hist-canvas');
+  if(!cv)return;
+  const W=cv.offsetWidth||300;
+  cv.width=W; cv.height=cv.height||195;
+  const H=cv.height;
+  const ctx=cv.getContext('2d');
+  ctx.clearRect(0,0,W,H);
+  const PAD_B=27;
+  const BH=H-PAD_B;
+  if(!S.hist||!S.hist.binsDisp){
+    ctx.fillStyle='#556';ctx.font='17px monospace';
+    ctx.fillText('load an event first',W/2-100,BH/2);
+    return;
+  }
+  const {binsDisp,maxB,edges,xMin,xMax,useLog,eMin,eMax}=S.hist;
+  const bw=W/HIST_BINS;
+  // Threshold position in display-x space
+  const thrRaw=S.eThr;
+  const thrX=useLog?(thrRaw>0?Math.log10(Math.max(thrRaw,1e-30)):xMin):thrRaw;
+  const thrPx=Math.max(0,Math.min(W,(thrX-xMin)/(xMax-xMin)*W));
+  for(let k=0;k<HIST_BINS;k++){
+    const barH=Math.round(binsDisp[k]/maxB*BH);
+    const x=k*bw;
+    const edgeE=useLog?Math.pow(10,edges[k]):edges[k];
+    const below=edgeE<thrRaw&&S.eThr>0;
+    ctx.fillStyle=below?'#2a2a20':'#2a4a1a';
+    ctx.fillRect(x,BH-barH,bw-1,barH);
+    ctx.fillStyle=below?'#555':'#7ac050';
+    ctx.fillRect(x,BH-barH,bw-1,1);
+  }
+  // Threshold line
+  if(S.eThr>0){
+    ctx.strokeStyle='var(--amber)';ctx.lineWidth=1.5;ctx.setLineDash([4,3]);
+    ctx.beginPath();ctx.moveTo(thrPx,0);ctx.lineTo(thrPx,BH);ctx.stroke();
+    ctx.setLineDash([]);
+    ctx.fillStyle='#e8961e';ctx.font='15px monospace';
+    const label=S.eThr.toPrecision(3);
+    const lx=thrPx+4>W-70?thrPx-70:thrPx+4;
+    ctx.fillText(label,lx,18);
+  }
+  // X-axis labels
+  ctx.fillStyle='#7a7050';ctx.font='10px monospace';
+  const xLabel=useLog?'log\u2081\u2080(E)':'E';
+  ctx.fillText(xLabel,W/2-18,H-3);
+  document.getElementById('hist-xmin').textContent=eMin.toPrecision(3);
+  document.getElementById('hist-xmax').textContent=eMax.toPrecision(3);
+  document.getElementById('lbl-ethr-val').textContent=S.eThr>0?S.eThr.toPrecision(4)+' (active)':'— (off)';
+}
+
+function _histPxToEnergy(px){
+  if(!S.hist)return 0;
+  const {xMin,xMax,useLog}=S.hist;
+  const cv=document.getElementById('hist-canvas');
+  const frac=Math.max(0,Math.min(1,px/cv.offsetWidth));
+  const x=xMin+frac*(xMax-xMin);
+  return useLog?Math.pow(10,x):x;
+}
+
+// ── Interaction panel ──────────────────────────────────────────────────────
+const INT_COLORS=['#e8961e','#50c878','#4fc3f7','#ff6b9d','#c084fc','#ffd54f',
+  '#ef5350','#26c6da','#9ccc65','#ff7043','#42a5f5','#ec407a',
+  '#66bb6a','#ab47bc','#ff8a65','#26a69a'];
+
+function buildInteractions(nleF32,leF32){
+  const map=new Map();
+  const instSet=new Set();
+  const proc=(f32,src)=>{
+    const N=f32.length/NCOLS;
+    for(let i=0;i<N;i++){
+      const b=i*NCOLS, id=Math.round(f32[b+5]);
+      const instId=Math.round(f32[b+8]);if(instId>=0)instSet.add(instId);
+      if(!map.has(id)) map.set(id,{id,n:0,eSum:0,tMin:Infinity,tMax:-Infinity,
+        xSum:0,ySum:0,zSum:0,
+        xMin:Infinity,xMax:-Infinity,yMin:Infinity,yMax:-Infinity,zMin:Infinity,zMax:-Infinity,
+        roots:new Set(),nle:0,le:0});
+      const r=map.get(id);
+      r.n++; r.eSum+=f32[b+4];
+      const t=f32[b+3]; if(t<r.tMin)r.tMin=t; if(t>r.tMax)r.tMax=t;
+      const xx=f32[b],yy=f32[b+1],zz=f32[b+2];
+      r.xSum+=xx; r.ySum+=yy; r.zSum+=zz;
+      if(xx<r.xMin)r.xMin=xx; if(xx>r.xMax)r.xMax=xx;
+      if(yy<r.yMin)r.yMin=yy; if(yy>r.yMax)r.yMax=yy;
+      if(zz<r.zMin)r.zMin=zz; if(zz>r.zMax)r.zMax=zz;
+      r.roots.add(Math.round(f32[b+6]));
+      src==='nle'?r.nle++:r.le++;
+    }
+  };
+  if(nleF32&&nleF32.length) proc(nleF32,'nle');
+  if(leF32&&leF32.length)   proc(leF32,'le');
+  const interactions=[...map.values()]
+    .map(r=>{
+      const xC=r.xSum/r.n,yC=r.ySum/r.n,zC=r.zSum/r.n;
+      const dx=r.xMax-r.xMin,dy=r.yMax-r.yMin,dz=r.zMax-r.zMin;
+      const bsph=Math.max(5,Math.max(dx,dy,dz)*0.6);
+      return {...r,xC,yC,zC,nRoots:r.roots.size,bsph};
+    })
+    .sort((a,b)=>a.tMin-b.tMin);
+  return {interactions,nInstances:instSet.size};
+}
+
+function readParticleSlice(evIdx){
+  if(!hf) return null;
+  try{
+    if(!hf.keys().includes('events')||!hf.keys().includes('particles')) return null;
+    const evOff=hf.get('events').get('offsets').value;
+    const pStart=Number(evOff[evIdx]),pEnd=Number(evOff[evIdx+1]);
+    if(pStart>=pEnd) return null;
+    const pg=hf.get('particles'), pk=pg.keys();
+    if(!pk.includes('interaction_id')||!pk.includes('pdg')) return null;
+    const intIds=pg.get('interaction_id').slice([[pStart,pEnd]]);
+    const pdgs=pg.get('pdg').slice([[pStart,pEnd]]);
+    const m=new Map();
+    for(let k=0;k<intIds.length;k++){const id=intIds[k];if(!m.has(id))m.set(id,new Set());m.get(id).add(pdgs[k]);}
+    return m;
+  }catch(e){console.warn('readParticleSlice:',e);return null;}
+}
+
+// Does this file actually carry the step-1 fragment level?  write_fragments
+// defaults to false, in which case particle_fragments exists but is empty and
+// every parent_frag_id is -1, so fragment fields must not be presented as if
+// they were merely missing for this particle.
+let _FRAG_LEVEL=false;
+function probeFragLevel(){
+  _FRAG_LEVEL=false;
+  if(!hf) return false;
+  try{
+    if(!hf.keys().includes('particle_fragments')) return false;
+    const g=hf.get('particle_fragments');
+    if(!g.keys().includes('id')) return false;
+    _FRAG_LEVEL=Number(g.get('id').shape[0])>0;
+  }catch(e){ _FRAG_LEVEL=false; }
+  return _FRAG_LEVEL;
+}
+
+// ── Instance graph ─────────────────────────────────────────────────────────
+function readInstanceGraph(evIdx){
+  if(!hf) return null;
+  try{
+    const ks=hf.keys();
+    if(!ks.includes('inst_events')||!ks.includes('particle_instances')) return null;
+    const ig=hf.get('inst_events');
+    if(!ig.keys().includes('offsets')) return null;
+    const instEvOff=ig.get('offsets').value;
+    const iStart=Number(instEvOff[evIdx]),iEnd=Number(instEvOff[evIdx+1]);
+    if(iStart>=iEnd) return {nodes:[],edges:[]};
+    const pg=hf.get('particle_instances'),pgk=pg.keys();
+    if(!pgk.includes('id')||!pgk.includes('parent_id')) return null;
+    const instIds    =pg.get('id').slice([[iStart,iEnd]]);
+    const instPIDs   =pg.get('parent_id').slice([[iStart,iEnd]]);
+    const instIntIds =pgk.includes('interaction_id')?pg.get('interaction_id').slice([[iStart,iEnd]]):null;
+    const instSem    =pgk.includes('sem_type')?pg.get('sem_type').slice([[iStart,iEnd]]):null;
+    const instPdgs   =pgk.includes('pdg')?pg.get('pdg').slice([[iStart,iEnd]]):null;
+    const instParPdgs=pgk.includes('parent_pdg')?pg.get('parent_pdg').slice([[iStart,iEnd]]):null;
+    const instFragIds=pgk.includes('parent_frag_id')?pg.get('parent_frag_id').slice([[iStart,iEnd]]):null;
+    // From format 2.2.0 the two id spaces are distinct: 'id' is pysupera's
+    // per-event particle index (usable as a direct row index), 'geant4_id' is
+    // the original Geant4 track id kept purely as provenance.  Older files
+    // have no geant4_id column, where the two happened to coincide.
+    const instG4Ids  =pgk.includes('geant4_id')?pg.get('geant4_id').slice([[iStart,iEnd]]):null;
+    // Prefer the stored instance-level parent pointer.  Deriving it by walking
+    // the level-0 parent map only works when 'particles' was written, and that
+    // table is empty under output_compact -- the default -- which used to
+    // leave the genealogy graph with no edges at all.
+    const instPInst  =pgk.includes('parent_inst_id')?pg.get('parent_inst_id').slice([[iStart,iEnd]]):null;
+    // member offsets → one member array per instance
+    let memOff=null,memberFlat=null;
+    if(pgk.includes('member_offsets')&&ks.includes('particle_instances_members')){
+      memOff=pg.get('member_offsets').slice([[iStart,iEnd+1]]);
+      const mg=hf.get('particle_instances_members');
+      const ms=Number(memOff[0]),me=Number(memOff[memOff.length-1]);
+      if(me>ms&&mg.keys().includes('flat')) memberFlat=mg.get('flat').slice([[ms,me]]);
+    }
+    // point-cloud offsets → point count per instance
+    let pcOff=null;
+    if(pgk.includes('pc_offsets'))
+      pcOff=pg.get('pc_offsets').slice([[iStart,iEnd+1]]);
+    // particleId → instIdx
+    const nInst=iEnd-iStart;
+    const memberToInst=new Map();
+    for(let i=0;i<nInst;i++){
+      memberToInst.set(Number(instIds[i]),i);
+      if(memberFlat&&memOff){
+        const ms=Number(memOff[i])-Number(memOff[0]),me=Number(memOff[i+1])-Number(memOff[0]);
+        for(let j=ms;j<me;j++) memberToInst.set(Number(memberFlat[j]),i);
+      }
+    }
+    // particle parent walk lookup
+    const partParent=new Map();
+    if(ks.includes('events')&&ks.includes('particles')){
+      const evOff=hf.get('events').get('offsets').value;
+      const pS=Number(evOff[evIdx]),pE=Number(evOff[evIdx+1]);
+      if(pS<pE){
+        const partsG=hf.get('particles'),partsGk=partsG.keys();
+        if(partsGk.includes('id')&&partsGk.includes('parent_id')){
+          const pids=partsG.get('id').slice([[pS,pE]]);
+          const ppids=partsG.get('parent_id').slice([[pS,pE]]);
+          for(let k=0;k<pids.length;k++) partParent.set(Number(pids[k]),Number(ppids[k]));
+        }
+      }
+    }
+    function findParentInst(startPid){
+      let pid=Number(startPid);const visited=new Set();
+      while(pid>=0&&!visited.has(pid)){
+        visited.add(pid);
+        if(memberToInst.has(pid)) return memberToInst.get(pid);
+        const next=partParent.get(pid);
+        if(next===undefined||next===pid) break;
+        pid=next;
+      }
+      return -1;
+    }
+    const nodes=[],edges=[],edgeSet=new Set();
+    for(let i=0;i<nInst;i++){
+      const mCount=memOff?Number(memOff[i+1])-Number(memOff[i]):1;
+      const ptCount=pcOff?Number(pcOff[i+1])-Number(pcOff[i]):0;
+      nodes.push({idx:i,id:Number(instIds[i]),parentPid:Number(instPIDs[i]),
+        pdg:instPdgs?Number(instPdgs[i]):0,
+        parentPdg:instParPdgs?Number(instParPdgs[i]):0,
+        intId:instIntIds?Number(instIntIds[i]):-1,
+        semType:instSem?Number(instSem[i]):0,
+        fragId:instFragIds?Number(instFragIds[i]):-1,
+        g4Id:instG4Ids?Number(instG4Ids[i]):Number(instIds[i]),
+        members:Math.max(1,mCount),ptCount,eSum:null,x:0,y:0,vx:0,vy:0});
+    }
+    for(let i=0;i<nInst;i++){
+      // parent_inst_id is already an instance row index.  The parent-map walk
+      // stays as a fallback for files written before it was stored.
+      const pi=(instPInst&&Number(instPInst[i])>=0&&Number(instPInst[i])!==i)
+                 ?Number(instPInst[i])
+                 :findParentInst(instPIDs[i]);
+      if(pi>=0&&pi!==i){
+        const k=Math.min(pi,i)+','+Math.max(pi,i)+'_'+pi+'>'+i;
+        if(!edgeSet.has(k)){edgeSet.add(k);edges.push({src:pi,dst:i});}
+      }
+    }
+    return {nodes,edges};
+  }catch(e){console.warn('readInstanceGraph:',e);return null;}
+}
+
+const GRAPH_SEM_COLORS=['#9e9e9e','#4fc3f7','#ef5350','#ff9800','#ab47bc','#66bb6a','#26c6da','#ffd54f'];
+const _GRAPH_SEM_NAMES=['','Shower','Track','Delta','Michel','LE','',''];
+let _graphRAF=null,_graphTemp=0;
+function _showGraphTip(ev,nd){
+  const _col=GRAPH_SEM_COLORS[nd.semType%GRAPH_SEM_COLORS.length];
+  const _tt=document.getElementById('graph-tooltip');
+  _tt.innerHTML=
+    `<b style="color:${_col}">▸ Inst #${nd.idx}</b>&nbsp;&nbsp;<span style="opacity:.6">${_GRAPH_SEM_NAMES[nd.semType]||''}</span><br>`+
+    `PDG: ${nd.pdg||'\u2014'}&emsp;par.PDG: ${nd.parentPdg||'\u2014'}<br>`+
+    `particle id: ${nd.id}&emsp;G4 track: ${nd.g4Id>=0?nd.g4Id:'\u2014'}<br>`+
+    (_FRAG_LEVEL?`Frag: ${nd.fragId>=0?nd.fragId:'\u2014'}&emsp;`:``)+
+    `Int.ID: ${nd.intId>=0?nd.intId:'\u2014'}<br>`+
+    `Energy: ${nd.eSum!=null?nd.eSum.toExponential(2):'\u2014'}<br>`+
+    `Points: ${nd.ptCount>0?nd.ptCount.toLocaleString():'<i style="opacity:.55">none &mdash; merged/absorbed</i>'}&emsp;Members: ${nd.members}`;
+  _tt.style.left=(ev.clientX+16)+'px';
+  _tt.style.top=(ev.clientY-12)+'px';
+  _tt.style.display='block';
+}
+function _hideGraphTip(){ document.getElementById('graph-tooltip').style.display='none'; }
+function _showLockedBar(nd){
+  const el=document.getElementById('graph-locked-bar');
+  if(!el) return;
+  const c=GRAPH_SEM_COLORS[nd.semType%GRAPH_SEM_COLORS.length];
+  el.innerHTML='<span style="color:#ffffaa;margin-right:8px">&#x1f512; LOCKED</span>'+
+    '<b style="color:'+c+'">Inst #'+nd.idx+'</b>&nbsp;&nbsp;'+
+    '<span style="opacity:.55">'+(_GRAPH_SEM_NAMES[nd.semType]||'')+'</span>&emsp;'+
+    'PDG <b>'+(nd.pdg||'\u2014')+'</b>&emsp;'+
+    'id <b>'+nd.id+'</b>&emsp;G4 <b>'+(nd.g4Id>=0?nd.g4Id:'\u2014')+'</b>&emsp;'+
+    'Points <b>'+(nd.ptCount>0?nd.ptCount.toLocaleString():'merged/absorbed')+'</b>&emsp;'+
+    'Members <b>'+nd.members+'</b>'+
+    (nd.eSum!=null?'&emsp;Energy <b>'+nd.eSum.toExponential(2)+'</b>':'');
+  el.style.display='block';
+}
+function _hideLockedBar(){const el=document.getElementById('graph-locked-bar');if(el){el.style.display='none';el.innerHTML='';}}
+
+function renderInstanceGraph(graph, interactionId, label, color){
+  const cnv=document.getElementById('graph-canvas');
+  const msg=document.getElementById('graph-msg');
+  const cntEl=document.getElementById('graph-inst-count');
+  const titleEl=document.getElementById('graph-title');
+  const ctx=cnv.getContext('2d');
+  cnv.onmousemove=null; cnv.onclick=null;
+  if(_graphRAF){cancelAnimationFrame(_graphRAF);_graphRAF=null;}
+  titleEl.textContent=label?`\u2B21 ${label}`:'\u2B21 FORCE GRAPH';
+  titleEl.style.color=color||'';
+  const intId=(interactionId!=null&&interactionId>=0)?interactionId:-1;
+  S._curGraphParams={graph,interactionId,label,color};
+  const rawNodes=graph?graph.nodes.filter(nd=>(intId<0||nd.intId===intId)&&(S.instPtThresh<=0||nd.ptCount<=0||nd.ptCount>=S.instPtThresh)&&(nd.semType===0||S.instSemFilter===null||S.instSemFilter.has(nd.semType))):[];
+  if(!graph||!rawNodes.length){
+    cnv.style.display='none'; msg.style.display='flex';
+    msg.textContent=graph?'no instances':'load an event';
+    cntEl.textContent=''; return;
+  }
+  cnv.style.display='block'; msg.style.display='none';
+  const idxMap=new Map(rawNodes.map((nd,i)=>[nd.idx,i]));
+  const e=graph.edges.filter(ed=>idxMap.has(ed.src)&&idxMap.has(ed.dst)).map(ed=>({src:idxMap.get(ed.src),dst:idxMap.get(ed.dst)}));
+  const n=rawNodes.map(nd=>({...nd,x:0,y:0,vx:0,vy:0}));
+  cntEl.textContent=`${n.length} instances · ${e.length} edges`;
+  // Scale nodes by member count
+  const maxM=Math.max(...n.map(nd=>nd.members));
+  const NR=(nd)=>Math.max(7,Math.min(24,7+17*Math.sqrt(nd.members/maxM)));
+  // ---- Force-directed layout ─────────────────────────────────────────────
+  const ov=document.getElementById('graph-overlay');
+  const hdrEl=document.getElementById('graph-hdr');
+  const legEl=document.getElementById('graph-legend');
+  const lockedEl=document.getElementById('graph-locked-bar');
+  const W=ov.clientWidth;
+  const H=ov.clientHeight - hdrEl.offsetHeight - legEl.offsetHeight - (lockedEl.offsetHeight||0);
+  n.forEach((nd,i)=>{
+    const a=(i/Math.max(1,n.length))*Math.PI*2;
+    const rv=Math.min(W,H)*0.28;
+    nd.x=W/2+Math.cos(a)*rv*(0.6+0.4*((i*0.618034)%1));
+    nd.y=H/2+Math.sin(a)*rv*(0.6+0.4*((i*0.381966)%1));
+    nd.vx=0;nd.vy=0;
+  });
+  let _dragIdx=-1,_simStep=0;
+  function _tick(){
+    const alpha=Math.max(0.04,1-_simStep/280);
+    for(const nd of n){nd.vx+=(W/2-nd.x)*0.007*alpha;nd.vy+=(H/2-nd.y)*0.007*alpha;}
+    for(let i=0;i<n.length;i++)for(let j=i+1;j<n.length;j++){
+      const dx=n[j].x-n[i].x,dy=n[j].y-n[i].y;
+      const d2=Math.max(0.1,dx*dx+dy*dy);
+      const f=Math.min(900,1200/d2)/Math.sqrt(d2);
+      n[i].vx-=f*dx;n[i].vy-=f*dy;
+      n[j].vx+=f*dx;n[j].vy+=f*dy;
+    }
+    for(const ed of e){
+      const a=n[ed.src],b=n[ed.dst];
+      const dx=b.x-a.x,dy=b.y-a.y;
+      const d=Math.sqrt(dx*dx+dy*dy)||1;
+      const tgt=NR(a)+NR(b)+24;
+      const f=(d-tgt)*0.05*alpha/d;
+      a.vx+=f*dx;a.vy+=f*dy;
+      b.vx-=f*dx;b.vy-=f*dy;
+    }
+    for(let i=0;i<n.length;i++){
+      if(i===_dragIdx) continue;
+      n[i].vx*=0.8;n[i].vy*=0.8;
+      n[i].x=Math.max(18,Math.min(W-18,n[i].x+n[i].vx));
+      n[i].y=Math.max(18,Math.min(H-18,n[i].y+n[i].vy));
+    }
+    if(_simStep<400)_simStep++;
+  }
+  let _hoverIdx=-1,_lockedTipNd=null;
+  function drawGraph(highlightIdx){
+    cnv.width=W;cnv.height=H;
+    ctx.clearRect(0,0,W,H);
+    for(const ed of e){
+      const a=n[ed.src],b=n[ed.dst];
+      const hl=(highlightIdx===ed.src||highlightIdx===ed.dst);
+      ctx.beginPath();ctx.moveTo(a.x,a.y);ctx.lineTo(b.x,b.y);
+      ctx.strokeStyle=hl?'#c8e6c9bb':'#ffffff18';
+      ctx.lineWidth=hl?2:1;ctx.stroke();
+    }
+    for(let i=0;i<n.length;i++){
+      const nd=n[i],r=NR(nd);
+      const col=GRAPH_SEM_COLORS[nd.semType%GRAPH_SEM_COLORS.length];
+      const hl=(i===highlightIdx);
+      const isLocked=S.instLocked>=0&&nd.idx===S.instLocked;
+      const noCloud=nd.ptCount===0;
+      if(hl||isLocked){ctx.shadowBlur=14;ctx.shadowColor=isLocked?'#ffffaa':col;}
+      ctx.beginPath();ctx.arc(nd.x,nd.y,r+(hl||isLocked?3:0),0,Math.PI*2);
+      ctx.fillStyle=noCloud?col+'33':col+(hl||isLocked?'ee':'88');ctx.fill();
+      ctx.shadowBlur=0;
+      if(noCloud) ctx.setLineDash([4,3]); else ctx.setLineDash([]);
+      ctx.strokeStyle=isLocked?'#ffffaadd':(hl?'#ffffffcc':(noCloud?'#ffffff55':'#ffffff44'));ctx.lineWidth=isLocked?3:(hl?2:1);ctx.stroke();
+      ctx.setLineDash([]);
+      if(isLocked){ctx.beginPath();ctx.arc(nd.x,nd.y,r+(hl?3:0)+7,0,Math.PI*2);ctx.strokeStyle='#ffffaa55';ctx.lineWidth=1.5;ctx.setLineDash([4,3]);ctx.stroke();ctx.setLineDash([]);}
+      if(r>=11||hl||isLocked){
+        ctx.fillStyle=isLocked?'#ffffdd':(hl?'#fff':'#ffffffcc');
+        ctx.font=`bold ${Math.round(r*0.75)}px monospace`;
+        ctx.textAlign='center';ctx.textBaseline='middle';
+        ctx.fillText(i,nd.x,nd.y);
+      }
+    }
+  }
+  function graphAnimate(){
+    _tick();
+    const _hlIdx=_hoverIdx>=0?_hoverIdx:(S.instLocked>=0?n.findIndex(nd=>nd.idx===S.instLocked):(S.instHighlight>=0?n.findIndex(nd=>nd.idx===S.instHighlight):-1));
+    drawGraph(_hlIdx);
+    _graphRAF=requestAnimationFrame(graphAnimate);
+  }
+  _graphRAF=requestAnimationFrame(graphAnimate);
+  function hitTest(mx,my){
+    // Scale CSS-pixel mouse coords to canvas buffer coords (handles flex/CSS-size mismatch)
+    const cw=cnv.clientWidth||W, ch=cnv.clientHeight||H;
+    const bx=mx*(W/cw), by=my*(H/ch);
+    for(let i=0;i<n.length;i++){const nd=n[i],r=NR(nd)+3;if((bx-nd.x)**2+(by-nd.y)**2<=r*r)return i;}
+    return -1;
+  }
+  graph._draw=drawGraph;
+  cnv.onmousedown=ev=>{
+    const rect=cnv.getBoundingClientRect();
+    const hit=hitTest(ev.clientX-rect.left,ev.clientY-rect.top);
+    if(hit>=0){_dragIdx=hit;n[hit].vx=0;n[hit].vy=0;ev.preventDefault();}
+  };
+  cnv.onmouseup=()=>{_dragIdx=-1;};
+  cnv.onmousemove=ev=>{
+    const rect=cnv.getBoundingClientRect();
+    const mx=ev.clientX-rect.left,my=ev.clientY-rect.top;
+    if(_dragIdx>=0){
+      n[_dragIdx].x=Math.max(18,Math.min(W-18,mx));
+      n[_dragIdx].y=Math.max(18,Math.min(H-18,my));
+      n[_dragIdx].vx=0;n[_dragIdx].vy=0;
+      cnv.style.cursor='grabbing';
+      _hideGraphTip();
+      return;
+    }
+    const hit=hitTest(mx,my);
+    cnv.style.cursor=hit>=0?'pointer':'default';
+    if(hit>=0){
+      _hoverIdx=hit;
+      if(S.instLocked<0) _setInstHighlight(n[hit].idx);
+      drawGraph(hit);
+      _showGraphTip(ev,n[hit]);
+    } else {
+      _hoverIdx=-1;
+      if(S.instLocked<0){_setInstHighlight(-1);drawGraph(-1);_hideGraphTip();}
+      else{const li=n.findIndex(nd=>nd.idx===S.instLocked);drawGraph(li);}
+    }
+  };
+  cnv.onclick=ev=>{
+    if(_dragIdx>=0) return;
+    const rect=cnv.getBoundingClientRect();
+    const hit=hitTest(ev.clientX-rect.left,ev.clientY-rect.top);
+    if(hit>=0){
+      if(S.instLocked===n[hit].idx){
+        S.instLocked=-1;_lockedTipNd=null;_setInstHighlight(-1);_hideGraphTip();_hideLockedBar();
+      }else{
+        S.instLocked=n[hit].idx;_lockedTipNd={...n[hit]};
+        _setInstHighlight(n[hit].idx);_showLockedBar(n[hit]);
+      }
+    }else{
+      if(S.instLocked>=0){S.instLocked=-1;_lockedTipNd=null;_setInstHighlight(-1);_hideGraphTip();_hideLockedBar();}
+    }
+  };
+  cnv.onmouseleave=()=>{
+    _dragIdx=-1;_hoverIdx=-1;
+    _hideGraphTip();
+    if(S.instLocked>=0){const li=n.findIndex(nd=>nd.idx===S.instLocked);drawGraph(li);}
+  };
+  if(S.instLocked>=0){const _lnd=n.find(nd=>nd.idx===S.instLocked);if(_lnd){_lockedTipNd={..._lnd};_showLockedBar(_lnd);}else{S.instLocked=-1;_hideLockedBar();}}
+}
+
+// Draggable overlay
+(()=>{
+  const hdr=document.getElementById('graph-hdr');
+  const ov=document.getElementById('graph-overlay');
+  const wrap=document.getElementById('canvas-wrap');
+  let drag=null;
+  hdr.addEventListener('mousedown',e=>{
+    if(e.button!==0||e.target.closest('#graph-close')||e.target.closest('.gr-edge')) return;
+    const r=ov.getBoundingClientRect();
+    const wr=wrap.getBoundingClientRect();
+    const l=r.left-wr.left, t=r.top-wr.top;
+    drag={ox:e.clientX-wr.left-l,oy:e.clientY-wr.top-t};
+    ov.style.left=l+'px'; ov.style.top=t+'px';
+    ov.style.bottom=''; ov.style.right='';
+    ov.style.transform='none';
+    e.preventDefault();
+  });
+  document.addEventListener('mousemove',e=>{
+    if(!drag) return;
+    const wr=wrap.getBoundingClientRect();
+    ov.style.left=(e.clientX-wr.left-drag.ox)+'px';
+    ov.style.top=(e.clientY-wr.top-drag.oy)+'px';
+  });
+  document.addEventListener('mouseup',()=>{drag=null;});
+})();
+
+// Resizable overlay — all 8 edges/corners
+(()=>{
+  const ov=document.getElementById('graph-overlay');
+  const wrap=document.getElementById('canvas-wrap');
+  let rsz=null;
+  ov.addEventListener('mousedown',e=>{
+    const handle=e.target.closest('.gr-edge[data-edge]');
+    if(!handle||e.button!==0) return;
+    const edge=handle.dataset.edge;
+    const r=ov.getBoundingClientRect();
+    const wr=wrap.getBoundingClientRect();
+    // Normalise to left/top so W and N edges can adjust position
+    ov.style.left=(r.left-wr.left)+'px'; ov.style.top=(r.top-wr.top)+'px';
+    ov.style.bottom=''; ov.style.right='';
+    rsz={edge,startX:e.clientX,startY:e.clientY,
+         startW:r.width,startH:r.height,
+         startL:r.left-wr.left,startT:r.top-wr.top,
+         lastW:r.width,lastH:r.height};
+    e.preventDefault();e.stopPropagation();
+  });
+  document.addEventListener('mousemove',e=>{
+    if(!rsz) return;
+    const dx=e.clientX-rsz.startX, dy=e.clientY-rsz.startY;
+    const {edge,startW,startH,startL,startT}=rsz;
+    const MIN_W=280, MIN_H=180;
+    let w=startW,h=startH,l=startL,t=startT;
+    if(edge.includes('e')) w=Math.max(MIN_W,startW+dx);
+    if(edge.includes('w')){const nw=Math.max(MIN_W,startW-dx);l=startL+(startW-nw);w=nw;}
+    if(edge.includes('s')) h=Math.max(MIN_H,startH+dy);
+    if(edge.includes('n')){const nh=Math.max(MIN_H,startH-dy);t=startT+(startH-nh);h=nh;}
+    ov.style.width=w+'px'; ov.style.height=h+'px';
+    ov.style.left=l+'px'; ov.style.top=t+'px';
+    if(S._curGraphParams&&(Math.abs(w-rsz.lastW||0)>20||Math.abs(h-rsz.lastH||0)>20)){
+      rsz.lastW=w; rsz.lastH=h;
+      const p=S._curGraphParams;requestAnimationFrame(()=>renderInstanceGraph(p.graph,p.interactionId,p.label,p.color));
+    }
+  });
+  document.addEventListener('mouseup',()=>{rsz=null;});
+})();
+
+// ── Semantic type filter for instance graph ─────────────────────────────────
+(()=>{
+  const legend=document.getElementById('graph-legend');
+  legend.addEventListener('click',ev=>{
+    const item=ev.target.closest('.gl-item[data-sem]');
+    if(!item) return;
+    const sem=parseInt(item.dataset.sem);
+    if(S.instSemFilter===null) S.instSemFilter=new Set([1,2,3,4,5]);
+    if(S.instSemFilter.has(sem)) S.instSemFilter.delete(sem);
+    else S.instSemFilter.add(sem);
+    if(S.instSemFilter.size>=5) S.instSemFilter=null;
+    legend.querySelectorAll('.gl-item[data-sem]').forEach(el=>{
+      el.classList.toggle('dimmed',S.instSemFilter!==null&&!S.instSemFilter.has(parseInt(el.dataset.sem)));
+    });
+    if(S._curGraphParams){const p=S._curGraphParams;renderInstanceGraph(p.graph,p.interactionId,p.label,p.color);}
+  });
+})();
+
+function _packBubbles(interactions,radii,W,H){
+  // Start in a loose circular arrangement, then force-relax
+  const nn=interactions.length;
+  const nodes=interactions.map((r,i)=>{
+    const angle=(i/nn)*Math.PI*2;
+    const dist=Math.min(W,H)*0.22;
+    return{inter:r,idx:i,r:radii[i],
+      x:W/2+Math.cos(angle)*dist*(0.5+0.5*Math.sin(i*2.39)),
+      y:H/2+Math.sin(angle)*dist*(0.5+0.5*Math.cos(i*1.61)),
+      vx:0,vy:0};
+  });
+  for(let iter=0;iter<360;iter++){
+    const alpha=Math.max(0.05,1-iter/220);
+    for(const nd of nodes){nd.vx+=(W/2-nd.x)*0.014*alpha;nd.vy+=(H/2-nd.y)*0.014*alpha;}
+    for(let i=0;i<nodes.length;i++){
+      for(let j=i+1;j<nodes.length;j++){
+        const dx=nodes[j].x-nodes[i].x,dy=nodes[j].y-nodes[i].y;
+        const d=Math.sqrt(dx*dx+dy*dy)||0.01;
+        const md=nodes[i].r+nodes[j].r+6;
+        if(d<md){const f=(md-d)/d*0.55;
+          nodes[i].vx-=dx*f;nodes[i].vy-=dy*f;
+          nodes[j].vx+=dx*f;nodes[j].vy+=dy*f;}
+      }
+    }
+    for(const nd of nodes){
+      nd.x+=nd.vx;nd.y+=nd.vy;nd.vx*=0.72;nd.vy*=0.72;
+      nd.x=Math.max(nd.r+3,Math.min(W-nd.r-3,nd.x));
+      nd.y=Math.max(nd.r+3,Math.min(H-nd.r-3,nd.y));
+    }
+  }
+  return nodes;
+}
+
+function renderInteractionPanel(interactions,pdgMap,nInstances){
+  const panel=document.getElementById('interact-panel');
+  const bubb=document.getElementById('ip-bubbles');
+  const det=document.getElementById('ip-detail');
+  const totalPts=interactions.reduce((s,r)=>s+r.n,0);
+  S.statsDet=`<div class="ip-stats-default">`+
+    `<div class="ip-det-hdr" style="opacity:0.55">Event Summary</div>`+
+    `<div class="ip-det-row"><span class="ip-det-key">Total pts</span><span class="ip-det-val">${totalPts.toLocaleString()}</span></div>`+
+    `<div class="ip-det-row"><span class="ip-det-key">Interactions</span><span class="ip-det-val">${interactions.length}</span></div>`+
+    `<div class="ip-det-row"><span class="ip-det-key">Instances</span><span class="ip-det-val">${nInstances||0}</span></div>`+
+    `<div class="ip-stats-hint">↑ hover a circle ↑</div>`+
+    `</div>`;
+  if(!interactions.length){
+    bubb.innerHTML='<div class="ip-empty-msg">no data</div>';
+    det.innerHTML=S.statsDet;
+    if(!panel.dataset.shown){panel.dataset.shown='1';if(window.innerWidth>600){panel.style.display='flex';document.getElementById('btn-inter').classList.add('active');resize();}}
+    return;
+  }
+  const maxE=Math.max(...interactions.map(r=>r.eSum),1e-30);
+  const maxR=80,minR=22;
+  const radii=interactions.map(r=>minR+(maxR-minR)*Math.sqrt(r.eSum/maxE));
+  const totalArea=radii.reduce((s,r)=>s+Math.PI*r*r,0);
+  const side=Math.round(Math.sqrt(totalArea)*2.0);
+  const W=Math.max(260,side),H=Math.max(260,side);
+  const nodes=_packBubbles(interactions,radii,W,H);
+  let parts=[`<svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="xMidYMid meet" xmlns="http://www.w3.org/2000/svg" style="width:100%;height:100%">`];
+  interactions.forEach((r,k)=>{
+    const col=INT_COLORS[k%INT_COLORS.length];
+    const nd=nodes[k];
+    const rx=nd.x.toFixed(1),ry=nd.y.toFixed(1),rr=nd.r.toFixed(1);
+    const fs=Math.max(9,Math.round(nd.r*0.38)),sfs=Math.max(8,Math.round(nd.r*0.28));
+    const ptLabel=r.n>9999?(r.n/1000).toFixed(1)+'k':r.n.toString();
+    const pdgStr=pdgMap?[...(pdgMap.get(r.id)||new Set())].join(', '):'—';
+    const srcStr=(r.nle>0&&r.le>0)?'NLE+LE':(r.nle>0?'NLE':'LE');
+    parts.push(
+      `<g class="ip-bub" data-k="${k}" data-id="${r.id}"`+
+      ` data-n="${r.n}" data-esum="${r.eSum.toPrecision(4)}"`+
+      ` data-tmin="${r.tMin.toPrecision(4)}" data-tmax="${r.tMax.toPrecision(4)}"`+
+      ` data-xc="${r.xC.toFixed(1)}" data-yc="${r.yC.toFixed(1)}" data-zc="${r.zC.toFixed(1)}"`+
+      ` data-nroots="${r.nRoots}" data-pdg="${pdgStr}" data-src="${srcStr}">`+
+      `<circle class="ip-ring" cx="${rx}" cy="${ry}" r="${rr}" fill="${col}20" stroke="${col}" stroke-width="1.8"/>`+
+      `<text x="${rx}" y="${(nd.y-fs*0.25).toFixed(1)}" text-anchor="middle" font-family="monospace" font-size="${fs}" fill="${col}" font-weight="bold">${Math.round(r.id)}</text>`+
+      `<text x="${rx}" y="${(nd.y+fs*0.85).toFixed(1)}" text-anchor="middle" font-family="monospace" font-size="${sfs}" fill="${col}99">${ptLabel}</text>`+
+      `</g>`);
+  });
+  parts.push('</svg>');
+  bubb.innerHTML=parts.join('');
+  det.innerHTML=S.statsDet;
+  if(!panel.dataset.shown){panel.dataset.shown='1';if(window.innerWidth>600){panel.style.display='flex';document.getElementById('btn-inter').classList.add('active');resize();}}
+  bubb.querySelectorAll('.ip-bub').forEach(el=>{
+    el.addEventListener('mouseenter',()=>_onIconHover(el,true));
+    el.addEventListener('mouseleave',()=>_onIconHover(el,false));
+    el.addEventListener('click',()=>{
+      const id=parseFloat(el.dataset.id);
+      const k=parseInt(el.dataset.k);
+      const same=S.highlightLocked&&Math.abs(S.highlight-id)<0.5;
+      bubb.querySelectorAll('.ip-bub').forEach(e=>e.classList.remove('locked'));
+      if(same){
+        S.highlightLocked=false; S._lockedInter=null; S._lockedDetHTML=null;
+        _setHighlight(-1); det.innerHTML=S.statsDet||'';
+        _setViewMode(0);
+        _restoreCam();
+        document.getElementById('graph-overlay').classList.remove('visible');
+        _setInstHighlight(-1);
+      }else{
+        S.highlightLocked=true; S._lockedInter=S.interactions[k];
+        _setHighlight(id); el.classList.add('locked');
+        _setViewMode(1);
+        _renderInterDetailById(id); // populate detail now (needed for mobile where mouseenter may not fire before tap)
+        S._lockedDetHTML=det.innerHTML; // save detail+histogram
+        _zoomToInter(S._lockedInter);
+        if(S.instGraph){
+          const _col=INT_COLORS[k%INT_COLORS.length];
+          document.getElementById('graph-overlay').classList.add('visible');
+          renderInstanceGraph(S.instGraph,id,`INTERACTION ${Math.round(id)}`,_col);
+        }
+      }
+    });
+  });
+}
+
+// ── Adaptive zoom helpers ──
+function _saveCam(){
+  if(!S._savedCam) S._savedCam={
+    dist:camera.position.distanceTo(controls.target),
+    target:controls.target.clone()
+  };
+}
+function _zoomToInter(inter){
+  if(!S.adaptiveZoom||!inter) return;
+  _saveCam();
+  const tgt=new THREE.Vector3(inter.xC,inter.yC,inter.zC);
+  const fovRad=camera.fov*Math.PI/180;
+  const hvFov=Math.atan(Math.tan(fovRad/2)*Math.min(1,camera.aspect));
+  const dist=Math.max(inter.bsph/Math.tan(hvFov)*0.75,1);
+  S._camLerp={toTarget:tgt,toDist:dist};
+}
+function _restoreCam(){
+  if(!S._savedCam) return;
+  S._camLerp={toTarget:S._savedCam.target.clone(),toDist:S._savedCam.dist,isRestore:true};
+  // Keep _savedCam alive until the lerp completes so that re-entries during
+  // the restore don't snapshot a mid-lerp position as the new "original".
+}
+
+function _onIconHover(el,entered){
+  const bubb=document.getElementById('ip-bubbles');
+  const det=document.getElementById('ip-detail');
+  if(!entered){
+    bubb.querySelectorAll('.ip-bub').forEach(e=>e.classList.remove('dimmed','active'));
+    if(!S.highlightLocked){
+      det.innerHTML=S.statsDet||'<div class="ip-empty-msg">hover a<br>circle</div>';
+      _setHighlight(-1);_restoreCam();
+      document.getElementById('graph-overlay').classList.remove('visible');
+      _setInstHighlight(-1);
+    } else {
+      // Restore locked interaction detail (preserves histogram)
+      if(S._lockedDetHTML){
+        det.innerHTML=S._lockedDetHTML;
+        _wireHistSection(S._lockedInter?S._lockedInter.id:-1);
+      }
+      if(S._lockedInter)_zoomToInter(S._lockedInter);
+    }
+    return;
+  }
+  const inter=S.interactions[parseInt(el.dataset.k)];
+  if(!S.highlightLocked)_setHighlight(parseFloat(el.dataset.id));
+  _zoomToInter(inter);
+  el.classList.add('active');
+  if(S.instGraph){
+    const _k=parseInt(el.dataset.k);
+    const _col=INT_COLORS[_k%INT_COLORS.length];
+    const _ov=document.getElementById('graph-overlay');
+    const _bRect=el.getBoundingClientRect();
+    const _wRect=document.getElementById('canvas-wrap').getBoundingClientRect();
+    // Only auto-position on first open; after a drag, left/top inline styles take precedence
+    if(!_ov.style.left){
+      _ov.style.bottom=''; _ov.style.right='';
+    }
+    _ov.style.transform='none';
+    _ov.classList.add('visible');
+    renderInstanceGraph(S.instGraph,parseFloat(el.dataset.id),`INTERACTION ${Math.round(parseFloat(el.dataset.id))}`,_col);
+  }
+  bubb.querySelectorAll('.ip-bub').forEach(e=>{if(e!==el)e.classList.add('dimmed');});
+  const d=el.dataset;
+  const col=INT_COLORS[parseInt(d.k)%INT_COLORS.length];
+  const _intId=parseFloat(d.id);
+  det.innerHTML=
+    `<div class="ip-det-hdr" style="color:${col};border-color:${col}44">Interaction ID ${d.id}</div>`+
+    `<div class="ip-det-num" style="color:${col}">${parseInt(d.n).toLocaleString()}<span style="font-size:14px;font-weight:normal;margin-left:8px;color:${col}88">pts</span></div>`+
+    `<div class="ip-det-row"><span class="ip-det-key">&Sigma; Energy</span><span class="ip-det-val">${parseFloat(d.esum).toExponential(3)}</span></div>`+
+    `<div class="ip-det-row"><span class="ip-det-key">t min</span><span class="ip-det-val">${d.tmin}</span></div>`+
+    `<div class="ip-det-row"><span class="ip-det-key">t max</span><span class="ip-det-val">${d.tmax}</span></div>`+
+    `<div class="ip-det-row"><span class="ip-det-key">centroid x</span><span class="ip-det-val">${d.xc}</span></div>`+
+    `<div class="ip-det-row"><span class="ip-det-key">centroid y</span><span class="ip-det-val">${d.yc}</span></div>`+
+    `<div class="ip-det-row"><span class="ip-det-key">centroid z</span><span class="ip-det-val">${d.zc}</span></div>`+
+    `<div class="ip-det-row"><span class="ip-det-key">Root tracks</span><span class="ip-det-val">${d.nroots}</span></div>`+
+    `<div class="ip-det-row"><span class="ip-det-key">Cloud source</span><span class="ip-det-val">${d.src}</span></div>`+
+    (d.pdg&&d.pdg!=='—'?`<div class="ip-det-pdg"><span style="color:var(--text2);font-size:11px">PDG codes &nbsp;</span>${d.pdg}</div>`:'')+
+    _instPtHistHTML(_intId);
+  _wireHistSection(_intId);
+  // If this is the locked bubble, refresh saved HTML so threshold updates persist
+  if(S.highlightLocked&&Math.abs(S.highlight-_intId)<0.5) S._lockedDetHTML=det.innerHTML;
+}
+
+function _setHighlight(id){
+  S.highlight=id;
+  for(const o of[objNLE,objLE]){if(o)o.pts.material.uniforms.uHighlightId.value=id;}
+}
+
+function _setInstHighlight(id){
+  S.instHighlight=id;
+  const eff=S.instLocked>=0?S.instLocked:id;
+  for(const o of[objNLE,objLE]){
+    if(o) o.pts.material.uniforms.uHighlightInstId.value=eff;
+  }
+}
+
+// uViewMode: 0 = global view, 1 = interaction-locked view
+function _setViewMode(v){
+  for(const o of[objNLE,objLE]){if(o) o.pts.material.uniforms.uViewMode.value=v;}
+}
+
+// Render the interaction detail panel for a given interaction ID,
+// without touching bubble CSS or the graph overlay (used on cloud hover in global view).
+function _renderInterDetailById(intId){
+  const bubb=document.getElementById('ip-bubbles');
+  const det=document.getElementById('ip-detail');
+  if(!bubb||!det) return;
+  const el=Array.from(bubb.querySelectorAll('.ip-bub')).find(e=>Math.abs(parseFloat(e.dataset.id)-intId)<0.5);
+  if(!el){det.innerHTML=S.statsDet||'';return;}
+  const d=el.dataset;
+  const col=INT_COLORS[parseInt(d.k)%INT_COLORS.length];
+  const _intId=parseFloat(d.id);
+  det.innerHTML=
+    `<div class="ip-det-hdr" style="color:${col};border-color:${col}44">Interaction ID ${d.id}</div>`+
+    `<div class="ip-det-num" style="color:${col}">${parseInt(d.n).toLocaleString()}<span style="font-size:14px;font-weight:normal;margin-left:8px;color:${col}88">pts</span></div>`+
+    `<div class="ip-det-row"><span class="ip-det-key">&Sigma; Energy</span><span class="ip-det-val">${parseFloat(d.esum).toExponential(3)}</span></div>`+
+    `<div class="ip-det-row"><span class="ip-det-key">t min</span><span class="ip-det-val">${d.tmin}</span></div>`+
+    `<div class="ip-det-row"><span class="ip-det-key">t max</span><span class="ip-det-val">${d.tmax}</span></div>`+
+    `<div class="ip-det-row"><span class="ip-det-key">centroid x</span><span class="ip-det-val">${d.xc}</span></div>`+
+    `<div class="ip-det-row"><span class="ip-det-key">centroid y</span><span class="ip-det-val">${d.yc}</span></div>`+
+    `<div class="ip-det-row"><span class="ip-det-key">centroid z</span><span class="ip-det-val">${d.zc}</span></div>`+
+    `<div class="ip-det-row"><span class="ip-det-key">Root tracks</span><span class="ip-det-val">${d.nroots}</span></div>`+
+    `<div class="ip-det-row"><span class="ip-det-key">Cloud source</span><span class="ip-det-val">${d.src}</span></div>`+
+    (d.pdg&&d.pdg!=='—'?`<div class="ip-det-pdg"><span style="color:var(--text2);font-size:11px">PDG codes &nbsp;</span>${d.pdg}</div>`:'')+
+    _instPtHistHTML(_intId);
+  _wireHistSection(_intId);
+}
+
+function toggleGraphPanel(){
+  const el=document.getElementById('graph-overlay');
+  const show=!el.classList.contains('visible');
+  el.classList.toggle('visible',show);
+  if(show&&S.instGraph&&S._lockedInter){
+    const k=S.interactions?S.interactions.indexOf(S._lockedInter):-1;
+    const col=k>=0?INT_COLORS[k%INT_COLORS.length]:'';
+    renderInstanceGraph(S.instGraph,S._lockedInter.id,k>=0?`INTERACTION ${Math.round(S._lockedInter.id)}`:'',col);
+  }
+}
+
+function toggleInterPanel(){
+  const p=document.getElementById('interact-panel');
+  const show=p.style.display==='none'||!p.style.display;
+  p.style.display=show?'flex':'none';
+  p.dataset.shown='1';
+  document.getElementById('btn-inter').classList.toggle('active',show);
+  resize();
+}
+
+function updateStats(){
+  const n1=objNLE?objNLE.n:0,n2=objLE?objLE.n:0,fmt=n=>n.toLocaleString();
+  document.getElementById('cnt-nle').textContent=fmt(n1)+' pts';
+  document.getElementById('cnt-le').textContent=fmt(n2)+' pts';
+  document.getElementById('cnt2-nle').textContent=fmt(n1);
+  document.getElementById('cnt2-le').textContent=fmt(n2);
+  document.getElementById('cnt2-tot').textContent=fmt(n1+n2);
+}
+
+function setStatus(msg){document.getElementById('status').textContent=msg;}
+
+function logMsg(msg,cls=''){
+  const el=document.getElementById('log-text'); if(!el) return;
+  const t=new Date().toLocaleTimeString('en-US',{hour12:false,hour:'2-digit',minute:'2-digit',second:'2-digit'});
+  const d=document.createElement('div');
+  d.className='log-line'+(cls?' '+cls:'');
+  d.textContent='['+t+'] '+msg;
+  el.appendChild(d); el.scrollTop=el.scrollHeight;
+  setStatus(msg);
+}
+function setProgress(frac){
+  const bar=document.getElementById('log-progress-bar'); if(!bar) return;
+  bar.style.width=(frac==null?0:Math.min(100,Math.round(frac*100)))+'%';
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// TIME ANIMATION
+// ────────────────────────────────────────────────────────────────────────────
+
+function _setAnimThresh(v){
+  for(const o of[objNLE,objLE]){if(o)o.pts.material.uniforms.uTimeThresh.value=v;}
+}
+
+function _updateDriftUniforms(){
+  const spd=S.anim.drift.on?S.anim.drift.speed:0;
+  for(const o of[objNLE,objLE]) if(o){
+    o.pts.material.uniforms.uDriftSpeed.value=spd;
+    o.pts.material.uniforms.uBboxXMin.value=S.bbox.xMin;
+    o.pts.material.uniforms.uBboxXMax.value=S.bbox.xMax;
+  }
+}
+
+function _setAnimUseNorm(v){
+  for(const o of[objNLE,objLE]){if(o)o.pts.material.uniforms.uAnimUseNorm.value=v;}
+}
+
+// Recompute animT attribute from stored f32 with a new spread value.
+// Called when the spread slider changes — no full event reload needed.
+function rebuildAnimT(spread){
+  for(const o of[objNLE,objLE]){
+    if(!o||!o.f32) continue;
+    const nt=buildInteractionNormT(o.f32,spread);
+    const attr=o.pts.geometry.attributes.animT;
+    attr.array.set(nt);
+    attr.needsUpdate=true;
+  }
+}
+
+function startAnim(){
+  if(!objNLE&&!objLE){setStatus('No event loaded');return;}
+  const norm=S.anim.normMode===1;
+  _setAnimUseNorm(norm?1:0);
+  let tMin,tMax,statusExtra='';
+  if(norm){
+    tMin=0; tMax=1;
+    // report number of interactions across both clouds
+    let nInt=0;
+    const allF=[objNLE,objLE];
+    allF.forEach(o=>{
+      if(!o)return;
+      const s=new Set();
+      const at=o.pts.geometry.attributes.extra;
+      for(let i=0;i<o.n;i++) s.add(at.array[i*3+2]); // extra.z = interaction_id
+      nInt+=s.size;
+    });
+    document.getElementById('anim-int-row').style.display='';
+    document.getElementById('anim-nint').textContent=nInt;
+    statusExtra=' [norm/'+nInt+' interactions]';
+  } else {
+    let mn=Infinity,mx=-Infinity;
+    for(const r of[S.ranges.nle,S.ranges.le]){
+      if(!r)continue;
+      if(r.mn[3]<mn)mn=r.mn[3];
+      if(r.mx[3]>mx)mx=r.mx[3];
+    }
+    if(!isFinite(mn)||mn>=mx){setStatus('No valid time span for animation');return;}
+    tMin=mn; tMax=mx;
+    document.getElementById('anim-int-row').style.display='none';
+  }
+  S.anim.tMin=tMin; S.anim.tMax=tMax;
+  // When x-drift is enabled, extend tMax so even the last-appearing points
+  // have enough time (in data units) to travel all the way to the bbox wall.
+  // Also auto-scale the wallclock duration proportionally.
+  if(S.anim.drift.on&&!norm&&S.anim.drift.speed>0){
+    const driftPad=S.bbox.xMax/S.anim.drift.speed; // data-time units needed
+    const origSpan=Math.max(tMax-tMin,1e-30);
+    S.anim.tMax=tMax+driftPad;
+    const scaleFactor=(origSpan+driftPad)/origSpan;
+    S.anim.dur=Math.min(120,Math.max(2,S.anim.dur*scaleFactor));
+    document.getElementById('sl-anim-dur').value=Math.round(S.anim.dur);
+    document.getElementById('lbl-anim-dur').textContent=Math.round(S.anim.dur)+' s';
+  }
+  S.anim.t0wall=performance.now();
+  S.anim._pausedFrac=0;
+  S.anim.playing=true;
+  document.getElementById('btn-play').textContent='\u23f8 PAUSE';
+  document.getElementById('btn-play').classList.add('playing');
+  document.getElementById('anim-tmin').textContent=norm?'0':tMin.toExponential(3);
+  document.getElementById('anim-tmax').textContent=norm?'1':tMax.toExponential(3);
+  _setAnimThresh(tMin);
+  const bar=document.getElementById('anim-bar');
+  bar.style.display='block'; bar.querySelector('.af').style.width='0%';
+  setStatus('Animating event '+S.evIdx+statusExtra+' ('+S.anim.dur+'s)');
+}
+
+function pauseAnim(){
+  if(!S.anim.playing)return;
+  const elapsed=(performance.now()-S.anim.t0wall)/1000;
+  S.anim._pausedFrac=Math.min(elapsed/S.anim.dur,1);
+  S.anim.playing=false;
+  document.getElementById('btn-play').textContent='\u25b6 PLAY';
+  document.getElementById('btn-play').classList.remove('playing');
+}
+
+function resumeAnim(){
+  if(S.anim.playing)return;
+  // Recalibrate t0wall so the animation resumes from the paused fraction
+  S.anim.t0wall=performance.now()-S.anim._pausedFrac*S.anim.dur*1000;
+  S.anim.playing=true;
+  document.getElementById('btn-play').textContent='\u23f8 PAUSE';
+  document.getElementById('btn-play').classList.add('playing');
+}
+
+function resetAnim(){
+  S.anim.playing=false;
+  S.anim._pausedFrac=0;
+  document.getElementById('btn-play').textContent='\u25b6 PLAY';
+  document.getElementById('btn-play').classList.remove('playing');
+  _setAnimThresh(ANIM_THRESH_MAX);
+  const bar=document.getElementById('anim-bar');
+  if(bar){bar.style.display='none';bar.querySelector('.af').style.width='0%';}
+  document.getElementById('anim-tcur').textContent='—';
+}
+
+function toggleAnim(){
+  if(S.anim.playing){
+    pauseAnim();
+  } else if(S.anim._pausedFrac>0&&S.anim._pausedFrac<1){
+    resumeAnim(); // resume from pause point
+  } else {
+    startAnim();  // fresh start (also handles restart after end)
+  }
+}
+
+function toggleRotation(){
+  S.rot.on=!S.rot.on;
+  controls.autoRotate=S.rot.on;
+  const btn=document.getElementById('btn-rot');
+  if(S.rot.on){btn.classList.add('playing');}else{btn.classList.remove('playing');}
+}
+
+function centerCamera(){
+  const box=new THREE.Box3();
+  for(const o of[objNLE,objLE]){if(!o||!o.pts.visible)continue;const gb=o.pts.geometry.boundingBox;if(gb)box.union(gb.clone().applyMatrix4(o.pts.matrixWorld));}
+  if(box.isEmpty()) return;
+  const center=new THREE.Vector3(),size=new THREE.Vector3();
+  box.getCenter(center); box.getSize(size);
+  const dist=Math.max(size.x,size.y,size.z)*1.5||1000;
+  controls.target.copy(center);
+  camera.position.copy(center).add(new THREE.Vector3(0,dist*.4,dist));
+  camera.near=dist*1e-4; camera.far=dist*10; camera.updateProjectionMatrix(); controls.update();
+}
+
+function h5scalar(ds){const v=ds.value;if(v==null)return 0;if(typeof v==='bigint')return Number(v);if(typeof v==='number')return v;const x=v[0];return typeof x==='bigint'?Number(x):Number(x);}
+
+async function openBuf(name, buf){
+  if(!H5File||!FS){
+    const msg='h5wasm not ready — try again in a moment, or check the browser console (F12) for errors.';
+    logMsg('⚠ '+msg,'log-err'); alert(msg);
+    console.error('h5wasm not available, error:',_h5LoadError); return;
+  }
+  if(hf){try{hf.close();}catch(_){}hf=null;} clearObjects();
+  // Leaving remote mode — terminate any live range worker
+  S.remoteMode=false;
+  S._prefetch={idx:-1,promise:null};
+  if(S.remoteWorker){try{S.remoteWorker.terminate();}catch(_){} S.remoteWorker=null;}
+  logMsg('Parsing HDF5 file: '+name);
+  try{
+    const fname='/'+name.replace(/[^a-zA-Z0-9._-]/g,'_');
+    logMsg('Writing to virtual filesystem…');
+    FS.writeFile(fname,new Uint8Array(buf));
+    logMsg('Opening HDF5 structure…');
+    hf=new H5File(fname,'r');
+    const keys=hf.keys();
+    console.log('[h5] file keys:', keys);
+    if(!keys.includes('n_events')) throw new Error('Missing /n_events — not a pysupera file?');
+    if(!keys.includes('non_le_cloud')) throw new Error('Missing /non_le_cloud — regenerate with run_pysupera (format v2.1+)');
+    nEvents=h5scalar(hf.get('n_events'));
+    logMsg('Found '+nEvents+' event(s) in '+name,'log-ok');
+    // Report which optional levels this file actually carries, so an empty
+    // fragment or particle table reads as a deliberate choice rather than a
+    // load failure.
+    probeFragLevel();
+    let _fv='?'; try{ _fv=hf.get('format_version').value; }catch(e){}
+    let _hasL0=false;
+    try{ _hasL0=hf.keys().includes('particles')
+                &&Number(hf.get('particles').get('id').shape[0])>0; }catch(e){}
+    let _hasG4=false;
+    try{ _hasG4=hf.keys().includes('particle_instances')
+                &&hf.get('particle_instances').keys().includes('geant4_id'); }catch(e){}
+    logMsg('format '+_fv+' \u00b7 fragment level: '+(_FRAG_LEVEL?'yes':'no')
+           +' \u00b7 level-0 particles: '+(_hasL0?'yes':'no')
+           +' \u00b7 geant4_id: '+(_hasG4?'yes':'no'));
+    document.getElementById('filename').textContent=name;
+    document.getElementById('ev-total').textContent='/ '+nEvents;
+    document.getElementById('ev-input').max=nEvents-1;
+    S.evIdx=0; document.getElementById('ev-input').value=0;
+    loadEvent(0); setTimeout(centerCamera,50);
+  }catch(e){logMsg('Error: '+e.message,'log-err');console.error('[h5] openBuf error:',e);}
+}
+
+async function openFile(file){
+  logMsg('Opening local file: '+file.name+' ('+( file.size/1e6).toFixed(1)+' MB)');
+  setProgress(0);
+  return new Promise((resolve,reject)=>{
+    const fr=new FileReader();
+    fr.onprogress=e=>{
+      if(e.lengthComputable){
+        setProgress(e.loaded/e.total);
+        setStatus('Reading… '+(e.loaded/1e6).toFixed(1)+' / '+(e.total/1e6).toFixed(1)+' MB');
+      }
+    };
+    fr.onload=async()=>{
+      logMsg('File read complete: '+(file.size/1e6).toFixed(1)+' MB','log-ok');
+      setProgress(1);
+      try{await openBuf(file.name,fr.result);setProgress(0);resolve();}
+      catch(e){logMsg('Error: '+e.message,'log-err');setProgress(0);reject(e);}
+    };
+    fr.onerror=()=>{const m='FileReader error';logMsg(m,'log-err');setProgress(0);reject(new Error(m));};
+    fr.readAsArrayBuffer(file);
+  });
+}
+
+// ── Web Worker script for HTTP-Range remote access ───────────────────────────
+// Runs entirely inside a Worker so that createLazyFile's synchronous XHR is
+// permitted.  All HDF5 I/O happens in the worker; only plain JS data crosses
+// the worker boundary via postMessage / Transferable.
+// Classic worker (not module) so dynamic import() works from a blob URL in all browsers.
+const _REMOTE_WORKER_SRC=`
+(async()=>{
+  try{
+    const mod=await import('https://cdn.jsdelivr.net/npm/h5wasm@0.7.3/dist/esm/hdf5_hl.js');
+    const h5wasm=mod.default||mod.h5wasm||mod;
+    const Module=await h5wasm.ready;
+    const H5File=h5wasm.File, FS=Module.FS;
+    const NCOLS=9;
+    let hf=null;
+    self.postMessage({type:'ready'});
+    self.onmessage=function(ev){
+  const{id,type}=ev.data;
+  try{
+    if(type==='open'){
+      if(hf){try{hf.close();}catch(_){}hf=null;}
+      const url=ev.data.url;
+      const name=url.split('/').pop()||'remote.h5';
+      const safe=name.replace(/[^a-zA-Z0-9._-]/g,'_');
+      const fname='/rmt_'+safe;
+      try{FS.unlink(fname);}catch(_){}
+      FS.createLazyFile('/',fname.slice(1),url,true,false);
+      hf=new H5File(fname,'r');
+      const keys=hf.keys();
+      if(!keys.includes('n_events')) throw new Error('Missing /n_events');
+      if(!keys.includes('non_le_cloud')) throw new Error('Missing /non_le_cloud');
+      const nv=hf.get('n_events').value;
+      const nEvents=typeof nv==='bigint'?Number(nv):(Array.isArray(nv)?Number(nv[0]):Number(nv));
+      self.postMessage({id,ok:true,nEvents,name});
+    }
+    else if(type==='load'){
+      const idx=ev.data.idx;
+      const nleF32=_readCloud('non_le_cloud',idx);
+      const leF32=_readCloud('le_scatter_cloud',idx);
+      const instGraph=_readInstanceGraph(idx);
+      const pdgMapEntries=_readParticleSliceEntries(idx);
+      const xfr=[];
+      if(nleF32&&nleF32.byteLength) xfr.push(nleF32.buffer);
+      if(leF32&&leF32.byteLength)   xfr.push(leF32.buffer);
+      self.postMessage({id,ok:true,nleF32,leF32,instGraph,pdgMapEntries},xfr);
+    }
+    else{self.postMessage({id,ok:false,err:'Unknown message type: '+type});}
+  }catch(err){self.postMessage({id,ok:false,err:err.message||String(err)});}
+};
+function _readCloud(grpName,evIdx){
+  if(!hf) return new Float32Array(0);
+  const ks=hf.keys(); if(!ks.includes(grpName)) return new Float32Array(0);
+  const grp=hf.get(grpName),gk=grp.keys();
+  if(!gk.includes('offsets')||!gk.includes('flat')) return new Float32Array(0);
+  const off=grp.get('offsets').value;
+  const s=Number(off[evIdx]),e=Number(off[evIdx+1]);
+  if(s>=e) return new Float32Array(0);
+  return grp.get('flat').slice([[s,e],[0,NCOLS]]);
+}
+function _readParticleSliceEntries(evIdx){
+  if(!hf) return [];
+  try{
+    const ks=hf.keys();
+    if(!ks.includes('events')||!ks.includes('particles')) return [];
+    const evOff=hf.get('events').get('offsets').value;
+    const pS=Number(evOff[evIdx]),pE=Number(evOff[evIdx+1]);
+    if(pS>=pE) return [];
+    const pg=hf.get('particles'),pk=pg.keys();
+    if(!pk.includes('interaction_id')||!pk.includes('pdg')) return [];
+    const intIds=pg.get('interaction_id').slice([[pS,pE]]);
+    const pdgs=pg.get('pdg').slice([[pS,pE]]);
+    const m=new Map();
+    for(let k=0;k<intIds.length;k++){const id=intIds[k];if(!m.has(id))m.set(id,new Set());m.get(id).add(pdgs[k]);}
+    return [...m.entries()].map(([k,v])=>[k,[...v]]);
+  }catch(e){return [];}
+}
+function _readInstanceGraph(evIdx){
+  if(!hf) return null;
+  try{
+    const ks=hf.keys();
+    if(!ks.includes('inst_events')||!ks.includes('particle_instances')) return null;
+    const ig=hf.get('inst_events'); if(!ig.keys().includes('offsets')) return null;
+    const instEvOff=ig.get('offsets').value;
+    const iStart=Number(instEvOff[evIdx]),iEnd=Number(instEvOff[evIdx+1]);
+    if(iStart>=iEnd) return{nodes:[],edges:[]};
+    const pg=hf.get('particle_instances'),pgk=pg.keys();
+    if(!pgk.includes('id')||!pgk.includes('parent_id')) return null;
+    const instIds    =pg.get('id').slice([[iStart,iEnd]]);
+    const instPIDs   =pg.get('parent_id').slice([[iStart,iEnd]]);
+    const instIntIds =pgk.includes('interaction_id')?pg.get('interaction_id').slice([[iStart,iEnd]]):null;
+    const instSem    =pgk.includes('sem_type')?pg.get('sem_type').slice([[iStart,iEnd]]):null;
+    const instPdgs   =pgk.includes('pdg')?pg.get('pdg').slice([[iStart,iEnd]]):null;
+    const instParPdgs=pgk.includes('parent_pdg')?pg.get('parent_pdg').slice([[iStart,iEnd]]):null;
+    const instFragIds=pgk.includes('parent_frag_id')?pg.get('parent_frag_id').slice([[iStart,iEnd]]):null;
+    // From format 2.2.0 the two id spaces are distinct: 'id' is pysupera's
+    // per-event particle index (usable as a direct row index), 'geant4_id' is
+    // the original Geant4 track id kept purely as provenance.  Older files
+    // have no geant4_id column, where the two happened to coincide.
+    const instG4Ids  =pgk.includes('geant4_id')?pg.get('geant4_id').slice([[iStart,iEnd]]):null;
+    // Prefer the stored instance-level parent pointer.  Deriving it by walking
+    // the level-0 parent map only works when 'particles' was written, and that
+    // table is empty under output_compact -- the default -- which used to
+    // leave the genealogy graph with no edges at all.
+    const instPInst  =pgk.includes('parent_inst_id')?pg.get('parent_inst_id').slice([[iStart,iEnd]]):null;
+    let memOff=null,memberFlat=null;
+    if(pgk.includes('member_offsets')&&ks.includes('particle_instances_members')){
+      memOff=pg.get('member_offsets').slice([[iStart,iEnd+1]]);
+      const mg=hf.get('particle_instances_members');
+      const ms=Number(memOff[0]),me=Number(memOff[memOff.length-1]);
+      if(me>ms&&mg.keys().includes('flat')) memberFlat=mg.get('flat').slice([[ms,me]]);
+    }
+    let pcOff=null;
+    if(pgk.includes('pc_offsets')) pcOff=pg.get('pc_offsets').slice([[iStart,iEnd+1]]);
+    const nInst=iEnd-iStart;
+    const memberToInst=new Map();
+    for(let i=0;i<nInst;i++){
+      memberToInst.set(Number(instIds[i]),i);
+      if(memberFlat&&memOff){
+        const ms=Number(memOff[i])-Number(memOff[0]),me=Number(memOff[i+1])-Number(memOff[0]);
+        for(let j=ms;j<me;j++) memberToInst.set(Number(memberFlat[j]),i);
+      }
+    }
+    const partParent=new Map();
+    if(ks.includes('events')&&ks.includes('particles')){
+      const evOff=hf.get('events').get('offsets').value;
+      const pS=Number(evOff[evIdx]),pE=Number(evOff[evIdx+1]);
+      if(pS<pE){
+        const partsG=hf.get('particles'),pGk=partsG.keys();
+        if(pGk.includes('id')&&pGk.includes('parent_id')){
+          const pids=partsG.get('id').slice([[pS,pE]]);
+          const ppids=partsG.get('parent_id').slice([[pS,pE]]);
+          for(let k=0;k<pids.length;k++) partParent.set(Number(pids[k]),Number(ppids[k]));
+        }
+      }
+    }
+    function findParentInst(startPid){
+      let pid=Number(startPid);const visited=new Set();
+      while(pid>=0&&!visited.has(pid)){
+        visited.add(pid);
+        if(memberToInst.has(pid)) return memberToInst.get(pid);
+        const next=partParent.get(pid);
+        if(next===undefined||next===pid) break;
+        pid=next;
+      }
+      return -1;
+    }
+    const nodes=[],edges=[],edgeSet=new Set();
+    for(let i=0;i<nInst;i++){
+      const mCount=memOff?Number(memOff[i+1])-Number(memOff[i]):1;
+      const ptCount=pcOff?Number(pcOff[i+1])-Number(pcOff[i]):0;
+      nodes.push({idx:i,id:Number(instIds[i]),parentPid:Number(instPIDs[i]),
+        pdg:instPdgs?Number(instPdgs[i]):0,parentPdg:instParPdgs?Number(instParPdgs[i]):0,
+        intId:instIntIds?Number(instIntIds[i]):-1,semType:instSem?Number(instSem[i]):0,
+        fragId:instFragIds?Number(instFragIds[i]):-1,
+        g4Id:instG4Ids?Number(instG4Ids[i]):Number(instIds[i]),
+        members:Math.max(1,mCount),ptCount,eSum:null,x:0,y:0,vx:0,vy:0});
+    }
+    for(let i=0;i<nInst;i++){
+      // parent_inst_id is already an instance row index.  The parent-map walk
+      // stays as a fallback for files written before it was stored.
+      const pi=(instPInst&&Number(instPInst[i])>=0&&Number(instPInst[i])!==i)
+                 ?Number(instPInst[i])
+                 :findParentInst(instPIDs[i]);
+      if(pi>=0&&pi!==i){
+        const k=Math.min(pi,i)+','+Math.max(pi,i)+'_'+pi+'>'+i;
+        if(!edgeSet.has(k)){edgeSet.add(k);edges.push({src:pi,dst:i});}
+      }
+    }
+    return{nodes,edges};
+  }catch(e){return null;}
+}
+  }catch(err){self.postMessage({type:'error',err:err.message||String(err)});}
+})();
+`;
+
+// Wraps the worker with a promise-based API.
+// Uses a classic worker (no {type:'module'}) so dynamic import() works from
+// a blob URL across all browsers (module blob workers hang in Firefox/Safari).
+class RemoteWorker{
+  constructor(){
+    const blob=new Blob([_REMOTE_WORKER_SRC],{type:'application/javascript'});
+    this._blobUrl=URL.createObjectURL(blob);
+    this._w=new Worker(this._blobUrl); // classic worker
+    this._pending=new Map(); this._seq=0;
+    this._readyResolve=null; this._readyReject=null;
+    this._ready=new Promise((res,rej)=>{this._readyResolve=res;this._readyReject=rej;});
+    this._w.onmessage=ev=>{
+      const d=ev.data;
+      // Startup messages from worker
+      if(d.type==='ready'){this._readyResolve();return;}
+      if(d.type==='error'){this._readyReject(new Error(d.err||'Worker init failed'));return;}
+      // Regular request/response messages (have an id)
+      const{id,ok,err,...rest}=d;
+      const res=this._pending.get(id);
+      if(res){this._pending.delete(id);ok?res[0](rest):res[1](new Error(err||'Worker error'));}
+    };
+    this._w.onerror=e=>{
+      const msg=e.message||'Worker script error';
+      this._readyReject(new Error(msg));
+      for(const[id,[,rej]] of this._pending) rej(new Error(msg));
+      this._pending.clear();
+    };
+  }
+  // Waits for h5wasm to finish loading inside the worker (with timeout)
+  init(timeoutMs=60000){
+    return Promise.race([
+      this._ready,
+      new Promise((_,rej)=>setTimeout(()=>rej(new Error(
+        'Worker init timed out ('+timeoutMs/1000+'s) — h5wasm failed to load inside worker')),timeoutMs))
+    ]);
+  }
+  _send(msg){
+    return new Promise((res,rej)=>{
+      const id=++this._seq; this._pending.set(id,[res,rej]);
+      this._w.postMessage({id,...msg});
+    });
+  }
+  open(url){return this._send({type:'open',url});}
+  load(idx){return this._send({type:'load',idx});}
+  terminate(){
+    this._w.terminate();
+    URL.revokeObjectURL(this._blobUrl);
+    for(const[,[,rej]] of this._pending) rej(new Error('Worker terminated'));
+    this._pending.clear();
+  }
+}
+
+// Standby worker — created at page load so h5wasm is pre-loaded by the time
+// the user types a URL (eliminates the 2-4s wasm-load wait on first open).
+let _standbyWorker=null, _standbyReady=false;
+(()=>{
+  try{
+    _standbyWorker=new RemoteWorker();
+    _standbyWorker.init(60000).then(()=>{_standbyReady=true;}).catch(()=>{_standbyWorker=null;});
+  }catch(_){}
+})();
+
+// ── Remote (HTTP Range) open ─────────────────────────────────────────────────
+async function openRemote(url){
+  // The page itself must be served over HTTP — a file:// page cannot make cross-origin XHR
+  if(location.protocol==='file:'){
+    const msg='This HTML page is open as a local file (file://), so the browser blocks all cross-origin requests.\n\n'
+      +'Your HDF5 URL is fine, but the *page* must be served via HTTP first.\n\n'
+      +'Quick fix:\n  cd '+location.pathname.replace(/\/[^/]+$/,'/')+'\n  python -m http.server 8080\n\n'
+      +'Then open:\n  http://localhost:8080/vis_force.html\n\nand paste the same HDF5 URL there.';
+    logMsg('\u26A0 Page is open as file:// — cross-origin requests blocked. Serve via HTTP (see alert for instructions).','log-err');
+    alert(msg); return;
+  }
+  logMsg('\u26A1 Remote open via HTTP Range: '+url);
+  if(hf){try{hf.close();}catch(_){}hf=null;}
+  clearObjects();
+  S.remoteMode=false;
+  S._prefetch={idx:-1,promise:null};
+  if(S.remoteWorker){try{S.remoteWorker.terminate();}catch(_){} S.remoteWorker=null;}
+  try{
+    setProgress(0.05);
+    // Reuse the standby worker if h5wasm already loaded in it, otherwise create fresh
+    let rw;
+    if(_standbyReady&&_standbyWorker){
+      logMsg('\u26a1 h5wasm pre-loaded. Opening '+url+'\u2026');
+      rw=_standbyWorker; _standbyWorker=null; _standbyReady=false;
+    }else{
+      logMsg('Loading h5wasm in worker\u2026');
+      rw=_standbyWorker||new RemoteWorker(); _standbyWorker=null; _standbyReady=false;
+      await rw.init(60000);
+      logMsg('Worker ready. Opening '+url+'\u2026');
+    }
+    // Immediately spin up a fresh standby for next time
+    try{_standbyWorker=new RemoteWorker();_standbyWorker.init(60000).then(()=>{_standbyReady=true;}).catch(()=>{_standbyWorker=null;});}catch(_){}
+    setProgress(0.15);
+    const{nEvents:ne,name}=await rw.open(url);
+    nEvents=ne;
+    setProgress(0.5);
+    logMsg('\u2728 Ready \u2014 '+nEvents+' event(s) in '+name+' [range mode]','log-ok');
+    document.getElementById('filename').textContent=name+'\u26A1';
+    document.getElementById('ev-total').textContent='/ '+nEvents;
+    document.getElementById('ev-input').max=nEvents-1;
+    S.evIdx=0; document.getElementById('ev-input').value=0;
+    S.remoteWorker=rw; S.remoteMode=true;
+    setProgress(0.6);
+    await loadEvent(0);
+    setTimeout(centerCamera,50);
+  }catch(e){
+    logMsg('Remote open error: '+e.message,'log-err');
+    console.error('[h5] openRemote error:',e);
+    setProgress(0);
+    if(S.remoteWorker){try{S.remoteWorker.terminate();}catch(_){} S.remoteWorker=null;}
+    S.remoteMode=false;
+  }
+}
+
+async function openURL(url){
+  logMsg('Fetching: '+url);
+  console.log('[h5] fetching',url);
+  try{
+    const resp=await fetch(url);
+    if(!resp.ok) throw new Error('HTTP '+resp.status+' for '+url);
+    const total=parseInt(resp.headers.get('content-length')||'0');
+    if(total) logMsg('File size: '+(total/1e6).toFixed(1)+' MB');
+    else logMsg('File size unknown — server did not send Content-Length','log-warn');
+    setProgress(0);
+    const reader=resp.body.getReader();
+    const chunks=[];
+    let received=0;
+    while(true){
+      const{done,value}=await reader.read();
+      if(done) break;
+      chunks.push(value); received+=value.length;
+      const pct=total?received/total:null;
+      setProgress(pct||0);
+      setStatus(total
+        ?'Downloading… '+(received/1e6).toFixed(1)+' / '+(total/1e6).toFixed(1)+' MB ('+(pct*100).toFixed(0)+'%)'
+        :'Downloading… '+(received/1e6).toFixed(1)+' MB');
+    }
+    logMsg('Download complete: '+(received/1e6).toFixed(1)+' MB','log-ok');
+    setProgress(1);
+    const buf=new Uint8Array(received); let pos=0;
+    for(const c of chunks){buf.set(c,pos);pos+=c.length;}
+    await openBuf(url.split('/').pop()||url,buf.buffer);
+    setProgress(0);
+  }catch(e){const msg='Fetch error: '+e.message;logMsg(msg,'log-err');setProgress(0);console.error('[h5] openURL error:',e);}
+}
+
+function goTo(idx){if(!hf&&!S.remoteMode)return;idx=Math.max(0,Math.min(idx,nEvents-1));S.evIdx=idx;document.getElementById('ev-input').value=idx;loadEvent(idx);}
+
+// Screenshot
+function takeScreenshot(){
+  renderer.render(scene,camera);
+  const url=renderer.domElement.toDataURL('image/png');
+  const a=document.createElement('a');
+  a.href=url; a.download=`pysupera_evt${S.evIdx}.png`; a.click();
+  setStatus('Screenshot saved: pysupera_evt'+S.evIdx+'.png');
+}
+
+// UI wiring
+document.getElementById('btn-prev').addEventListener('click',()=>goTo(S.evIdx-1));
+document.getElementById('btn-next').addEventListener('click',()=>goTo(S.evIdx+1));
+document.getElementById('ev-input').addEventListener('change',e=>goTo(parseInt(e.target.value)||0));
+document.getElementById('file-input').addEventListener('change',e=>{if(e.target.files[0])openFile(e.target.files[0]);});
+// URL bar
+(()=>{
+  const bar=document.getElementById('url-bar');
+  const inp=document.getElementById('url-inp');
+  const _hide=()=>bar.classList.remove('visible');
+  const _isRemote=()=>document.getElementById('chk-remote-mode').checked;
+  const _submit=()=>{ const u=inp.value.trim(); if(u){_hide(); _isRemote()?openRemote(u):openURL(u);} };
+  document.getElementById('btn-url').addEventListener('click',e=>{
+    const show=!bar.classList.contains('visible');
+    bar.classList.toggle('visible',show);
+    if(show){inp.value='';inp.focus();}
+    e.stopPropagation();
+  });
+  document.getElementById('btn-url-go').addEventListener('click',_submit);
+  document.getElementById('btn-url-cancel').addEventListener('click',_hide);
+  inp.addEventListener('keydown',e=>{if(e.key==='Enter')_submit();if(e.key==='Escape')_hide();});
+  bar.addEventListener('click',e=>e.stopPropagation());
+  document.addEventListener('click',_hide);
+})();
+// File browser – navigates the server's autoindex directory listing
+(()=>{
+  const browser=document.getElementById('file-browser');
+  const backdrop=document.getElementById('fb-backdrop');
+  const listEl=document.getElementById('fb-list');
+  const pathEl=document.getElementById('fb-path');
+  const statusEl=document.getElementById('fb-status');
+  let _base='';
+  const _show=()=>{
+    browser.classList.add('visible');backdrop.classList.add('visible');
+    _base=location.href.replace(/\/[^\/]*(\?.*)?$/,'/');
+    _browse(_base);
+  };
+  const _hide=()=>{browser.classList.remove('visible');backdrop.classList.remove('visible');};
+  async function _browse(url){
+    pathEl.textContent=url;
+    statusEl.textContent='Loading…';
+    listEl.innerHTML='';
+    try{
+      const resp=await fetch(url);
+      if(!resp.ok) throw new Error('HTTP '+resp.status);
+      const html=await resp.text();
+      const doc=new DOMParser().parseFromString(html,'text/html');
+      const links=[...doc.querySelectorAll('a[href]')]
+        .map(a=>({text:a.textContent.trim(),href:a.getAttribute('href')}))
+        .filter(({href})=>href&&!href.startsWith('?')&&!href.startsWith('/')
+          &&!href.startsWith('http')&&!href.startsWith('mailto'));
+      const items=[];
+      for(const {text,href} of links){
+        const absUrl=new URL(href,url).href;
+        if(!absUrl.startsWith(location.origin)) continue;
+        if(href==='../'||href==='...'){
+          if(url!==_base&&absUrl.startsWith(_base))
+            items.unshift({type:'up',label:'\u2191 ..',url:absUrl});
+          continue;
+        }
+        if(href.endsWith('/')) items.push({type:'dir',label:'\u25b8 '+(text||href),url:absUrl});
+        else if(/\.(h5|hdf5)$/i.test(href)) items.push({type:'h5',label:'\u25c8 '+(text||href),url:absUrl});
+      }
+      const nH5=items.filter(i=>i.type==='h5').length;
+      statusEl.textContent=nH5?nH5+' HDF5 file(s)':items.length?'no .h5 files here':'empty / no listing';
+      if(!items.length){listEl.innerHTML='<div style="padding:10px 14px;color:var(--text2);font:11px var(--font)">Nothing to show. Make sure the server has directory listing (autoindex) enabled.</div>';return;}
+      for(const item of items){
+        const div=document.createElement('div');
+        div.className='fb-item fb-'+item.type;
+        div.textContent=item.label;
+        div.title=item.url;
+        if(item.type==='dir'||item.type==='up') div.addEventListener('click',e=>{e.stopPropagation();_browse(item.url);});
+        else div.addEventListener('click',e=>{e.stopPropagation();_hide();
+          const remoteMode=document.getElementById('chk-fb-remote')?.checked;
+          remoteMode?openRemote(item.url):openURL(item.url);});
+        listEl.appendChild(div);
+      }
+    }catch(e){
+      statusEl.textContent='Error: '+e.message;
+      listEl.innerHTML='<div style="padding:10px 14px;color:#c83020;font:11px var(--font)">Could not load listing. Check server CORS/autoindex settings.</div>';
+    }
+  }
+  document.getElementById('btn-browse').addEventListener('click',e=>{
+    browser.classList.contains('visible')?_hide():_show();
+    e.stopPropagation();
+  });
+  document.getElementById('fb-close-btn').addEventListener('click',_hide);
+  backdrop.addEventListener('click',_hide);
+})();
+// Auto-load from URL parameter: vis_tactical.html?file=path/to/data.h5
+(()=>{const p=new URLSearchParams(location.search).get('file');if(p)openURL(p);})();
+// log-scale row only visible when color-by = Energy
+document.getElementById('log-scale-row').style.display='none';
+document.getElementById('chk-nle').addEventListener('change',e=>{S.showNLE=e.target.checked;if(objNLE)objNLE.pts.visible=S.showNLE;});
+document.getElementById('chk-le').addEventListener('change',e=>{S.showLE=e.target.checked;if(objLE)objLE.pts.visible=S.showLE;});
+document.getElementById('sl-size').addEventListener('input',e=>{S.size=parseFloat(e.target.value);document.getElementById('lbl-size').textContent=S.size;applyUniforms();});
+document.getElementById('sl-opacity').addEventListener('input',e=>{S.opacity=parseFloat(e.target.value);document.getElementById('lbl-opacity').textContent=S.opacity.toFixed(2);applyUniforms();});
+document.getElementById('sel-col').addEventListener('change',e=>{
+  S.col=parseInt(e.target.value);
+  const isEnergy=S.col===4;
+  const isPdg=S.col===9;
+  document.getElementById('log-scale-row').style.display=isEnergy?'':'none';
+  if(!isEnergy&&S.logScale){S.logScale=false;document.getElementById('chk-log-scale').checked=false;}
+  const rngRow=document.getElementById('rng-min').closest('.prow');
+  if(rngRow) rngRow.style.opacity=isPdg?'0.35':'1';
+  applyColorRange();
+});
+document.getElementById('chk-log-scale').addEventListener('change',e=>{
+  S.logScale=e.target.checked;
+  applyColorRange();
+  buildEnergyHistogram(); // re-histogram with potentially new scale context
+});
+document.getElementById('sel-cmap').addEventListener('change',e=>{S.cmap=parseInt(e.target.value);applyUniforms();});
+document.getElementById('chk-auto').addEventListener('change',e=>{S.autoRange=e.target.checked;document.getElementById('rng-min').disabled=S.autoRange;document.getElementById('rng-max').disabled=S.autoRange;if(S.autoRange)applyColorRange();else applyUniforms();});
+document.getElementById('rng-min').addEventListener('change',()=>{if(!S.autoRange)applyUniforms();});
+document.getElementById('rng-max').addEventListener('change',()=>{if(!S.autoRange)applyUniforms();});
+// Energy threshold histogram interaction
+{
+  const cv=document.getElementById('hist-canvas');
+  let _dragging=false;
+  const _apply=px=>{const e=_histPxToEnergy(px);_setEnergyThresh(e);drawHistogram();};
+  cv.addEventListener('mousedown',e=>{_dragging=true;_apply(e.offsetX);});
+  cv.addEventListener('mousemove',e=>{if(_dragging)_apply(e.offsetX);});
+  cv.addEventListener('mouseup',()=>{_dragging=false;});
+  cv.addEventListener('mouseleave',()=>{_dragging=false;});
+  // Touch support
+  cv.addEventListener('touchstart',e=>{e.preventDefault();_dragging=true;_apply(e.touches[0].clientX-cv.getBoundingClientRect().left);},{passive:false});
+  cv.addEventListener('touchmove',e=>{e.preventDefault();if(_dragging)_apply(e.touches[0].clientX-cv.getBoundingClientRect().left);},{passive:false});
+  cv.addEventListener('touchend',()=>{_dragging=false;});
+}
+document.getElementById('btn-ethr-reset').addEventListener('click',()=>{
+  _setEnergyThresh(0);
+  drawHistogram();
+});
+document.getElementById('btn-center').addEventListener('click',centerCamera);
+document.getElementById('btn-rot').addEventListener('click',toggleRotation);
+document.getElementById('sl-rot-speed').addEventListener('input',e=>{
+  S.rot.secPerRev=parseInt(e.target.value);
+  document.getElementById('lbl-rot-speed').textContent=S.rot.secPerRev+' s/rev';
+  controls.autoRotateSpeed=60/S.rot.secPerRev;
+});
+document.getElementById('btn-axes').addEventListener('click',()=>{axesHelper.visible=!axesHelper.visible;});
+
+// Bounding box controls
+document.getElementById('chk-bbox').addEventListener('change',e=>{
+  S.bbox.visible=e.target.checked; _buildBBoxHelper();
+});
+document.getElementById('btn-bbox-apply').addEventListener('click',()=>{
+  S.bbox.xMin=parseFloat(document.getElementById('bbox-xmin').value)||0;
+  S.bbox.xMax=parseFloat(document.getElementById('bbox-xmax').value)||0;
+  S.bbox.yMin=parseFloat(document.getElementById('bbox-ymin').value)||0;
+  S.bbox.yMax=parseFloat(document.getElementById('bbox-ymax').value)||0;
+  S.bbox.zMin=parseFloat(document.getElementById('bbox-zmin').value)||0;
+  S.bbox.zMax=parseFloat(document.getElementById('bbox-zmax').value)||0;
+  _buildBBoxHelper(); _updateDriftUniforms();
+});
+document.getElementById('btn-bbox-reset').addEventListener('click',()=>{
+  const dflt={xMin:-2160,xMax:2160,yMin:-2160,yMax:2160,zMin:-2160,zMax:2160};
+  Object.assign(S.bbox,dflt);
+  for(const k of['xmin','xmax','ymin','ymax','zmin','zmax']){
+    document.getElementById('bbox-'+k).value=k.endsWith('min')?-2160:2160;
+  }
+  _buildBBoxHelper(); _updateDriftUniforms();
+});
+// X-drift controls
+document.getElementById('chk-drift').addEventListener('change',e=>{
+  S.anim.drift.on=e.target.checked;
+  document.getElementById('drift-speed-row').style.display=S.anim.drift.on?'':'none';
+  _updateDriftUniforms();
+});
+document.getElementById('inp-drift-speed').addEventListener('change',e=>{
+  S.anim.drift.speed=Math.max(0,parseFloat(e.target.value)||0);
+  _updateDriftUniforms();
+});
+document.getElementById('btn-shot').addEventListener('click',takeScreenshot);
+document.getElementById('btn-play').addEventListener('click',toggleAnim);
+document.getElementById('btn-anim-reset').addEventListener('click',resetAnim);
+document.getElementById('btn-scene-reset').addEventListener('click',resetAnim);
+document.getElementById('sel-anim-mode').addEventListener('change',e=>{
+  S.anim.normMode=parseInt(e.target.value);
+  const isNorm=S.anim.normMode===1;
+  document.getElementById('anim-spread-row').style.display=isNorm?'':'none';
+  if(S.anim.playing){resetAnim();startAnim();}
+});
+document.getElementById('sl-anim-spread').addEventListener('input',e=>{
+  const pct=parseInt(e.target.value);
+  document.getElementById('lbl-anim-spread').textContent=pct+'%';
+  S.anim.spread=pct/100;
+  rebuildAnimT(S.anim.spread);
+});
+document.getElementById('sl-anim-dur').addEventListener('input',e=>{
+  S.anim.dur=parseInt(e.target.value);
+  document.getElementById('lbl-anim-dur').textContent=S.anim.dur+' s';
+  // Re-anchor t0wall so that current position doesn't jump on duration change
+  if(S.anim.playing){
+    const old=S.anim.dur; // already updated above — recompute frac
+    const elapsed=(performance.now()-S.anim.t0wall)/1000;
+    const frac=Math.min(elapsed/old,1);
+    S.anim.t0wall=performance.now()-frac*S.anim.dur*1000;
+  }
+});
+document.getElementById('btn-debug').addEventListener('click',()=>{
+  const lines=[`cam: ${camera.position.toArray().map(v=>v.toFixed(0))}`,`NLE:${objNLE?objNLE.n.toLocaleString():'—'}  LE:${objLE?objLE.n.toLocaleString():'—'}`];
+  console.log('=== vis debug ===\n'+lines.join('\n'));setStatus(lines.join(' | '));
+});
+document.getElementById('btn-inter').addEventListener('click',toggleInterPanel);
+document.getElementById('ip-close-btn').addEventListener('click',toggleInterPanel);
+document.getElementById('graph-close').addEventListener('click',e=>{
+  e.stopPropagation();
+  document.getElementById('graph-overlay').classList.remove('visible');
+  S.instLocked=-1;_hideLockedBar();
+  _setInstHighlight(-1);
+  // Restore interaction detail in case it was displaced (important on mobile)
+  if(S.highlightLocked&&S._lockedDetHTML){
+    const det=document.getElementById('ip-detail');
+    if(det){det.innerHTML=S._lockedDetHTML;if(S._lockedInter)_wireHistSection(S._lockedInter.id);}
+  }
+});
+document.getElementById('ip-zoom-btn').addEventListener('click',()=>{
+  S.adaptiveZoom=!S.adaptiveZoom;
+  const btn=document.getElementById('ip-zoom-btn');
+  btn.classList.toggle('active',S.adaptiveZoom);
+  if(!S.adaptiveZoom) _restoreCam();
+});
+
+// Collapse topbar
+document.getElementById('btn-collapse').addEventListener('click',()=>{
+  document.getElementById('topbar').classList.toggle('collapsed');
+});
+
+// Help overlay
+const helpEl=document.getElementById('help-overlay');
+document.getElementById('btn-help').addEventListener('click',()=>helpEl.classList.toggle('open'));
+helpEl.addEventListener('click',()=>helpEl.classList.remove('open'));
+
+// Panel toggle
+document.querySelectorAll('[data-toggle]').forEach(btn=>{
+  btn.addEventListener('click',e=>{
+    const id=btn.dataset.toggle, panel=document.getElementById(id);
+    const wasOpen=panel.classList.contains('open');
+    document.querySelectorAll('.panel').forEach(p=>p.classList.remove('open'));
+    document.querySelectorAll('[data-toggle]').forEach(b=>b.classList.remove('active'));
+    if(!wasOpen){panel.classList.add('open');btn.classList.add('active');
+      // Redraw histogram when energy panel opens (canvas needs visible width)
+      if(id==='panel-energy') requestAnimationFrame(drawHistogram);
+    }
+    e.stopPropagation();
+  });
+});
+// Clicks inside a panel must not bubble to the document close handler
+document.querySelectorAll('.panel').forEach(p=>p.addEventListener('click',e=>e.stopPropagation()));
+document.addEventListener('click',()=>{
+  document.querySelectorAll('.panel').forEach(p=>p.classList.remove('open'));
+  document.querySelectorAll('[data-toggle]').forEach(b=>b.classList.remove('active'));
+});
+
+// Log bar collapse toggle
+document.getElementById('log-header').addEventListener('click',()=>{
+  const lb=document.getElementById('log-bar');
+  const collapsed=lb.classList.toggle('collapsed');
+  document.getElementById('log-toggle').innerHTML=collapsed?'&#x25b2;':'&#x25bc;';
+});
+
+// Drag-and-drop
+document.body.addEventListener('dragover',e=>{e.preventDefault();document.body.classList.add('dragover');});
+document.body.addEventListener('dragleave',()=>document.body.classList.remove('dragover'));
+document.body.addEventListener('drop',e=>{e.preventDefault();document.body.classList.remove('dragover');const f=e.dataTransfer.files[0];if(f)openFile(f);});
+
+// Keyboard
+document.addEventListener('keydown',e=>{
+  if(e.target.tagName==='INPUT') return;
+  if(e.key==='ArrowLeft') goTo(S.evIdx-1);
+  if(e.key==='ArrowRight') goTo(S.evIdx+1);
+  if(e.key==='c') centerCamera();
+  if(e.key==='a') axesHelper.visible=!axesHelper.visible;
+  if(e.key==='s') takeScreenshot();
+  if(e.key===' '){e.preventDefault();toggleAnim();}
+  if(e.key==='r') resetAnim();
+  if(e.key==='o') toggleRotation();
+  if(e.key==='i') toggleInterPanel();
+  if(e.key==='g') toggleGraphPanel();
+  if(e.key==='?') helpEl.classList.toggle('open');
+  if(e.key==='Escape'){
+    helpEl.classList.remove('open');
+    document.querySelectorAll('.panel').forEach(p=>p.classList.remove('open'));
+    document.querySelectorAll('[data-toggle]').forEach(b=>b.classList.remove('active'));
+  }
+});
+
+// Resize
+function resize(){
+  const p=document.getElementById('interact-panel');
+  const panelW=(p&&p.style.display==='flex')?p.offsetWidth:0;
+  const w=wrap.clientWidth-panelW, h=wrap.clientHeight;
+  renderer.domElement.style.position='absolute';
+  renderer.domElement.style.left=panelW+'px';
+  renderer.domElement.style.top='0';
+  renderer.setSize(w,h);
+  camera.aspect=w/h;
+  camera.updateProjectionMatrix();
+  // Keep scene-reset button anchored to the canvas area, not the interact panel
+  const srb=document.getElementById('btn-scene-reset');
+  if(srb) srb.style.left=(panelW+10)+'px';
+  const logo=document.getElementById('scene-logo');
+  if(logo) logo.style.left=(panelW+10)+'px';
+  // Track topbar height for mobile graph-overlay positioning
+  const tb=document.getElementById('topbar');
+  const ub=document.getElementById('url-bar');
+  const tbH=(tb?tb.offsetHeight:0)+(ub&&ub.style.display!=='none'?ub.offsetHeight:0);
+  document.documentElement.style.setProperty('--tb-h',tbH+'px');
+}
+new ResizeObserver(resize).observe(wrap); resize();
+
+// FPS + render loop
+let fpsT=performance.now(),fpsN=0;
+(function animate(){
+  requestAnimationFrame(animate);
+  // ─ Time animation step ─
+  if(S.anim.playing){
+    const elapsed=(performance.now()-S.anim.t0wall)/1000;
+    const frac=Math.min(elapsed/S.anim.dur,1);
+    const thresh=S.anim.tMin+frac*(S.anim.tMax-S.anim.tMin);
+    _setAnimThresh(thresh);
+    const bar=document.getElementById('anim-bar');
+    bar.querySelector('.af').style.width=(frac*100)+'%';
+    document.getElementById('anim-tcur').textContent=thresh.toExponential(3);
+    if(frac>=1){
+      S.anim.playing=false; S.anim._pausedFrac=1;
+      document.getElementById('btn-play').textContent='\u25b6 PLAY';
+      document.getElementById('btn-play').classList.remove('playing');
+      setStatus('Animation done — event '+S.evIdx);
+    }
+  }
+  controls.update(); renderer.render(scene,camera);
+  // Adaptive zoom lerp — runs AFTER controls.update() so auto-rotation direction is preserved;
+  // we only adjust the orbit target and radius, not the absolute position.
+  if(S._camLerp){
+    controls.target.lerp(S._camLerp.toTarget,0.09);
+    const dir=camera.position.clone().sub(controls.target);
+    const curDist=dir.length()||1;
+    const newDist=curDist+(S._camLerp.toDist-curDist)*0.09;
+    camera.position.copy(controls.target).addScaledVector(dir.normalize(),newDist);
+    if(Math.abs(newDist-S._camLerp.toDist)<0.5&&controls.target.distanceTo(S._camLerp.toTarget)<0.5){
+      if(S._camLerp.isRestore) S._savedCam=null;  // safe to discard original now
+      S._camLerp=null;
+    }
+  }
+  fpsN++; const now=performance.now();
+  if(now-fpsT>1000){document.getElementById('overlay').textContent=fpsN+' fps';fpsN=0;fpsT=now;}
+  // Coordinate hover via raycasting
+  if(mouseNDC.x>-9){
+    raycaster.setFromCamera(mouseNDC,camera);
+    raycaster.params.Points.threshold=Math.max(0.5,camera.position.distanceTo(controls.target)*0.015);
+    const targets=[];
+    if(objNLE&&objNLE.pts.visible)targets.push(objNLE.pts);
+    if(objLE&&objLE.pts.visible)targets.push(objLE.pts);
+    if(targets.length){
+      const hits=raycaster.intersectObjects(targets);
+      if(hits.length){
+        const hit=hits[0], idx=hit.index;
+        const isLE=objLE&&hit.object===objLE.pts;
+        const geo=hit.object.geometry;
+        const pa=geo.attributes.position.array;
+        const ea=geo.attributes.extra.array;
+        const e2=geo.attributes.extra2.array;
+        const vals=[
+          pa[idx*3],pa[idx*3+1],pa[idx*3+2],   // x y z
+          ea[idx*3],ea[idx*3+1],ea[idx*3+2],   // t energy int_id
+          e2[idx*3],e2[idx*3+1],e2[idx*3+2],   // root_id frag_id inst_id
+        ];
+        const KEYS=['X','Y','Z','Time','Energy','Int. ID','Root ID','Frag ID','Inst ID'];
+        const fmtV=(v,c)=>{
+          if(c>=5){const iv=Math.round(v);return iv<0?'&mdash;':String(iv);}
+          if(Math.abs(v)>=1e5||(v!==0&&Math.abs(v)<1e-2))return v.toExponential(3);
+          return parseFloat(v.toPrecision(5)).toString();
+        };
+        const rows=vals.map((v,c)=>
+          `<div class="ch-row"><span class="ch-key">${KEYS[c]}</span><span class="ch-val${c===S.col?' ch-active':''}">${fmtV(v,c)}</span></div>`
+        ).join('');
+        // ---- derived info below the divider ----
+        const _iid=Math.round(vals[8]);  // inst_id
+        const _iidInt=Math.round(vals[5]); // interaction_id
+        const _ipts=geo.attributes.instPts?Math.round(geo.attributes.instPts.array[idx]):-1;
+        const _intPts=(S.interactions.find(r=>Math.round(r.id)===_iidInt)||{n:-1}).n;
+        let _pdgStr='—',_parPidStr='—',_parPdgStr='';
+        if(S.instGraph&&_iid>=0){
+          const _nd=S.instGraph.nodes.find(n=>n.idx===_iid);
+          if(_nd){
+            _pdgStr=_nd.pdg?String(_nd.pdg):'—';
+            _parPidStr=_nd.parentPid>=0?String(_nd.parentPid):'—';
+            _parPdgStr=_nd.parentPdg?' (pdg '+_nd.parentPdg+')':'';
+          }
+        }
+        const _xtra=
+          (_iid>=0&&_ipts>0?'<div class="ch-row"><span class="ch-key">Inst pts</span><span class="ch-val">'+_ipts.toLocaleString()+'</span></div>':'')+
+          (_intPts>=0?'<div class="ch-row"><span class="ch-key">Inter pts</span><span class="ch-val">'+_intPts.toLocaleString()+'</span></div>':'')+
+          (_iid<0?'<div class="ch-row"><span class="ch-key">Instance</span><span class="ch-val" style="color:#888;font-style:italic">none (uninstanced)</span></div>':'')+
+          (_iid>=0?'<div class="ch-row"><span class="ch-key">Inst PDG</span><span class="ch-val">'+_pdgStr+'</span></div>':'')+
+          (_iid>=0?'<div class="ch-row"><span class="ch-key">Inst parent</span><span class="ch-val">'+_parPidStr+_parPdgStr+'</span></div>':'');
+        if(S.highlightLocked&&Math.round(S.highlight)!==_iidInt){
+          coordEl.style.display='none';
+          if(S._cloudHoverInstId>=0){S._cloudHoverInstId=-1;_setInstHighlight(-1);}
+        } else {
+          coordEl.style.display='block';
+          coordEl.innerHTML='<div class="ch-hdr">'+(isLE?'&#9632; LE scatter':'&#9633; Non-LE')+' &nbsp; pt&nbsp;'+idx+'</div><div class="ch-div"></div>'+rows+'<div class="ch-div"></div>'+_xtra;
+          // cloud hover → graph node + interaction bubble
+          if(S._cloudHoverInstId!==_iid){S._cloudHoverInstId=_iid;_setInstHighlight(_iid>=0?_iid:-1);}
+          if(S._cloudHoverIntId!==_iidInt&&!S.highlightLocked){
+            S._cloudHoverIntId=_iidInt; _setHighlight(_iidInt);
+            const _b=document.getElementById('ip-bubbles');
+            if(_b) _b.querySelectorAll('.ip-bub').forEach(e=>{const _s=parseFloat(e.dataset.id)===_iidInt;e.classList.toggle('active',_s);e.classList.toggle('dimmed',!_s);});
+            _renderInterDetailById(_iidInt);
+          }
+        }
+      } else {
+        coordEl.style.display='none';
+        if(S._cloudHoverInstId>=0){S._cloudHoverInstId=-1;_setInstHighlight(-1);}
+        if(S._cloudHoverIntId>=0&&!S.highlightLocked){
+          S._cloudHoverIntId=-1; _setHighlight(-1);
+          const _b=document.getElementById('ip-bubbles');
+          if(_b) _b.querySelectorAll('.ip-bub').forEach(e=>e.classList.remove('dimmed','active'));
+          const _det=document.getElementById('ip-detail');
+          if(_det) _det.innerHTML=S.statsDet||'';
+        }
+      }
+    }
+  }
+})();
+</script>
+</body>
+</html>
