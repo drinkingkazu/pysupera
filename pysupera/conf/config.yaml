@@ -176,7 +176,7 @@ particle:
   # Pre-processing: voxelize point clouds onto a regular 3-D grid.
   # Bins each point into a voxel cell, snaps its position to the voxel
   # centre, and merges all points in the same voxel (time=min, energy=sum,
-  # dedx=max).  This is a strict generalisation of merge_duplicates; when
+  # dX=sum).  This is a strict generalisation of merge_duplicates; when
   # voxelize.enabled is true, merge_duplicates is redundant.
   voxelize:
     enabled: true
@@ -191,13 +191,22 @@ particle:
     # When true, skips the separate merge_duplicates preprocessing step.
     # Safe because exact-coordinate duplicates always fall in the same voxel.
     merge_duplicates: true
-    # When true, VoxelizeProcessor stores a CSR mapping (input_ids,
-    # input_energies, voxel_offsets) for every particle in last_diagnostics,
-    # enabling traces from output voxels back to input points.
-    store_mapping: true
+    # Write <output>_voxmap.h5: for every output voxel, which input deposits
+    # were merged into it and with what energy.  Useful for truth studies and
+    # for debugging voxelization, but it carries one row per *input* point
+    # rather than per voxel, so it is the largest artifact pysupera produces --
+    # on a sample 5-event run it was 9.7 MiB against 6.0 MiB of actual output.
+    #
+    # Off by default for that reason.  Nothing is computed when false, not just
+    # not written, so there is no cost to leaving it off.  The file is a cache
+    # of a deterministic computation: re-running with the same config and input
+    # reproduces it exactly, so discarding it loses nothing.
+    store_mapping: false
 
   # Pre-processing: collapse points sharing identical 3-D coordinates.
-  # Aggregation rules: time=min, energy=sum, dedx=max.
+  # Aggregation rules: time=min, dE=sum, dX=sum.  Both processors merge
+  # only within a single particle, so path length adds; dE/dX for a
+  # particle-voxel is then dE / dX (columns 4 / 5), not an aggregate.
   # Runs before defragmentation so min_pc_size counts unique voxels.
   # Redundant when voxelize.enabled is true.
   merge_duplicates: true

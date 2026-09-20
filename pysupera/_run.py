@@ -205,11 +205,9 @@ def main(cfg: DictConfig) -> None:
                     particles = voxelizer.process(particles)
                     _ev_t['voxelize'] = time.perf_counter() - _t
                     profile['voxelize'] += _ev_t['voxelize']
-                    if _write_voxmap:
-                        _t = time.perf_counter()
-                        vox_writer.append_event(voxelizer.last_diagnostics)
-                        _ev_t['write_voxmap'] = time.perf_counter() - _t
-                        profile['write_voxmap'] += _ev_t['write_voxmap']
+                    # The voxmap is written further down, after preprocessing
+                    # and id renumbering, so it describes the particle list
+                    # that is actually stored.
 
                 if preprocessor is not None:
                     _t = time.perf_counter()
@@ -221,6 +219,47 @@ def main(cfg: DictConfig) -> None:
                 # Must run before ParticlePartitioner so the genealogy tree is
                 # consistent for all conditions and merge_em_showers.
                 resolve_orphans(particles, verbose=cfg.verbose)
+
+                # ── Renumber ids densely ───────────────────────────────────
+                # The reader hands out id == arange(n), but defragmentation
+                # then spawns particles with fresh ids and drops others, so by
+                # here the ids have gaps and `id` is no longer a row index.
+                # Renumber to 0..n-1 in list order and remap the genealogy.
+                # Runs after resolve_orphans, so every parent_id / root_id
+                # already refers to a particle that is present.
+                _idmap = {int(_p.id): _k for _k, _p in enumerate(particles)}
+                for _k, _p in enumerate(particles):
+                    _p.parent_id = _idmap.get(int(_p.parent_id), _k)
+                    _p.root_id   = _idmap.get(int(_p.root_id),   _k)
+                for _k, _p in enumerate(particles):
+                    _p.id = _k
+
+                # ── Voxel mapping ──────────────────────────────────────────
+                # Built from the final particle list, so split particles carry
+                # their own share of the mapping and dropped ones contribute
+                # nothing.  Records are rebuilt here rather than reused from
+                # voxelizer.last_diagnostics, which still describes the
+                # pre-defragmentation list.
+                if _write_voxmap:
+                    _t = time.perf_counter()
+                    from pysupera.preproc import VoxelizeRecord
+                    _recs = []
+                    for _p in particles:
+                        _vm = getattr(_p, 'voxmap', None)
+                        if _vm is None:
+                            continue
+                        _off, _ids, _en = _vm
+                        _recs.append(VoxelizeRecord(
+                            particle_id    = int(_p.id),
+                            n_before       = int(len(_ids)),
+                            n_after        = int(len(_off) - 1),
+                            input_ids      = _ids,
+                            input_energies = _en,
+                            voxel_offsets  = _off,
+                        ))
+                    vox_writer.append_event(_recs)
+                    _ev_t['write_voxmap'] = time.perf_counter() - _t
+                    profile['write_voxmap'] += _ev_t['write_voxmap']
 
                 # ── Interaction-ID completeness ─────────────────────────────
                 # Runs after resolve_orphans so the parent chains reported in
