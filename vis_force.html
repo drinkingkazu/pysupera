@@ -3194,6 +3194,8 @@ document.addEventListener('keydown',e=>{
   if(e.key==='o') toggleRotation();
   if(e.key==='i') toggleInterPanel();
   if(e.key==='g') toggleGraphPanel();
+  // The DBG button's tooltip advertises [D]; wire it so the key works.
+  if(e.key==='d') document.getElementById('btn-debug').click();
   if(e.key==='?') helpEl.classList.toggle('open');
   if(e.key==='Escape'){
     helpEl.classList.remove('open');
