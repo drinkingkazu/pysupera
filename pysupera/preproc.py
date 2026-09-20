@@ -198,8 +198,15 @@ def _split_fragments(
             large_mask |= frag_mask
         else:
             frag_pc = pc[frag_mask]
+            _vm = subset_voxmap(getattr(p, 'voxmap', None), frag_mask)
             new_p = Particle(
                 id               = next_id,
+                # A split piece is part of the same Geant4 particle, so it
+                # inherits the provenance rather than minting a new one.
+                # Without this the constructor defaults geant4_id to the fresh
+                # pysupera id, fabricating a track ID that exists in no input
+                # file and hiding the fact that the pieces share an origin.
+                geant4_id        = getattr(p, "geant4_id", p.id),
                 parent_id        = p.id,
                 root_id          = p.root_id,
                 pdg              = p.pdg,
@@ -209,14 +216,19 @@ def _split_fragments(
                 point_cloud      = frag_pc,
             )
             new_p.sem_type = SemanticType.kLEScatter
+            new_p.voxmap = _vm
             spawned.append(new_p)
             next_id += 1
 
     if large_mask.any():
+        _kept_vm = subset_voxmap(getattr(p, 'voxmap', None), large_mask)
         p.point_cloud = pc[large_mask]
+        p.voxmap = _kept_vm
         return p, spawned, next_id
-    else:
-        return None, spawned, next_id
+    # Every fragment was small, so *p* is dropped.  References to it are
+    # repaired by the caller (see the dropped-particle remap in
+    # DefragmentBase.process).
+    return None, spawned, next_id
 
 
 # ============================================================================
@@ -477,6 +489,34 @@ class DefragmentBase(ABC):
 
         result = [p for p in result_slots if p is not None]
 
+        # ---------------------------------------------------------------
+        # Repair references to particles this pass removed
+        # ---------------------------------------------------------------
+        # A particle whose every fragment was small is dropped from the event.
+        # Anything still pointing at it -- its real children, and the fragments
+        # split off from it -- is left with a dangling parent_id.
+        # resolve_orphans later rewrites such a reference to the particle's own
+        # id while leaving root_id pointing at the original ancestor, producing
+        # a particle that is its own parent yet claims a foreign root.  Redirect
+        # to the dropped particle's parent instead, following chains of
+        # consecutive drops, so the genealogy stays walkable.
+        dropped = {int(p.id): int(p.parent_id)
+                   for idx, p, _ in needs_cc if result_slots[idx] is None}
+
+        if dropped:
+            def _survivor(pid: int) -> int:
+                seen: set = set()
+                while pid in dropped and pid not in seen:
+                    seen.add(pid)
+                    pid = dropped[pid]
+                return pid
+
+            for q in result + spawned:
+                if int(q.parent_id) in dropped:
+                    q.parent_id = _survivor(int(q.parent_id))
+                if int(q.root_id) in dropped:
+                    q.root_id = _survivor(int(q.root_id))
+
         cc_sizes = [len(xyz) for _, _, xyz in needs_cc]
         self.last_stats = {
             'n_particles'   : len(particles),
@@ -520,12 +560,42 @@ class DefragmentBase(ABC):
 #
 #   time   (col 3) — minimum: earliest hit time survives
 #   energy (col 4) — sum:     total deposited energy
-#   dx     (col 5) — sum: additional scalar feature
+#   dx     (col 5) — sum: path length.  Merging is always within one
+#                    particle, so path lengths add; dE/dX for the merged
+#                    voxel is col 4 / col 5.  Summing dX across particles
+#                    would be meaningless, and never happens here.
 _MERGE_RULES: list = [
     (PointFeature.time,   np.inf,  np.minimum),
     (PointFeature.energy, 0.0,     np.add),
     (PointFeature.dx,    0.0,      np.add),
 ]
+
+
+def subset_voxmap(voxmap, mask):
+    """
+    Restrict a particle's voxel mapping to a subset of its point-cloud rows.
+
+    *voxmap* is the ``(voxel_offsets, input_ids, input_energies)`` triple
+    attached by :class:`VoxelizeProcessor`, whose ``voxel_offsets`` is a CSR
+    fencepost over the particle's voxels in point-cloud row order.  *mask* is
+    the boolean row selector used to split the cloud, so the same mask selects
+    the corresponding voxels.
+
+    Returns ``None`` when *voxmap* is ``None`` (mapping not being tracked).
+    """
+    if voxmap is None:
+        return None
+    off, ids, en = voxmap
+    sel = np.flatnonzero(mask)
+    if len(sel) == 0:
+        return (np.zeros(1, dtype=np.int64),
+                ids[:0].copy(), en[:0].copy())
+    counts = (off[sel + 1] - off[sel]).astype(np.int64)
+    new_off = np.zeros(len(sel) + 1, dtype=np.int64)
+    np.cumsum(counts, out=new_off[1:])
+    take = np.concatenate([np.arange(off[i], off[i + 1]) for i in sel]) \
+        if len(sel) else np.zeros(0, dtype=np.int64)
+    return new_off, ids[take].copy(), en[take].copy()
 
 
 def _merge_point_cloud(pc: np.ndarray) -> np.ndarray:
@@ -534,7 +604,7 @@ def _merge_point_cloud(pc: np.ndarray) -> np.ndarray:
 
     Coordinates (columns 0–2) are used as the grouping key.  Feature
     columns beyond index 2 are aggregated according to ``_MERGE_RULES``:
-    time → min, energy → sum, dx → sum.  Any extra columns beyond
+    time → min, dE → sum, dX → sum.  Any extra columns beyond
     ``PointFeature.dx`` are left at zero.
 
     Parameters
@@ -584,7 +654,7 @@ class MergeDuplicatesProcessor:
     ============  ======================================================
     time (3)      minimum — the earliest hit time is retained
     energy (4)    sum — total deposited energy
-    dx   (5)      sum — additional scalar feature
+    dx   (5)      sum — path length within this particle's voxel
     any extras    zero — placeholder; extend ``_MERGE_RULES`` to change
     ============  ======================================================
 
@@ -805,7 +875,7 @@ def _voxelize_point_cloud(
         New array where each row represents one non-empty voxel.  The
         x, y, z columns hold the voxel-centre coordinates; remaining
         feature columns are aggregated by the same rules as
-        :func:`_merge_point_cloud` (time=min, energy=sum, dx=sum).
+        :func:`_merge_point_cloud` (time=min, dE=sum, dX=sum).
         Returns the original array unchanged when every voxel already
         contains exactly one point.
     """
@@ -1096,6 +1166,21 @@ class VoxelizeProcessor:
                     p_en     = flat_en[inp_s:inp_e].copy()
                 else:
                     p_off = p_ids = p_en = None
+
+                # Attach the mapping to the particle, not just to the
+                # diagnostics list.  Defragmentation runs after this stage and
+                # splits or drops particles; a mapping held on the side would
+                # still describe the pre-split list, which is how the voxmap
+                # came to reference 25 particles that no longer exist and to
+                # omit the 154 that defragmentation created.  Carried on the
+                # particle, it is subset by _split_fragments and discarded with
+                # a dropped particle automatically.
+                #
+                # voxel_offsets is a CSR over THIS particle's voxels, in the
+                # same order as its point-cloud rows, which is what lets a
+                # split reuse the very mask applied to the cloud.
+                if self.store_mapping:
+                    p.voxmap = (p_off, p_ids, p_en)
 
                 rec = VoxelizeRecord(
                     particle_id    = p.id,

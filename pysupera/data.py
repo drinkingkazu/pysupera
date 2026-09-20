@@ -194,6 +194,12 @@ class Particle:
         for full descriptions.
         """
         # --- required fields -----------------------------------------------
+        #: Voxelization mapping, ``(voxel_offsets, input_ids, input_energies)``
+        #: or ``None`` when ``particle.voxelize.store_mapping`` is off.  Set by
+        #: VoxelizeProcessor and carried on the particle so that later stages
+        #: which split or drop particles keep it consistent.
+        self.voxmap = None
+
         self.id         = id
         # Geant4 provenance: the original track ID this particle came from.
         # Defaults to `id` so a caller that has no separate track ID (tests,
