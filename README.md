@@ -26,15 +26,21 @@ A Python library for grouping simulated LArTPC particles into physics partitions
    - [Step 2 — Applying Conditions](#step-2--applying-conditions)
    - [Step 3 — Generating Partitions](#step-3--generating-partitions)
    - [Step 4 — Output](#step-4--output)
-6. [CLI Usage](#cli-usage)
-7. [Compute Backends](#compute-backends)
-8. [Algorithms](#algorithms)
+6. [Output File Format](#output-file-format)
+   - [ID conventions](#id-conventions)
+   - [The three particle levels](#the-three-particle-levels)
+   - [Point clouds](#point-clouds)
+   - [Event indexing](#event-indexing)
+   - [Expert and debugging output](#expert-and-debugging-output)
+7. [CLI Usage](#cli-usage)
+8. [Compute Backends](#compute-backends)
+9. [Algorithms](#algorithms)
    - [Partition-level Incremental Algorithm](#partition-level-incremental-algorithm)
    - [Proximity Check](#proximity-check)
    - [Condition Pipeline](#condition-pipeline)
-9. [Conditions Reference](#conditions-reference)
-10. [Diagnostics](#diagnostics)
-11. [Assumptions](#assumptions)
+10. [Conditions Reference](#conditions-reference)
+11. [Diagnostics](#diagnostics)
+12. [Assumptions](#assumptions)
 
 ---
 
@@ -183,9 +189,10 @@ These attributes must always be supplied at construction time and are guaranteed
 
 | Attribute | Type | Description |
 |---|---|---|
-| `id` | `int` | Unique particle ID within an event (Geant4 track ID) |
-| `parent_id` | `int` | Direct parent particle ID; equals `id` for primary particles |
-| `root_id` | `int` | ID of the primary ancestor at the root of the shower/track genealogy |
+| `id` | `int` | Particle index within an event, assigned by the reader: `0 … n-1`, usable as a direct row index. **Not** the Geant4 track ID |
+| `geant4_id` | `int` | Original Geant4 track ID, kept for provenance and for joining back to the input |
+| `parent_id` | `int` | Direct parent's particle index; equals `id` for primary particles |
+| `root_id` | `int` | Particle index of the primary ancestor at the root of the shower/track genealogy |
 | `pdg` | `int` | PDG Monte Carlo particle code |
 | `parent_pdg` | `int` | PDG code of the direct parent particle |
 | `process_type` | `InteractionType` | Physics process that created this particle; derived from the raw int stored in `_process_type` |
@@ -386,6 +393,285 @@ with open_writer("output.h5") as writer:
 with read_events("output.h5") as store:
     for particles in store.iter_events():
         ...
+```
+
+---
+
+## Output File Format
+
+`run_pysupera` writes a single HDF5 file (plus an optional voxmap companion).
+This section describes format **2.3.0**, recorded in the scalar dataset
+`format_version`.  No HDF5 attributes are used anywhere — everything is a
+dataset.
+
+### ID conventions
+
+Two distinct integer spaces appear in the output, and conflating them is the
+single easiest mistake to make when reading these files.
+
+| Space | Fields | Meaning |
+|---|---|---|
+| **Particle index** | `id`, `parent_id`, `root_id`, `*_members/flat` | Position of a particle within its event's particle list |
+| **Level row index** | `parent_frag_id`, `parent_inst_id` | Row within *that event's slice* of the fragment / instance table |
+
+Plus one provenance field that is **not** an index:
+
+| Field | Meaning |
+|---|---|
+| `geant4_id` | The original Geant4 track ID, carried through unchanged |
+
+Four rules follow from this:
+
+1. **`id` is assigned by pysupera, not by Geant4.**  It is `0, 1, … n-1` over
+   the event's particles, so it can be used as a direct row index.  Geant4
+   track IDs are *not* guaranteed contiguous — an upstream stage may drop
+   particles before pysupera ever sees them — which is why they cannot serve
+   as indices and are kept separately in `geant4_id`.  Join back to the
+   EDepSim input on `geant4_id`, never on `id`.
+
+   The density is guaranteed at write time, not merely at read time:
+   defragmentation splits particles (minting new ids) and drops others, so ids
+   are renumbered once preprocessing has finished.  An id observed inside a
+   Python session mid-pipeline is therefore not necessarily the id written to
+   the file.
+
+2. **IDs restart at 0 in every event.**  To address the concatenated tables you
+   must add the event's base offset:
+
+   ```python
+   off = f['events/offsets']
+   row        = off[ev] + p_id                            # into particles/*
+   parent_row = off[ev] + f['particles/parent_id'][row]
+   ```
+
+   Note the base is always `events/offsets` — the *particle* fencepost — even
+   when reading `particle_instances`, because `id` / `parent_id` / `root_id`
+   and the member lists all index particles.  Only `parent_frag_id` and
+   `parent_inst_id` are relative to `frag_events/offsets` and
+   `inst_events/offsets` respectively.
+
+3. **A primary is its own parent.**  `parent_id == id` marks a primary, and
+   `root_id == id` likewise; every genealogy walk terminates on that
+   condition.  The same convention applies to `parent_inst_id`, so an
+   instance that is its own parent is a primary rather than a broken link.
+
+4. **`geant4_id` is not unique when defragmentation splits a particle.**  A
+   particle whose point cloud falls into disconnected pieces becomes several
+   pysupera particles, and they all inherit the track ID they came from — that
+   is the point of the field.  `id` distinguishes them; `geant4_id` records
+   their common origin.  A join on `geant4_id` is therefore one-to-many in
+   general.  On a sample event, 129 of 13,589 particles shared a track ID with
+   at least one other.
+
+`interaction_id` is a third thing again: an index into the *input* file's
+vertex list, identifying which interaction a particle belongs to.
+
+### Top level
+
+| Dataset | Type | Meaning |
+|---|---|---|
+| `format_version` | scalar string | e.g. `b'2.2.0'` |
+| `n_events` | scalar int64 | number of events in the file |
+
+### The three particle levels
+
+The same schema appears three times, one per processing stage:
+
+| Group | Contents | Written when | Audience |
+|---|---|---|---|
+| `particle_instances/` | Level 2 — representatives after EM-shower merging | **always** | everyone |
+| `particles/` | Level 0 — every input particle | `output_compact=false` | everyone |
+| `particle_fragments/` | Level 1 — step-1 partition representatives | `write_fragments=true` | expert — see [below](#expert-and-debugging-output) |
+
+A level that is not written still exists as a group with **zero rows**, and its
+event offsets still advance, so the file stays internally consistent.  Under the
+defaults only the instance level carries data: that is the level most analyses
+want, since it is where one physical object — a shower, a track — corresponds to
+one row.
+
+Fields in each group:
+
+| Field | dtype | Space | Meaning |
+|---|---|---|---|
+| `id` | int32 | particle index | This particle (for a representative: the particle representing the group) |
+| `geant4_id` | int32 | — | Original Geant4 track ID |
+| `parent_id` | int32 | particle index | Direct parent; equals `id` for a primary |
+| `root_id` | int32 | particle index | Primary ancestor |
+| `pdg`, `parent_pdg` | int32 | — | PDG codes |
+| `interaction_id` | int32 | vertex index | Which interaction this particle came from |
+| `interaction_type` | int32 | — | `InteractionType` enum |
+| `sem_type` | int8 | — | `SemanticType` enum — **per level**, see below |
+| `parent_frag_id` | int32 | fragment row | Fragment containing this particle's parent; `-1` when unavailable |
+| `parent_inst_id` | int32 | instance row | Instance containing this particle's parent |
+| `pc_offsets` | int64, n+1 | — | Fencepost into `<group>_points/flat` |
+| `member_offsets` | int64, n+1 | — | Fencepost into `<group>_members/flat` |
+
+`sem_type` is the one field that genuinely differs between levels: merging
+reclassifies particles, so a particle can carry up to three semantic types —
+its own, its fragment's, and its instance's.  Every other scalar field is
+identical to the level-0 row for the same particle.
+
+Enum values:
+
+```
+SemanticType    : kShower 1, kTrack 2, kDelta 3, kMichel 4, kLEScatter 5, kUnknown 6
+InteractionType : kTrack 1, kNeutron 2, kNucleus 3, kPhoton 4, kPrimary 5,
+                  kCompton 6, kDelta 7, kConversion 8, kIonization 9,
+                  kPhotoElectron 10, kDecay 11, kOtherShower 12, kInvalidProcess 13
+```
+
+### Membership
+
+`<group>_members/flat` lists, for each representative, the **particle indices**
+of everything merged into it, sliced by `member_offsets`:
+
+```python
+members = f['particle_instances_members/flat']
+offs    = f['particle_instances/member_offsets']
+inst_k  = members[offs[k] : offs[k+1]]      # particle indices in instance k
+```
+
+A representative always appears in its own member list.  When every instance is
+written the member lists partition the event's particles exactly — each
+particle appears once and only once.  Under the default
+`instance_output=traceable` some particles are not covered, because instances
+that nothing visible depends on are dropped; all such particles have empty point
+clouds, so no point data is lost.
+
+### Point clouds
+
+**Per representative** — `points/flat`, `particle_fragments_points/flat`,
+`particle_instances_points/flat`, shape `(N, 6)` float32:
+
+```
+0:x  1:y  2:z  3:time  4:dE  5:dX
+```
+
+Both merging stages (`MergeDuplicatesProcessor`, `VoxelizeProcessor`) operate
+**within a single particle**, so for one particle-voxel `dE` and `dX` both sum
+and
+
+```
+dE/dX = column 4 / column 5
+```
+
+is exact.  Guard against `dX == 0`: EDepSim writes zero-length steps, which
+account for a small fraction of voxels.  Summing `dX` *across* particles would
+be meaningless, and never happens — which is why the event-level cloud below
+carries `dE` only.
+
+`PointFeature` defines a seventh column in memory (per-point `id`=6); it is
+**truncated on write** and is not in the file.
+
+A representative's cloud is the exact union of its members' clouds — verified to
+the point, with no duplication or loss — so the same points appear once per
+written level.
+
+**Event-level union** — `non_le_cloud/flat` and `le_scatter_cloud/flat`, shape
+`(N, 9)` float32:
+
+```
+0:x  1:y  2:z  3:time  4:energy  5:interaction_id  6:root_id  7:frag_id  8:inst_id
+```
+
+These are *per-point* labels, replicated across every point of a given
+particle.  Columns 7–8 are level row indices, 6 is a particle index, and 5 a
+vertex index.  `non_le_cloud` excludes `kLEScatter` particles and
+`le_scatter_cloud` contains only them — a partition, not a superset.
+
+When voxelization is on, the event clouds are re-voxelized as a union, so
+points that different particles placed in the same voxel are merged.  Their row
+count is therefore **lower** than the per-representative totals even though the
+deposited energy agrees.  Controlled by `write_event_clouds`.
+
+### Event indexing
+
+Everything is concatenated across events with CSR fencepost arrays of length
+`n_events + 1`; event *i* occupies rows `offsets[i] : offsets[i+1]`.
+
+| Fencepost | Slices |
+|---|---|
+| `events/offsets` | `particles/*` |
+| `frag_events/offsets` | `particle_fragments/*` |
+| `inst_events/offsets` | `particle_instances/*` |
+| `non_le_cloud/offsets`, `le_scatter_cloud/offsets` | the 9-column clouds |
+
+Point and member arrays nest two levels deep: first the event fencepost to get
+the level's rows, then `pc_offsets` / `member_offsets` within those rows.
+
+### Expert and debugging output
+
+Everything below is **off by default**.  It exists to debug pysupera itself or
+to study how the grouping was arrived at, not to be consumed by analysis.  All
+of it is regenerable: re-running with the same config and input reproduces it
+exactly, so none of it is worth archiving.
+
+#### The fragment level — `write_fragments=true`
+
+Step-1 partition representatives, before EM-shower merging groups them into
+instances.  Useful for seeing *which* merge step produced a grouping: a
+particle's row carries both `parent_frag_id` and `parent_inst_id`, so comparing
+a fragment's membership against its instance's shows exactly what step 2 added.
+
+Its point payload is a second copy of the points the instance level already
+stores, so enabling it costs roughly 20% of the file.  When it is off, instance
+`parent_frag_id` is `-1` rather than pointing into a table that was not written.
+
+Note the name: a `particle_fragment` is a group of *merged* particles.  This is
+unrelated to *defragmentation*, a preprocessing step that **splits** one
+particle's disconnected point cloud into several particles.  The two move the
+particle count in opposite directions.
+
+#### The voxel mapping — `particle.voxelize.store_mapping=true`
+
+Writes `<output>_voxmap.h5`: for every output voxel, which input deposits were
+merged into it and with what energy.  Voxelization is lossy — many EDepSim steps
+collapse into one voxel and only the summed `dE` survives — and this records
+what went in.  Two nested CSR levels:
+
+```
+particles/id, particles/vox_offsets   ->  a particle's voxels
+voxels/input_offsets                  ->  a voxel's input points
+flat/input_ids, flat/input_energies   ->  original point index + its energy
+```
+
+To read one voxel's provenance:
+
+```python
+vs, ve = vox_offsets[k],  vox_offsets[k+1]      # particle k's voxels
+fs, fe = input_offsets[vs], input_offsets[vs+1] # its first voxel's inputs
+input_ids[fs:fe], input_energies[fs:fe]
+```
+
+**It is large** — it carries one row per *input* deposit rather than per voxel,
+so it is typically bigger than the physics output itself (9.7 MiB against
+6.0 MiB on a sample 5-event run).  That is why it is off by default; nothing is
+computed when it is off, so leaving it off costs nothing.
+
+It is built from the final particle list, after defragmentation and id
+renumbering, so its `particles/id` match the main file exactly.  A particle
+split by defragmentation carries its own share of the mapping, and total
+`input_energies` equals total voxel `dE`.
+
+#### Seeing every instance — `instance_output=all`
+
+Writes every instance the merger produced, including those that deposited
+nothing and that nothing visible descends from — 535 rather than 207 on a
+sample event.  Use it to inspect the merger's raw output; `traceable` is what
+analyses should read.
+
+#### Per-merge records — `enable_diagnostics=true`
+
+Records every merge decision in memory for post-hoc inspection.  Not written to
+the output file.
+
+### Compression
+
+Output is LZ4 by default (`io.compression`).  The browser viewer uses h5wasm,
+which supports **gzip only**, so produce a viewer copy with:
+
+```bash
+pysupera-repack out.h5 out_vis.h5 --compression gzip --rechunk
 ```
 
 ---
