@@ -12,7 +12,7 @@ from tests.conftest import make_particle, cloud, PT_PRIMARY, PT_TRACK, PT_NEUTRO
 # ============================================================================
 
 def pc6(*rows):
-    """Build a 6-column point cloud from (x, y, z, time, energy, dedx) rows."""
+    """Build a 6-column point cloud from (x, y, z, time, dE, dX) rows."""
     return np.array(rows, dtype=np.float32)
 
 
@@ -54,12 +54,15 @@ class TestMergeDuplicatesProcessor:
         self.proc.process([p])
         assert p.point_cloud[0, 4] == pytest.approx(7.0)
 
-    def test_dedx_takes_maximum(self):
+    def test_dx_sums_within_a_particle(self):
+        # Column 5 is dX (path length), not dE/dX.  Merging only ever happens
+        # within one particle, so the path lengths add: 1.5 + 3.2 = 4.7.
+        # dE/dX for the merged voxel is then column 4 / column 5.
         p = make_particle(1, PT_PRIMARY, pdg=11,
                           pc=pc6([0, 0, 0, 1.0, 1.0, 1.5],
                                  [0, 0, 0, 1.0, 1.0, 3.2]))
         self.proc.process([p])
-        assert p.point_cloud[0, 5] == pytest.approx(3.2)
+        assert p.point_cloud[0, 5] == pytest.approx(4.7)
 
     def test_empty_point_cloud_passes_through(self):
         p = make_particle(1, PT_PRIMARY, pdg=11,
@@ -327,12 +330,13 @@ class TestVoxelizeProcessor:
         result = self.proc.process([p])
         assert result[0].point_cloud[0, 4] == pytest.approx(7.0)
 
-    def test_dedx_takes_maximum(self):
+    def test_dx_sums_within_a_particle(self):
+        # See the MergeDuplicates counterpart: dX adds within a particle-voxel.
         p = make_particle(1, PT_PRIMARY, pdg=11,
                           pc=pc6([0.2, 0.0, 0.0, 1.0, 1.0, 1.5],
                                  [0.7, 0.0, 0.0, 1.0, 1.0, 3.2]))
         result = self.proc.process([p])
-        assert result[0].point_cloud[0, 5] == pytest.approx(3.2)
+        assert result[0].point_cloud[0, 5] == pytest.approx(4.7)
 
     # ── edge cases ────────────────────────────────────────────────────────
 
@@ -456,7 +460,7 @@ class TestVoxelizeProcessor:
 # ============================================================================
 
 def _pc7(*rows):
-    """7-column point cloud: (x, y, z, time, energy, dedx, input_id)."""
+    """7-column point cloud: (x, y, z, time, dE, dX, input_id)."""
     return np.array(rows, dtype=np.float32)
 
 
@@ -481,15 +485,15 @@ class TestVoxelizationMappingRoundtrip:
     unit (1×1×1) grid anchored at the origin:
 
     Particle 1 (pid=1, 4 input points):
-        input_id=0  (0.2, 0, 0, t=0, e=1.0, dedx=0.1)  → voxel (0,0,0) · centre (0.5,0.5,0.5)
-        input_id=1  (0.7, 0, 0, t=0, e=2.0, dedx=0.2)  → voxel (0,0,0) ┘  energy = 3.0
-        input_id=2  (1.2, 0, 0, t=0, e=3.0, dedx=0.3)  → voxel (1,0,0) · centre (1.5,0.5,0.5)
-        input_id=3  (1.8, 0, 0, t=0, e=4.0, dedx=0.4)  → voxel (1,0,0) ┘  energy = 7.0
+        input_id=0  (0.2, 0, 0, t=0, e=1.0, dX=0.1)  → voxel (0,0,0) · centre (0.5,0.5,0.5)
+        input_id=1  (0.7, 0, 0, t=0, e=2.0, dX=0.2)  → voxel (0,0,0) ┘  energy = 3.0
+        input_id=2  (1.2, 0, 0, t=0, e=3.0, dX=0.3)  → voxel (1,0,0) · centre (1.5,0.5,0.5)
+        input_id=3  (1.8, 0, 0, t=0, e=4.0, dX=0.4)  → voxel (1,0,0) ┘  energy = 7.0
 
     Particle 2 (pid=2, 3 input points — identity mapping):
-        input_id=10 (0.5, 0, 0, t=0, e=5.0, dedx=0.5)  → voxel (0,0,0)
-        input_id=11 (1.5, 0, 0, t=0, e=6.0, dedx=0.6)  → voxel (1,0,0)
-        input_id=12 (2.5, 0, 0, t=0, e=7.0, dedx=0.7)  → voxel (2,0,0)
+        input_id=10 (0.5, 0, 0, t=0, e=5.0, dX=0.5)  → voxel (0,0,0)
+        input_id=11 (1.5, 0, 0, t=0, e=6.0, dX=0.6)  → voxel (1,0,0)
+        input_id=12 (2.5, 0, 0, t=0, e=7.0, dX=0.7)  → voxel (2,0,0)
     """
 
     # ------------------------------------------------------------------ fixtures

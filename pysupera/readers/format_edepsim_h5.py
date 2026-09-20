@@ -80,7 +80,7 @@ _STEP_FIELD_MAP: list[tuple[int, tuple[str, ...]]] = [
     (PointFeature.z,      ("z",)),
     (PointFeature.time,   ("t", "time")),
     (PointFeature.energy, ("energy", "e", "de")),
-    (PointFeature.dx,     ("dx")),
+    (PointFeature.dx,     ("dx",)),   # 1-tuple: ("dx") is a str, and would match field "x"
 ]
 
 
