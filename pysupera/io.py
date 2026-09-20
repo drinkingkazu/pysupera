@@ -158,10 +158,12 @@ def write_events(path: str,
 
     # Particle-level scalars
     p_id          = np.empty(n_total_particles, dtype=np.int32)
+    p_geant4_id   = np.empty(n_total_particles, dtype=np.int32)
     p_parent_id   = np.empty(n_total_particles, dtype=np.int32)
     p_root_id     = np.empty(n_total_particles, dtype=np.int32)
     p_pdg         = np.empty(n_total_particles, dtype=np.int32)
     p_parent_pdg  = np.empty(n_total_particles, dtype=np.int32)
+    p_int_id      = np.empty(n_total_particles, dtype=np.int32)
     p_itype       = np.empty(n_total_particles, dtype=np.int32)
     p_sem_type    = np.empty(n_total_particles, dtype=np.int8)
 
@@ -172,10 +174,12 @@ def write_events(path: str,
     for ev in events:
         for p in ev:
             p_id[j]          = p.id
+            p_geant4_id[j]   = getattr(p, "geant4_id", p.id)
             p_parent_id[j]   = p.parent_id
             p_root_id[j]     = p.root_id
             p_pdg[j]         = p.pdg
             p_parent_pdg[j]  = p.parent_pdg
+            p_int_id[j]      = int(p._interaction_id)
             p_itype[j]       = int(p._interaction_type)
             p_sem_type[j]    = int(p.sem_type.value)
             pc_offsets[j + 1] = pc_offsets[j] + len(p.point_cloud)
@@ -213,10 +217,12 @@ def write_events(path: str,
         )
         if n_total_particles > 0:
             _mk("id",               p_id)
+            _mk("geant4_id",        p_geant4_id)
             _mk("parent_id",        p_parent_id)
             _mk("root_id",          p_root_id)
             _mk("pdg",              p_pdg)
             _mk("parent_pdg",       p_parent_pdg)
+            _mk("interaction_id",   p_int_id)
             _mk("interaction_type", p_itype)
             pg.create_dataset(
                 "sem_type", data=p_sem_type,
@@ -224,8 +230,9 @@ def write_events(path: str,
                 **ckw,
             )
         else:
-            for name in ("id", "parent_id", "root_id",
-                         "pdg", "parent_pdg", "interaction_type"):
+            for name in ("id", "geant4_id", "parent_id", "root_id",
+                         "pdg", "parent_pdg", "interaction_id",
+                         "interaction_type"):
                 pg.create_dataset(name, data=np.empty(0, dtype=np.int32))
             pg.create_dataset("sem_type", data=np.empty(0, dtype=np.int8))
         pg.create_dataset("pc_offsets", data=pc_offsets)
