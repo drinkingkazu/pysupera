@@ -43,7 +43,6 @@ app = [
 [project.scripts]
 run_pysupera        = "pysupera._run:main"
 pysupera-app        = "pysupera.app:main"
-pysupera-recompress = "pysupera.io:recompress_cli"
 pysupera-repack     = "pysupera.io:repack_cli"
 
 [tool.setuptools.packages.find]

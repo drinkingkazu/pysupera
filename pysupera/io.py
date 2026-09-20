@@ -64,9 +64,11 @@ try:
 except ImportError:
     pass
 
-FORMAT_VERSION = "2.2.0"
+FORMAT_VERSION = "2.3.0"
 
-_PC_NDIM = 5                # number of columns in the flat point array (x,y,z,t,e)
+_PC_NDIM = 6                # columns in the flat point array (x,y,z,t,dE,dX)
+                            # dX is summed per particle-voxel, so dE/dX for a
+                            # particle in a voxel is column 4 / column 5.
 _CLOUD_NDIM = 9             # columns in event-cloud datasets (x,y,z,t,e,interaction_id,root_id,frag_id,inst_id)
 
 # Chunk sizing for compressed HDF5 datasets.
@@ -1344,162 +1346,6 @@ def inspect_compression(path: str) -> dict:
     return result
 
 
-def recompress(src: str, dst: str,
-               compression: str = "lzf",
-               compression_opts: Optional[int] = None,
-               batch_size: int = 256) -> None:
-    """
-    Rewrite *src* into *dst* with a different compression filter.
-
-    Copies particle events **and** event-level point clouds
-    (``non_le_cloud`` / ``le_scatter_cloud``).
-    Fragment and instance representative groups are also copied when
-    present in the source file.
-
-    Parameters
-    ----------
-    src : str
-        Path to the source HDF5 file (any supported compression).
-    dst : str
-        Path for the output file (will be overwritten if it exists).
-    compression : str, optional
-        Compression for the output file.  Default ``"lzf"``.
-        Use ``"gzip"`` to produce a file readable by h5wasm in the browser.
-    compression_opts : int or None, optional
-        Compression level for the output filter.
-    batch_size : int, optional
-        Events per read batch.  Default ``256``.
-    """
-    import h5py as _h5
-    import numpy as _np
-
-    with EventStore(src) as src_store, \
-         _h5.File(src, "r") as src_f, \
-         open_writer(dst, compression=compression,
-                     compression_opts=compression_opts) as w:
-
-        n_ev = len(src_store)
-
-        # Pre-read cloud offset arrays if present
-        _has_nle = "non_le_cloud/offsets" in src_f
-        _has_le  = "le_scatter_cloud/offsets" in src_f
-        if _has_nle:
-            _nle_off = src_f["non_le_cloud/offsets"][:]
-        if _has_le:
-            _le_off  = src_f["le_scatter_cloud/offsets"][:]
-
-        # Pre-read fragment / instance event-offset arrays if present
-        _has_frags = "frag_events/offsets" in src_f
-        _has_insts = "inst_events/offsets" in src_f
-        if _has_frags:
-            _fr_ev_off  = src_f["frag_events/offsets"][:]
-        if _has_insts:
-            _in_ev_off  = src_f["inst_events/offsets"][:]
-
-        for batch_start in range(0, n_ev, batch_size):
-            batch_stop = min(batch_start + batch_size, n_ev)
-
-            for ev_idx, particles in zip(
-                range(batch_start, batch_stop),
-                src_store.read_bulk(batch_start, batch_stop),
-            ):
-                # ---- event-level clouds -----------------------------------
-                if _has_nle or _has_le:
-                    nle_cloud = (
-                        src_f["non_le_cloud/flat"][
-                            int(_nle_off[ev_idx]) : int(_nle_off[ev_idx + 1])
-                        ] if _has_nle
-                        else _np.empty((0, _CLOUD_NDIM), dtype=_np.float32)
-                    )
-                    le_cloud  = (
-                        src_f["le_scatter_cloud/flat"][
-                            int(_le_off[ev_idx]) : int(_le_off[ev_idx + 1])
-                        ] if _has_le
-                        else _np.empty((0, _CLOUD_NDIM), dtype=_np.float32)
-                    )
-                    w.append_event_clouds(nle_cloud, le_cloud)
-
-                # ---- fragment representatives -----------------------------
-                if _has_frags:
-                    _fr_s = int(_fr_ev_off[ev_idx])
-                    _fr_e = int(_fr_ev_off[ev_idx + 1])
-                    frags = _read_rep_level(src_f, "particle_fragments", _fr_s, _fr_e)
-                    w.append_fragments(frags)
-
-                # ---- instance representatives ----------------------------
-                if _has_insts:
-                    _in_s = int(_in_ev_off[ev_idx])
-                    _in_e = int(_in_ev_off[ev_idx + 1])
-                    insts = _read_rep_level(src_f, "particle_instances", _in_s, _in_e)
-                    w.append_instances(insts)
-
-                w.append_event(particles)
-
-
-def _read_rep_level(f, group: str, r_start: int, r_end: int) -> list:
-    """Reconstruct minimal Particle-like objects from a stored representative group.
-
-    Used internally by :func:`recompress`.
-    """
-    from .data import Particle
-    from .utils import SemanticType
-
-    n_r = r_end - r_start
-    if n_r == 0:
-        return []
-
-    ids    = f[f"{group}/id"              ][r_start:r_end]
-    g4ids  = (f[f"{group}/geant4_id"      ][r_start:r_end]
-              if f"{group}/geant4_id" in f else ids)
-    pids   = f[f"{group}/parent_id"       ][r_start:r_end]
-    rids   = f[f"{group}/root_id"         ][r_start:r_end]
-    pdgs   = f[f"{group}/pdg"             ][r_start:r_end]
-    ppdgs  = f[f"{group}/parent_pdg"      ][r_start:r_end]
-    intids = f[f"{group}/interaction_id"  ][r_start:r_end]
-    itypes = f[f"{group}/interaction_type"][r_start:r_end]
-    stypes = f[f"{group}/sem_type"        ][r_start:r_end]
-    pfids  = f[f"{group}/parent_frag_id"  ][r_start:r_end] if f"{group}/parent_frag_id" in f else None
-    piids  = f[f"{group}/parent_inst_id"  ][r_start:r_end] if f"{group}/parent_inst_id" in f else None
-
-    pc_off   = f[f"{group}/pc_offsets"    ][r_start : r_end + 1]
-    mem_off  = f[f"{group}/member_offsets"][r_start : r_end + 1]
-
-    pt_start = int(pc_off[0])
-    pt_end   = int(pc_off[-1])
-    pts_flat = f[f"{group}_points/flat"][pt_start:pt_end] if pt_end > pt_start else None
-
-    mem_start = int(mem_off[0])
-    mem_end   = int(mem_off[-1])
-    mem_flat  = f[f"{group}_members/flat"][mem_start:mem_end] if mem_end > mem_start else None
-
-    reps = []
-    for k in range(n_r):
-        cloud = pts_flat[int(pc_off[k]) - pt_start : int(pc_off[k + 1]) - pt_start] \
-                if pts_flat is not None else __import__('numpy').empty((0, _PC_NDIM), dtype='float32')
-        ms = int(mem_off[k]) - mem_start
-        me = int(mem_off[k + 1]) - mem_start
-        mids = list(mem_flat[ms:me].astype(int)) if mem_flat is not None and me > ms else None
-        p = Particle(
-            id               = int(ids[k]),
-            geant4_id        = int(g4ids[k]),
-            parent_id        = int(pids[k]),
-            root_id          = int(rids[k]),
-            pdg              = int(pdgs[k]),
-            parent_pdg       = int(ppdgs[k]),
-            interaction_id   = int(intids[k]),
-            interaction_type = int(itypes[k]),
-            point_cloud      = cloud,
-        )
-        p.sem_type   = SemanticType(int(stypes[k]))
-        p.member_ids = mids
-        if pfids is not None:
-            p.parent_frag_id = int(pfids[k])
-        if piids is not None:
-            p.parent_inst_id = int(piids[k])
-        reps.append(p)
-    return reps
-
-
 def repack(path: str,
            compression: Optional[str] = None,
            compression_opts: Optional[int] = None,
@@ -1747,10 +1593,8 @@ def repack_cli() -> None:
         # smallest and fastest for row-range reads, at the cost of relayout
         pysupera-repack out.h5 out_vis.h5 --compression gzip --rechunk
 
-    Unlike ``pysupera-recompress``, this walks the file generically instead of
-    reconstructing events, so it can resize chunks and handles any layout --
-    including the voxmap companion file.  Prefer it unless you specifically
-    need the event-by-event rewrite.
+    Walks the file generically instead of reconstructing events, so it can
+    resize chunks and handles any layout, including the voxmap companion file.
     """
     import argparse
     parser = argparse.ArgumentParser(
@@ -1787,40 +1631,6 @@ def repack_cli() -> None:
            dst=args.dst,
            rechunk=args.rechunk,
            verify=args.verify)
-
-
-def recompress_cli() -> None:
-    """Entry point for the ``pysupera-recompress`` shell command.
-
-    Usage::
-
-        pysupera-recompress src.h5 dst.h5 [--compression gzip] [--level 1]
-
-    Rewrites *src.h5* into *dst.h5* with the chosen compression filter.
-    Use ``--compression gzip`` to produce a browser-compatible file for
-    the WebGL viewer (h5wasm only supports gzip).
-    """
-    import argparse
-    parser = argparse.ArgumentParser(
-        prog="pysupera-recompress",
-        description="Recompress a pysupera HDF5 file with a different filter.",
-    )
-    parser.add_argument("src",  help="Source HDF5 file")
-    parser.add_argument("dst",  help="Output HDF5 file (will be overwritten)")
-    parser.add_argument("-c", "--compression", default="gzip",
-                        help="Compression filter: gzip, lzf, lz4, blosc_lz4, none  (default: gzip)")
-    parser.add_argument("-l", "--level", type=int, default=None,
-                        help="Compression level (gzip: 1-9; default: filter default)")
-    parser.add_argument("-b", "--batch-size", type=int, default=256,
-                        help="Events per read batch (default: 256)")
-    args = parser.parse_args()
-    comp = None if args.compression in ("none", "~", "") else args.compression
-    print(f"[recompress] {args.src} → {args.dst}  compression={comp!r} level={args.level}")
-    recompress(args.src, args.dst,
-               compression=comp,
-               compression_opts=args.level,
-               batch_size=args.batch_size)
-    print("[recompress] Done.")
 
 
 # ---------------------------------------------------------------------------
@@ -1876,7 +1686,7 @@ def write_voxmap(main_path: str,
                 Fencepost into /flat/*.
 
         /flat/
-            input_ids      (n_total_mappings,)           int64
+            input_ids      (n_total_mappings,)           int32
             input_energies (n_total_mappings,)           float32
 
     Parameters
@@ -1932,7 +1742,7 @@ def write_voxmap(main_path: str,
                 rec.voxel_offsets[1:].astype(np.int64) + running_flat
             )
 
-            flat_ids_segs.append(rec.input_ids.astype(np.int64))
+            flat_ids_segs.append(rec.input_ids.astype(np.int32))
             flat_eng_segs.append(rec.input_energies.astype(np.float32))
 
             running_flat += np.int64(len(rec.input_ids))
@@ -1989,7 +1799,7 @@ def write_voxmap(main_path: str,
                 **ckw,
             )
         else:
-            fg.create_dataset("input_ids",      data=np.empty(0, dtype=np.int64))
+            fg.create_dataset("input_ids",      data=np.empty(0, dtype=np.int32))
             fg.create_dataset("input_energies", data=np.empty(0, dtype=np.float32))
 
     return vpath
@@ -2147,13 +1957,13 @@ class VoxmapWriter:
             flat_ids_ds.resize(new_flat_end, axis=0)
             flat_eng_ds.resize(new_flat_end, axis=0)
 
-            bulk_ids = np.empty(n_flat_total, dtype=np.int64)
+            bulk_ids = np.empty(n_flat_total, dtype=np.int32)
             bulk_eng = np.empty(n_flat_total, dtype=np.float32)
             cursor = 0
             for rec in vox_records:
                 n = len(rec.input_ids)
                 if n > 0:
-                    bulk_ids[cursor : cursor + n] = rec.input_ids.astype(np.int64)
+                    bulk_ids[cursor : cursor + n] = rec.input_ids.astype(np.int32)
                     bulk_eng[cursor : cursor + n] = rec.input_energies.astype(np.float32)
                 cursor += n
             flat_ids_ds[self._n_flat : new_flat_end] = bulk_ids
@@ -2198,8 +2008,10 @@ class VoxmapWriter:
                           maxshape=(None,), chunks=(_CHUNK_PARTICLES,))
 
         fg = f.create_group("flat")
+        # int32: input_ids index points within a single event, unlike the
+        # offset arrays, which are cumulative over the file and stay int64.
         fg.create_dataset("input_ids",
-                          shape=(0,), maxshape=(None,), dtype=np.int64,
+                          shape=(0,), maxshape=(None,), dtype=np.int32,
                           chunks=(_CHUNK_POINTS,), **ckw)
         fg.create_dataset("input_energies",
                           shape=(0,), maxshape=(None,), dtype=np.float32,
