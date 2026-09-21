@@ -1393,7 +1393,7 @@ async function loadEvent(idx){
     // so the histogram filter (nd.intId===intId) is guaranteed to match.
     if(S.instGraph&&S.instGraph.nodes){
       for(const nd of S.instGraph.nodes){
-        const r=_instCountMap.get(nd.idx);
+        const r=_instCountMap.get(nd.id);
         if(r!=null){nd.ptCount=r.count; nd.intId=r.intId; nd.eSum=r.eSum;}
       }
     }
@@ -1404,7 +1404,9 @@ async function loadEvent(idx){
     };
     // Build per-point PDG code buffer from instGraph (inst_id → PDG)
     const _instPdgMap=new Map();
-    if(S.instGraph&&S.instGraph.nodes) for(const nd of S.instGraph.nodes) _instPdgMap.set(nd.idx, nd.pdg||0);
+    // keyed by particle id: the buffer below is built from the per-point
+    // instance label, which is an id, not a node index
+    if(S.instGraph&&S.instGraph.nodes) for(const nd of S.instGraph.nodes) _instPdgMap.set(nd.id, nd.pdg||0);
     const _mkPdg=f32=>{
       const N=f32.length/NCOLS; const buf=new Float32Array(N);
       for(let i=0;i<N;i++){const id=Math.round(f32[i*NCOLS+8]);buf[i]=_instPdgMap.has(id)?_instPdgMap.get(id):0;}
@@ -1937,11 +1939,16 @@ function readInstanceGraph(evIdx){
         members:Math.max(1,mCount),ptCount,eSum:null,x:0,y:0,vx:0,vy:0});
     }
     for(let i=0;i<nInst;i++){
-      // inst_parent_id is already an instance row index.  The parent-map walk
-      // stays as a fallback for files written before it was stored.
-      const pi=(instPInst&&Number(instPInst[i])>=0&&Number(instPInst[i])!==i)
-                 ?Number(instPInst[i])
-                 :findParentInst(instPIDs[i]);
+      // inst_parent_id is a particle *id*; memberToInst turns it into the
+      // node index the edge list needs.  The parent-map walk stays as a
+      // fallback for files written before it was stored.
+      let pi=-1;
+      if(instPInst){
+        const pid=Number(instPInst[i]);
+        if(pid>=0&&pid!==Number(instIds[i])&&memberToInst.has(pid))
+          pi=memberToInst.get(pid);
+      }
+      if(pi<0) pi=findParentInst(instPIDs[i]);
       if(pi>=0&&pi!==i){
         const k=Math.min(pi,i)+','+Math.max(pi,i)+'_'+pi+'>'+i;
         if(!edgeSet.has(k)){edgeSet.add(k);edges.push({src:pi,dst:i});}
@@ -2441,11 +2448,32 @@ function _setHighlight(id){
   for(const o of[objNLE,objLE]){if(o)o.pts.material.uniforms.uHighlightId.value=id;}
 }
 
-function _setInstHighlight(id){
-  S.instHighlight=id;
-  const eff=S.instLocked>=0?S.instLocked:id;
+// Two key spaces meet here and must not be confused.  A graph node's `idx`
+// is its position in instGraph.nodes; its `id` is the particle id, which is
+// what the point cloud carries (column 8) and what the shader compares
+// against.  In 3.x an instance is a sparse row of one shared table, so
+// id !== idx -- in 2.x the instance table was separate and they coincided,
+// which is how the confusion survived the port.
+function _instNodeByIdx(i){
+  const g=S.instGraph;
+  return (g&&g.nodes&&i>=0&&i<g.nodes.length)?g.nodes[i]:null;
+}
+function _instNodeIdxById(id){
+  const g=S.instGraph;
+  if(!g||!g.nodes) return -1;
+  if(!g._byId){g._byId=new Map();g.nodes.forEach((nd,i)=>g._byId.set(nd.id,i));}
+  const i=g._byId.get(Number(id));
+  return i===undefined?-1:i;
+}
+
+// Takes a node *index*; translates to a particle id for the shader.
+function _setInstHighlight(nodeIdx){
+  S.instHighlight=nodeIdx;
+  const eff=S.instLocked>=0?S.instLocked:nodeIdx;
+  const nd=_instNodeByIdx(eff);
+  const effId=nd?nd.id:-1;
   for(const o of[objNLE,objLE]){
-    if(o) o.pts.material.uniforms.uHighlightInstId.value=eff;
+    if(o) o.pts.material.uniforms.uHighlightInstId.value=effId;
   }
 }
 
@@ -2907,11 +2935,16 @@ function _readInstanceGraph(evIdx){
         members:Math.max(1,mCount),ptCount,eSum:null,x:0,y:0,vx:0,vy:0});
     }
     for(let i=0;i<nInst;i++){
-      // inst_parent_id is already an instance row index.  The parent-map walk
-      // stays as a fallback for files written before it was stored.
-      const pi=(instPInst&&Number(instPInst[i])>=0&&Number(instPInst[i])!==i)
-                 ?Number(instPInst[i])
-                 :findParentInst(instPIDs[i]);
+      // inst_parent_id is a particle *id*; memberToInst turns it into the
+      // node index the edge list needs.  The parent-map walk stays as a
+      // fallback for files written before it was stored.
+      let pi=-1;
+      if(instPInst){
+        const pid=Number(instPInst[i]);
+        if(pid>=0&&pid!==Number(instIds[i])&&memberToInst.has(pid))
+          pi=memberToInst.get(pid);
+      }
+      if(pi<0) pi=findParentInst(instPIDs[i]);
       if(pi>=0&&pi!==i){
         const k=Math.min(pi,i)+','+Math.max(pi,i)+'_'+pi+'>'+i;
         if(!edgeSet.has(k)){edgeSet.add(k);edges.push({src:pi,dst:i});}
@@ -3471,7 +3504,7 @@ let fpsT=performance.now(),fpsN=0;
         const _intPts=(S.interactions.find(r=>Math.round(r.id)===_iidInt)||{n:-1}).n;
         let _pdgStr='—',_parPidStr='—',_parPdgStr='';
         if(S.instGraph&&_iid>=0){
-          const _nd=S.instGraph.nodes.find(n=>n.idx===_iid);
+          const _nd=_instNodeByIdx(_instNodeIdxById(_iid));
           if(_nd){
             _pdgStr=_nd.pdg?String(_nd.pdg):'—';
             _parPidStr=_nd.parentPid>=0?String(_nd.parentPid):'—';
@@ -3491,7 +3524,8 @@ let fpsT=performance.now(),fpsN=0;
           coordEl.style.display='block';
           coordEl.innerHTML='<div class="ch-hdr">'+(isLE?'&#9632; LE scatter':'&#9633; Non-LE')+' &nbsp; pt&nbsp;'+idx+'</div><div class="ch-div"></div>'+rows+'<div class="ch-div"></div>'+_xtra;
           // cloud hover → graph node + interaction bubble
-          if(S._cloudHoverInstId!==_iid){S._cloudHoverInstId=_iid;_setInstHighlight(_iid>=0?_iid:-1);}
+          if(S._cloudHoverInstId!==_iid){S._cloudHoverInstId=_iid;
+            _setInstHighlight(_iid>=0?_instNodeIdxById(_iid):-1);}
           if(S._cloudHoverIntId!==_iidInt&&!S.highlightLocked){
             S._cloudHoverIntId=_iidInt; _setHighlight(_iidInt);
             const _b=document.getElementById('ip-bubbles');

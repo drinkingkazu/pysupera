@@ -572,11 +572,24 @@ visible depends on is dropped, so its members belong to no written instance.
 
 ### ID conventions
 
-1. **`id` is pysupera's, not Geant4's.** It is `0 … n-1` over the event's
-   stored particles, so it indexes rows directly. Geant4 track IDs are not
-   guaranteed contiguous — an upstream stage may drop particles — and are kept
-   separately in `geant4_trackid`. **Join back to the input on `geant4_trackid`, never on
-   `id`.**
+1. **`id` is pysupera's, not Geant4's.** It is `0 … N-1` over the event's
+   *full* particle list, assigned before the output subset is chosen. Geant4
+   track IDs are not guaranteed contiguous — an upstream stage may drop
+   particles — and are kept separately in `geant4_trackid`. **Join back to
+   the input on `geant4_trackid`, never on `id`.**
+
+   **`id` is not a row index.** Only the particles worth keeping are written —
+   about 17% of them — and rows are ordered by the point layout, not by `id`.
+   So in a 2,902-row event the ids run to 21,254 and are not sorted. Build a
+   map; do not index with an id:
+
+   ```python
+   row_of = {int(i): k for k, i in enumerate(v["id"])}
+   k = row_of[some_id]          # not v["pdg"][some_id]
+   ```
+
+   The same applies to `parent_id`, `frag_id`, `inst_id`, `frag_parent_id`
+   and `inst_parent_id`: all of them are ids, and all need the map.
 
 2. **`geant4_trackid` is one-to-many.** Defragmentation splits a particle whose
    point cloud falls into disconnected pieces into several pysupera particles,
