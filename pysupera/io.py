@@ -20,7 +20,7 @@ and slow variable-length heap allocations.
     /particles/
         id                 (n_total_particles,)   int32
         parent_id          (n_total_particles,)   int32
-        root_id            (n_total_particles,)   int32
+        ancestor_id            (n_total_particles,)   int32
         pdg                (n_total_particles,)   int32
         parent_pdg         (n_total_particles,)   int32
         interaction_type   (n_total_particles,)   int32
@@ -69,7 +69,7 @@ FORMAT_VERSION = "2.3.0"
 _PC_NDIM = 6                # columns in the flat point array (x,y,z,t,dE,dX)
                             # dX is summed per particle-voxel, so dE/dX for a
                             # particle in a voxel is column 4 / column 5.
-_CLOUD_NDIM = 9             # columns in event-cloud datasets (x,y,z,t,e,interaction_id,root_id,frag_id,inst_id)
+_CLOUD_NDIM = 9             # columns in event-cloud datasets (x,y,z,t,e,interaction_id,ancestor_id,frag_id,inst_id)
 
 # Chunk sizing for compressed HDF5 datasets.
 #
@@ -160,7 +160,7 @@ def write_events(path: str,
     p_id          = np.empty(n_total_particles, dtype=np.int32)
     p_geant4_id   = np.empty(n_total_particles, dtype=np.int32)
     p_parent_id   = np.empty(n_total_particles, dtype=np.int32)
-    p_root_id     = np.empty(n_total_particles, dtype=np.int32)
+    p_ancestor_id     = np.empty(n_total_particles, dtype=np.int32)
     p_pdg         = np.empty(n_total_particles, dtype=np.int32)
     p_parent_pdg  = np.empty(n_total_particles, dtype=np.int32)
     p_int_id      = np.empty(n_total_particles, dtype=np.int32)
@@ -176,7 +176,7 @@ def write_events(path: str,
             p_id[j]          = p.id
             p_geant4_id[j]   = getattr(p, "geant4_id", p.id)
             p_parent_id[j]   = p.parent_id
-            p_root_id[j]     = p.root_id
+            p_ancestor_id[j]     = p.ancestor_id
             p_pdg[j]         = p.pdg
             p_parent_pdg[j]  = p.parent_pdg
             p_int_id[j]      = int(p._interaction_id)
@@ -219,7 +219,7 @@ def write_events(path: str,
             _mk("id",               p_id)
             _mk("geant4_id",        p_geant4_id)
             _mk("parent_id",        p_parent_id)
-            _mk("root_id",          p_root_id)
+            _mk("ancestor_id",          p_ancestor_id)
             _mk("pdg",              p_pdg)
             _mk("parent_pdg",       p_parent_pdg)
             _mk("interaction_id",   p_int_id)
@@ -230,7 +230,7 @@ def write_events(path: str,
                 **ckw,
             )
         else:
-            for name in ("id", "geant4_id", "parent_id", "root_id",
+            for name in ("id", "geant4_id", "parent_id", "ancestor_id",
                          "pdg", "parent_pdg", "interaction_id",
                          "interaction_type"):
                 pg.create_dataset(name, data=np.empty(0, dtype=np.int32))
@@ -330,7 +330,7 @@ class EventWriter:
     # Names of the int32 particle scalar fields (sem_type handled separately
     # because it uses dtype=int8)
     _SCALAR_FIELDS = (
-        "id", "geant4_id", "parent_id", "root_id", "pdg", "parent_pdg",
+        "id", "geant4_id", "parent_id", "ancestor_id", "pdg", "parent_pdg",
         "interaction_id", "interaction_type"
     )
 
@@ -439,7 +439,7 @@ class EventWriter:
             p_id             = np.empty(n_p, dtype=np.int32)
             p_geant4_id      = np.empty(n_p, dtype=np.int32)
             p_parent_id      = np.empty(n_p, dtype=np.int32)
-            p_root_id        = np.empty(n_p, dtype=np.int32)
+            p_ancestor_id        = np.empty(n_p, dtype=np.int32)
             p_pdg            = np.empty(n_p, dtype=np.int32)
             p_parent_pdg     = np.empty(n_p, dtype=np.int32)
             p_int_id         = np.empty(n_p, dtype=np.int32)
@@ -451,7 +451,7 @@ class EventWriter:
                 p_id[k]          = p.id
                 p_geant4_id[k]   = getattr(p, "geant4_id", p.id)
                 p_parent_id[k]   = p.parent_id
-                p_root_id[k]     = p.root_id
+                p_ancestor_id[k]     = p.ancestor_id
                 p_pdg[k]         = p.pdg
                 p_parent_pdg[k]  = p.parent_pdg
                 p_int_id[k]      = int(p._interaction_id)
@@ -462,7 +462,7 @@ class EventWriter:
             self._f["particles/id"               ][new_p_start:new_p_end] = p_id
             self._f["particles/geant4_id"        ][new_p_start:new_p_end] = p_geant4_id
             self._f["particles/parent_id"        ][new_p_start:new_p_end] = p_parent_id
-            self._f["particles/root_id"          ][new_p_start:new_p_end] = p_root_id
+            self._f["particles/ancestor_id"          ][new_p_start:new_p_end] = p_ancestor_id
             self._f["particles/pdg"              ][new_p_start:new_p_end] = p_pdg
             self._f["particles/parent_pdg"       ][new_p_start:new_p_end] = p_parent_pdg
             self._f["particles/interaction_id"   ][new_p_start:new_p_end] = p_int_id
@@ -569,7 +569,7 @@ class EventWriter:
         self._init_rep_group("particle_instances")
 
         # Event-level union point clouds
-        # Layout: (x, y, z, t, energy, interaction_id, root_id, frag_id, inst_id)
+        # Layout: (x, y, z, t, energy, interaction_id, ancestor_id, frag_id, inst_id)
         #          — _CLOUD_NDIM = 9 columns (all stored as float32).
         # non_le_cloud  : union of point clouds from particles with sem_type != kLEScatter.
         # le_scatter_cloud : union of point clouds from kLEScatter particles only.
@@ -596,7 +596,7 @@ class EventWriter:
             /frag_events/offsets           (n_events+1,) int64   — per-event fencepost
             /particle_fragments/id         (n_reps,)     int32
             /particle_fragments/parent_id  (n_reps,)     int32
-            /particle_fragments/root_id    (n_reps,)     int32
+            /particle_fragments/ancestor_id    (n_reps,)     int32
             /particle_fragments/pdg        (n_reps,)     int32
             /particle_fragments/parent_pdg (n_reps,)     int32
             /particle_fragments/interaction_type (n_reps,) int32
@@ -720,12 +720,12 @@ class EventWriter:
         Must be called **before** :meth:`append_event` for the same event.
 
         Each cloud has 9 columns:
-        ``x, y, z, t, energy, interaction_id, root_id, frag_id, inst_id``.
+        ``x, y, z, t, energy, interaction_id, ancestor_id, frag_id, inst_id``.
         All values are stored as float32.  Integer-valued columns
-        (``interaction_id``, ``root_id``, ``frag_id``, ``inst_id``) should be
+        (``interaction_id``, ``ancestor_id``, ``frag_id``, ``inst_id``) should be
         cast by the caller.  Use ``-1`` as a sentinel for absent frag/inst IDs.
         When voxelization is active the spatial columns are voxel-centre
-        coordinates; ``interaction_id`` / ``root_id`` are taken from the
+        coordinates; ``interaction_id`` / ``ancestor_id`` are taken from the
         dominant particle across merged points.
 
         Parameters
@@ -819,7 +819,7 @@ class EventWriter:
             r_id             = np.empty(n_r, dtype=np.int32)
             r_geant4_id      = np.empty(n_r, dtype=np.int32)
             r_parent_id      = np.empty(n_r, dtype=np.int32)
-            r_root_id        = np.empty(n_r, dtype=np.int32)
+            r_ancestor_id        = np.empty(n_r, dtype=np.int32)
             r_pdg            = np.empty(n_r, dtype=np.int32)
             r_parent_pdg     = np.empty(n_r, dtype=np.int32)
             r_int_id         = np.empty(n_r, dtype=np.int32)
@@ -834,7 +834,7 @@ class EventWriter:
                 r_id[k]             = r.id
                 r_geant4_id[k]      = getattr(r, "geant4_id", r.id)
                 r_parent_id[k]      = r.parent_id
-                r_root_id[k]        = r.root_id
+                r_ancestor_id[k]        = r.ancestor_id
                 r_pdg[k]            = r.pdg
                 r_parent_pdg[k]     = r.parent_pdg
                 r_int_id[k]         = int(r._interaction_id)
@@ -851,7 +851,7 @@ class EventWriter:
             self._f[f"{group_prefix}/id"               ][new_start:new_end] = r_id
             self._f[f"{group_prefix}/geant4_id"        ][new_start:new_end] = r_geant4_id
             self._f[f"{group_prefix}/parent_id"        ][new_start:new_end] = r_parent_id
-            self._f[f"{group_prefix}/root_id"          ][new_start:new_end] = r_root_id
+            self._f[f"{group_prefix}/ancestor_id"          ][new_start:new_end] = r_ancestor_id
             self._f[f"{group_prefix}/pdg"              ][new_start:new_end] = r_pdg
             self._f[f"{group_prefix}/parent_pdg"       ][new_start:new_end] = r_parent_pdg
             self._f[f"{group_prefix}/interaction_id"   ][new_start:new_end] = r_int_id
@@ -1041,7 +1041,11 @@ class EventStore:
         geant4_ids      = (self._f["particles/geant4_id"       ][p_start:p_end]
                            if "particles/geant4_id" in self._f else ids)
         parent_ids      = self._f["particles/parent_id"        ][p_start:p_end]
-        root_ids        = self._f["particles/root_id"          ][p_start:p_end]
+        # Renamed from root_id in 3.0.0; older files still carry the old
+        # name, so accept either.
+        ancestor_ids    = (self._f["particles/ancestor_id"][p_start:p_end]
+                           if "particles/ancestor_id" in self._f
+                           else self._f["particles/root_id"][p_start:p_end])
         pdgs            = self._f["particles/pdg"              ][p_start:p_end]
         parent_pdgs     = self._f["particles/parent_pdg"       ][p_start:p_end]
         interaction_ids = self._f["particles/interaction_id"   ][p_start:p_end]
@@ -1064,7 +1068,7 @@ class EventStore:
                 id               = int(ids[k]),
                 geant4_id        = int(geant4_ids[k]),
                 parent_id        = int(parent_ids[k]),
-                root_id          = int(root_ids[k]),
+                ancestor_id          = int(ancestor_ids[k]),
                 pdg              = int(pdgs[k]),
                 parent_pdg       = int(parent_pdgs[k]),
                 interaction_id   = int(interaction_ids[k]),
@@ -1154,7 +1158,11 @@ class EventStore:
         geant4_ids      = (self._f["particles/geant4_id"       ][p_start:p_end]
                            if "particles/geant4_id" in self._f else ids)
         parent_ids      = self._f["particles/parent_id"        ][p_start:p_end]
-        root_ids        = self._f["particles/root_id"          ][p_start:p_end]
+        # Renamed from root_id in 3.0.0; older files still carry the old
+        # name, so accept either.
+        ancestor_ids    = (self._f["particles/ancestor_id"][p_start:p_end]
+                           if "particles/ancestor_id" in self._f
+                           else self._f["particles/root_id"][p_start:p_end])
         pdgs            = self._f["particles/pdg"              ][p_start:p_end]
         parent_pdgs     = self._f["particles/parent_pdg"       ][p_start:p_end]
         interaction_ids = self._f["particles/interaction_id"   ][p_start:p_end]
@@ -1178,7 +1186,7 @@ class EventStore:
                     id               = int(ids[k]),
                     geant4_id        = int(geant4_ids[k]),
                     parent_id        = int(parent_ids[k]),
-                    root_id          = int(root_ids[k]),
+                    ancestor_id          = int(ancestor_ids[k]),
                     pdg              = int(pdgs[k]),
                     parent_pdg       = int(parent_pdgs[k]),
                     interaction_id   = int(interaction_ids[k]),
@@ -1353,12 +1361,67 @@ def inspect_compression(path: str) -> dict:
     return result
 
 
+def _is_compressed(ds) -> bool:
+    """True when *ds* already carries any compression filter."""
+    return ds.compression is not None or bool(ds._filters)
+
+
+def dominant_filter(path: str) -> str:
+    """
+    The filter most datasets in *path* use: ``gzip``, ``lzf``, ``lz4``,
+    ``blosc``, ``szip`` or ``none``.
+
+    Files are mixed in principle -- every dataset carries its own filter --
+    so "the file's compression" is a majority vote, which is what
+    ``compression="auto"`` flips.
+    """
+    import h5py
+    counts: dict = {}
+
+    def name_of(ds):
+        c = ds.compression
+        if c in ("gzip", "lzf", "szip"):
+            return c
+        # h5py reports third-party filters as 'unknown', so go by filter ID:
+        # 32004 is LZ4, 32001 Blosc (the same IDs _compression_kwargs_from_
+        # filters matches on).
+        filters = dict(ds._filters or {})
+        if "32004" in filters:
+            return "lz4"
+        if "32001" in filters:
+            return "blosc"
+        return "none" if not filters else "unknown"
+
+    with h5py.File(path, "r") as f:
+        def visit(_name, obj):
+            if isinstance(obj, h5py.Dataset) and obj.chunks is not None:
+                n = name_of(obj)
+                counts[n] = counts.get(n, 0) + 1
+        f.visititems(visit)
+    return max(counts, key=counts.get) if counts else "none"
+
+
+def _resolve_auto(path: str, compression):
+    """Turn ``compression="auto"`` into a concrete filter by flipping."""
+    if not isinstance(compression, str) or compression.lower() != "auto":
+        return compression
+    current = dominant_filter(path)
+    flipped = {"lz4": "gzip", "blosc": "gzip", "gzip": "lz4"}.get(current)
+    if flipped is None:
+        raise ValueError(
+            f"cannot auto-flip {path!r}: its dominant filter is {current!r}, "
+            f"which has no obvious counterpart.  Pass an explicit filter."
+        )
+    return flipped
+
+
 def repack(path: str,
            compression: Optional[str] = None,
            compression_opts: Optional[int] = None,
            dst: Optional[str] = None,
            rechunk: bool = False,
            verify: bool = False,
+           scope: str = "source",
            verbose: bool = True) -> dict:
     """
     Rewrite *path* with chunk shapes sized from the final dataset lengths,
@@ -1390,7 +1453,9 @@ def repack(path: str,
         Filter for the output.  ``None`` (default) keeps whatever filter each
         source dataset already uses.  Pass e.g. ``"gzip"`` to switch -- which is
         how to produce a file the browser viewer can read, since h5wasm handles
-        gzip only.
+        gzip only.  ``"auto"`` flips the file's dominant filter between lz4
+        and gzip, which covers the round trip between a fast working copy and
+        a viewable one without having to remember which way round it is.
     compression_opts : int or None, optional
         Compression level for *compression* (gzip: 1-9).
     dst : str or None, optional
@@ -1402,6 +1467,11 @@ def repack(path: str,
         pysupera output this tends to win on both size and row-range read
         speed, because h5py picks smaller column-wise chunks, but it does
         change the layout rather than only the filter.
+    scope : {"source", "all"}, optional
+        Which datasets receive *compression*.  ``"source"`` (default) only
+        compresses datasets that were already compressed, so uncompressed
+        ones stay that way.  ``"all"`` compresses everything chunked.  Only
+        meaningful when *compression* is given.
     verify : bool, optional
         After writing, compare every dataset against the source and raise
         ``ValueError`` on any mismatch.  For an in-place repack the check runs
@@ -1427,6 +1497,10 @@ def repack(path: str,
             f"dst must differ from path; pass dst=None to repack in place "
             f"({path!r})"
         )
+
+    if scope not in ("source", "all"):
+        raise ValueError(f"scope must be 'source' or 'all', got {scope!r}")
+    compression = _resolve_auto(path, compression)
 
     size_before = os.path.getsize(path)
     in_place = dst is None
@@ -1479,6 +1553,10 @@ def repack(path: str,
                                       "compression_opts": obj.compression_opts}
                     elif str(compression).lower() in ("none", "~", ""):
                         kwargs = {}     # explicitly store uncompressed
+                    elif scope == "source" and not _is_compressed(obj):
+                        # Leave an uncompressed dataset uncompressed; the
+                        # offsets arrays are tiny and gain nothing.
+                        kwargs = {}
                     else:
                         kwargs = _compress_kwargs(compression,
                                                   compression_opts)
@@ -1600,6 +1678,12 @@ def repack_cli() -> None:
         # smallest and fastest for row-range reads, at the cost of relayout
         pysupera-repack out.h5 out_vis.h5 --compression gzip --rechunk
 
+        # flip lz4 <-> gzip without having to remember which way round
+        pysupera-repack out.h5 out_flipped.h5 --compression auto
+
+        # compress everything chunked, not just what was compressed already
+        pysupera-repack out.h5 out_small.h5 --compression gzip --scope all
+
     Walks the file generically instead of reconstructing events, so it can
     resize chunks and handles any layout, including the voxmap companion file.
     """
@@ -1614,9 +1698,13 @@ def repack_cli() -> None:
     parser.add_argument("dst", nargs="?", default=None,
                         help="Output file; omit to rewrite src in place")
     parser.add_argument("-c", "--compression", default=None,
-                        help="Filter for the output: gzip, lzf, lz4, "
-                             "blosc_lz4, none.  Omit to keep each dataset's "
-                             "existing filter")
+                        help="Filter for the output: auto, gzip, lzf, lz4, "
+                             "blosc_lz4, none.  'auto' flips the file's "
+                             "dominant filter between lz4 and gzip.  Omit to "
+                             "keep each dataset's existing filter")
+    parser.add_argument("--scope", default="source", choices=("source", "all"),
+                        help="Which datasets get the new filter: those already "
+                             "compressed, or every chunked one")
     parser.add_argument("-l", "--level", type=int, default=None,
                         help="Compression level (gzip: 1-9)")
     parser.add_argument("--rechunk", action="store_true",
@@ -1637,6 +1725,7 @@ def repack_cli() -> None:
            compression_opts=args.level,
            dst=args.dst,
            rechunk=args.rechunk,
+           scope=args.scope,
            verify=args.verify)
 
 

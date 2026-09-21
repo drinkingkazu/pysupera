@@ -21,7 +21,7 @@ from pysupera.utils import SemanticType
 from tests.conftest import make_particle, PT_PRIMARY, PT_TRACK, PT_DECAY
 
 
-SCALARS = ("id", "geant4_id", "parent_id", "root_id", "pdg", "parent_pdg",
+SCALARS = ("id", "geant4_id", "parent_id", "ancestor_id", "pdg", "parent_pdg",
            "interaction_id", "interaction_type")
 
 
@@ -46,13 +46,13 @@ class TestParticleRoundTrip:
 
     def test_scalar_fields_survive(self, tmp_path):
         p = make_particle(7, PT_DECAY, pdg=13, parent_pdg=211,
-                          parent_id=3, root_id=1, interaction_id=4)
+                          parent_id=3, ancestor_id=1, interaction_id=4)
         p.geant4_id = 4242
         path = str(tmp_path / "a.h5")
         write_events(path, [[p]])
         with read_events(path) as store:
             q = store[0][0]
-        assert (q.id, q.geant4_id, q.parent_id, q.root_id) == (7, 4242, 3, 1)
+        assert (q.id, q.geant4_id, q.parent_id, q.ancestor_id) == (7, 4242, 3, 1)
         assert (q.pdg, q.parent_pdg) == (13, 211)
         assert q._interaction_id == 4
         assert q._interaction_type == int(p._interaction_type)
@@ -360,3 +360,98 @@ class TestBackwardCompatibility:
         with read_events(path) as store:
             ps = store[0]
         assert [p.geant4_id for p in ps] == [p.id for p in ps] == [0, 1, 2]
+
+
+# ============================================================================
+# repack: auto-flip and scope
+# ============================================================================
+
+import pytest as _pytest                                        # noqa: E402
+from pysupera.io import repack, dominant_filter                 # noqa: E402
+
+
+def _mk(path, compression, n=64):
+    import h5py
+    with h5py.File(path, "w") as f:
+        g = f.create_group("g")
+        kw = {} if compression is None else {"compression": compression}
+        g.create_dataset("a", data=np.arange(n, dtype=np.int64),
+                         chunks=(16,), **kw)
+        g.create_dataset("b", data=np.arange(n, dtype=np.float32),
+                         chunks=(16,), **kw)
+        f.create_dataset("scalar", data=np.int64(n))
+    return str(path)
+
+
+class TestDominantFilter:
+
+    def test_reports_gzip(self, tmp_path):
+        assert dominant_filter(_mk(tmp_path / "g.h5", "gzip")) == "gzip"
+
+    def test_reports_none(self, tmp_path):
+        assert dominant_filter(_mk(tmp_path / "n.h5", None)) == "none"
+
+    def test_ignores_unchunked_scalars(self, tmp_path):
+        # the scalar dataset carries no filter and must not sway the vote
+        assert dominant_filter(_mk(tmp_path / "g.h5", "gzip")) == "gzip"
+
+
+class TestRepackAuto:
+    """``auto`` exists so a round trip needs no memory of the current state."""
+
+    def test_gzip_flips_to_lz4(self, tmp_path):
+        src = _mk(tmp_path / "g.h5", "gzip")
+        dst = str(tmp_path / "out.h5")
+        repack(src, compression="auto", dst=dst, verbose=False, verify=True)
+        assert dominant_filter(dst) == "lz4"
+
+    def test_the_flip_round_trips(self, tmp_path):
+        src = _mk(tmp_path / "g.h5", "gzip")
+        a = str(tmp_path / "a.h5"); b = str(tmp_path / "b.h5")
+        repack(src, compression="auto", dst=a, verbose=False)
+        repack(a, compression="auto", dst=b, verbose=False, verify=True)
+        assert dominant_filter(b) == "gzip"
+
+    def test_uncompressed_cannot_be_flipped(self, tmp_path):
+        src = _mk(tmp_path / "n.h5", None)
+        with _pytest.raises(ValueError, match="auto-flip"):
+            repack(src, compression="auto", dst=str(tmp_path / "o.h5"),
+                   verbose=False)
+
+    def test_data_survives_the_flip(self, tmp_path):
+        import h5py
+        src = _mk(tmp_path / "g.h5", "gzip")
+        dst = str(tmp_path / "out.h5")
+        repack(src, compression="auto", dst=dst, verbose=False, verify=True)
+        with h5py.File(dst, "r") as f:
+            assert np.array_equal(f["g/a"][:], np.arange(64, dtype=np.int64))
+
+
+class TestRepackScope:
+
+    def test_source_leaves_uncompressed_alone(self, tmp_path):
+        src = _mk(tmp_path / "n.h5", None)
+        dst = str(tmp_path / "out.h5")
+        repack(src, compression="gzip", dst=dst, verbose=False, verify=True)
+        assert dominant_filter(dst) == "none"
+
+    def test_all_compresses_everything(self, tmp_path):
+        src = _mk(tmp_path / "n.h5", None)
+        dst = str(tmp_path / "out.h5")
+        repack(src, compression="gzip", dst=dst, scope="all",
+               verbose=False, verify=True)
+        assert dominant_filter(dst) == "gzip"
+
+    def test_scope_does_not_affect_already_compressed(self, tmp_path):
+        src = _mk(tmp_path / "g.h5", "gzip")
+        for scope in ("source", "all"):
+            dst = str(tmp_path / f"{scope}.h5")
+            repack(src, compression="lzf", dst=dst, scope=scope,
+                   verbose=False, verify=True)
+            assert dominant_filter(dst) == "lzf"
+
+    def test_a_bad_scope_is_rejected(self, tmp_path):
+        src = _mk(tmp_path / "g.h5", "gzip")
+        with _pytest.raises(ValueError, match="scope"):
+            repack(src, compression="gzip", dst=str(tmp_path / "o.h5"),
+                   scope="everything", verbose=False)
