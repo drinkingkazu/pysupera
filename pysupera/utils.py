@@ -114,7 +114,16 @@ class PointFeature(int):
         Additional scalar feature (e.g. a second energy-like quantity) summed
         over all hits that merge into the same output point.
     id : int = 6
-        (optional) integer hit ID, e.g. for matching to truth-level information.
+        Row index of the deposit in the event's **input** step array, assigned
+        by the reader (``arange`` over the whole event, then sliced per
+        particle).  Use it to join a point back to the exact input step.
+
+        Two cautions.  In-memory clouds are ``(N, 7)`` but the HDF5 output
+        stores only columns 0-5, so ``pc[:, PointFeature.id]`` works on a
+        :class:`~pysupera.data.Particle` and is **out of bounds** on points
+        read back from a file.  And the merge rules define no aggregation for
+        it, so once voxelization collapses several deposits into one row the
+        value no longer identifies anything.
     """
     x      = 0
     y      = 1
@@ -218,7 +227,7 @@ def trace_ancestry(particle_id: int, particles, print_result: bool = True):
             return _fmt_particle.format(
                 id=p.id, pdg=p.pdg,
                 sem=p.sem_type.name,
-                parent=p.parent_id, anc=p.root_id,
+                parent=p.parent_id, anc=p.ancestor_id,
                 pc=len(p.point_cloud),
             ) + (f"  [{tag}]" if tag else "")
 
@@ -256,25 +265,62 @@ def trace_ancestry(particle_id: int, particles, print_result: bool = True):
     return chain, children
 
 
+def _chain_root(pid, by_id, memo):
+    """
+    Root of the ``parent_id`` chain starting at *pid*.
+
+    Memoised across calls -- one shower shares one chain, so without it the
+    walk is quadratic in the depth of the tree.  Cycle-safe: a chain that
+    loops back on itself roots at the node where the loop was detected, since
+    there is no better answer and looping forever is not an option.
+    """
+    path, seen = [], set()
+    cur = pid
+    while cur not in memo:
+        if cur in seen:                      # cycle
+            memo[cur] = cur
+            break
+        seen.add(cur)
+        nxt = int(by_id[cur].parent_id)
+        if nxt == cur or nxt not in by_id:   # self-parented, or the end
+            memo[cur] = cur
+            break
+        path.append(cur)
+        cur = nxt
+    root = memo[cur]
+    for node in path:
+        memo[node] = root
+    return root
+
+
 def resolve_orphans(particles, verbose: bool = False):
     """
-    Repair dangling ``parent_id`` and ``root_id`` references in a particle list
+    Repair dangling ``parent_id`` and ``ancestor_id`` references in a particle list
     so that every genealogy walk terminates at a particle that is actually
     present in the event.
 
-    An *orphan* is a particle whose ``parent_id`` (or ``root_id``) refers to a
+    An *orphan* is a particle whose ``parent_id`` (or ``ancestor_id``) refers to a
     particle ID that does not appear in *particles*.  Such dangling references
     cause :meth:`~pysupera.partitioner.ParticlePartitioner._build_relationships`
     to build an incomplete ``children_map`` / ``ancestor_map``, and they also
     break the ``find_initiator`` walk inside
     :func:`~pysupera.merge.merge_em_showers`.
 
-    The repair rule is conservative:
+    The repair proceeds in two passes, and the order matters:
 
-    * If ``p.parent_id`` is not in the known-ID set, reset it to ``p.id``
-      (i.e. make the particle a primary/root with respect to this event list).
-    * If ``p.root_id`` is not in the known-ID set, reset it to ``p.id``
-      as well.
+    1. If ``p.parent_id`` is not in the known-ID set, reset it to ``p.id``
+       (i.e. make the particle a primary/root with respect to this event list).
+    2. If ``p.ancestor_id`` is not in the known-ID set, set it to the root of
+       the *repaired* parent chain.
+
+    Step 2 used to reset a dangling ancestor to ``p.id`` as well, which is
+    wrong whenever the parent chain still leads somewhere real.  Dropping one
+    particle -- a primary photon whose only deposits were two stray Compton
+    scatters, say -- strands every descendant that named it as ancestor, even
+    though their ``parent_id`` links are intact and terminate at a surviving
+    particle.  Self-rooting them then scatters one shower across hundreds of
+    false roots and contradicts :func:`validate_ancestor_ids`.  Walking the
+    chain keeps the two fields telling the same story.
 
     This function modifies *particles* **in place** and returns the same list.
 
@@ -295,19 +341,26 @@ def resolve_orphans(particles, verbose: bool = False):
     >>> particles = resolve_orphans(particles)
     >>> partitioner = ParticlePartitioner(particles=particles, ...)
     """
-    known_ids = {p.id for p in particles}
+    by_id = {p.id: p for p in particles}
     n_parent_fixed = 0
-    n_root_fixed   = 0
+    n_ancestor_fixed   = 0
+
+    # Pass 1 -- parents.  Must complete before any chain is walked, or a walk
+    # could follow a link that pass 1 is about to cut.
     for p in particles:
-        if p.parent_id not in known_ids:
+        if p.parent_id not in by_id:
             p.parent_id = p.id
             n_parent_fixed += 1
-        if p.root_id not in known_ids:
-            p.root_id = p.id
-            n_root_fixed += 1
-    if verbose and (n_parent_fixed or n_root_fixed):
+
+    # Pass 2 -- ancestors, derived from the repaired chains.
+    memo: dict = {}
+    for p in particles:
+        if p.ancestor_id not in by_id:
+            p.ancestor_id = _chain_root(p.id, by_id, memo)
+            n_ancestor_fixed += 1
+    if verbose and (n_parent_fixed or n_ancestor_fixed):
         print(f"[resolve_orphans] repaired {n_parent_fixed} parent_id(s) "
-              f"and {n_root_fixed} root_id(s) out of {len(particles)} particles")
+              f"and {n_ancestor_fixed} ancestor_id(s) out of {len(particles)} particles")
     return particles
 
 
@@ -495,24 +548,24 @@ def validate_interaction_ids(particles,
     return missing
 
 
-def validate_root_ids(particles,
+def validate_ancestor_ids(particles,
                       raise_on_missing: bool = True,
                       max_report: int = 10,
                       verbose: bool = False) -> list:
     """
-    Check that every particle's ``root_id`` is the primary it descends from.
+    Check that every particle's ``ancestor_id`` is the primary it descends from.
 
     The invariant checked is that walking ``parent_id`` upwards from a particle
-    terminates at exactly ``root_id``.  It is worth checking because the
+    terminates at exactly ``ancestor_id``.  It is worth checking because the
     ancestor field in EDepSim files is not always consistent with the parent
     links: a secondary written with ``ancestor_track_id == its own track_id``
     becomes a false root, and every descendant inherits it, so a handful of bad
     entries can put a third of an event on the wrong root.  See
-    :func:`~pysupera.readers.format_edepsim_h5._get_root_id`, which derives
-    ``root_id`` from the parent chain for this reason.
+    :func:`~pysupera.readers.format_edepsim_h5._get_ancestor_id`, which derives
+    ``ancestor_id`` from the parent chain for this reason.
 
-    Two failure modes are reported: a ``root_id`` naming a particle absent from
-    the event, and a ``root_id`` that disagrees with the primary the parent
+    Two failure modes are reported: a ``ancestor_id`` naming a particle absent from
+    the event, and a ``ancestor_id`` that disagrees with the primary the parent
     chain actually leads to.
 
     Run this **after** :func:`resolve_orphans`, which legitimately re-roots
@@ -558,17 +611,17 @@ def validate_root_ids(particles,
 
     offenders, reasons = [], []
     for p in particles:
-        rid = int(p.root_id)
+        rid = int(p.ancestor_id)
         if rid not in by_id:
             offenders.append(p)
-            reasons.append(f"{int(p.id)}(pdg={int(p.pdg)}): root_id={rid} "
+            reasons.append(f"{int(p.id)}(pdg={int(p.pdg)}): ancestor_id={rid} "
                            f"is not a particle in this event")
             continue
         primary = _walk_primary(p)
         if primary != rid:
             offenders.append(p)
             reasons.append(
-                f"{int(p.id)}(pdg={int(p.pdg)}): root_id={rid} but the "
+                f"{int(p.id)}(pdg={int(p.pdg)}): ancestor_id={rid} but the "
                 f"parent chain leads to {primary}"
                 f"(pdg={int(by_id[primary].pdg)})"
             )
@@ -576,12 +629,12 @@ def validate_root_ids(particles,
     if not offenders:
         if verbose:
             print(f"[validate] all {len(particles)} particle(s) have a "
-                  f"consistent root_id")
+                  f"consistent ancestor_id")
         return []
 
     shown = reasons[:max_report]
     msg = (f"{len(offenders)} of {len(particles)} particle(s) have an "
-           f"inconsistent root_id.  First {len(shown)}:\n  "
+           f"inconsistent ancestor_id.  First {len(shown)}:\n  "
            + "\n  ".join(shown))
     if len(reasons) > len(shown):
         msg += f"\n  ... and {len(reasons) - len(shown)} more"
