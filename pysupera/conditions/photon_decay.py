@@ -10,7 +10,24 @@ if TYPE_CHECKING:
     from ..data import Particle
 
 _PHOTON_PDG = 22
-_DECAY_PRODUCTS = {11, -11}   # electron and positron
+_DECAY_PRODUCTS = {11, -11}
+
+
+def _is_own_fragment(child, parent) -> bool:
+    """
+    True when *child* is a defragmentation split-off of *parent*.
+
+    Such a piece carries the parent's PDG (22) and, decisively, the parent's
+    ``geant4_id``: it *is* the same Geant4 particle, cut in two because its
+    deposits were too far apart to cluster.  Matching on ``geant4_id`` rather
+    than PDG alone is what keeps genuine photon-from-photon secondaries --
+    fluorescence X-rays, which are distinct particles -- out of this path.
+    """
+    if parent is None or int(child.pdg) != _PHOTON_PDG:
+        return False
+    cg = getattr(child, "geant4_id", None)
+    pg = getattr(parent, "geant4_id", None)
+    return cg is not None and pg is not None and int(cg) == int(pg)   # electron and positron
 
 
 class PhotonDecay(PartitionConditionBase):
@@ -31,7 +48,13 @@ class PhotonDecay(PartitionConditionBase):
 
     Because the photon has no spatial hits of its own, proximity checks are
     meaningless here.  The merge is driven purely by the parent-child
-    relationship in the particle tree.  This condition therefore works
+    relationship in the particle tree.
+
+    A photon that *does* carry hits -- Geant4 deposits argon atomic-relaxation
+    energy at a photoabsorption vertex, so most photons carry one such point --
+    may be cut into pieces by defragmentation.  Those pieces are PDG 22, not
+    ±11, so they are matched on ``geant4_id`` instead and re-attached to the
+    photon they came from.  This condition therefore works
     **only** in the partition-level proximity path
     (``partition_level_proximity=True``) via
     :meth:`get_unconditional_merges`; the legacy particle-level path
@@ -77,7 +100,9 @@ class PhotonDecay(PartitionConditionBase):
             rep_lookup: Dict[int, 'Particle']) -> List[Tuple[int, int]]:
         """
         Return directed pairs ``(child_rep_id, photon_rep_id)`` for all
-        PDG ±11 children of photon representatives.
+        PDG ±11 children of photon representatives, plus any PDG 22 child
+        that is a defragmentation split-off of the photon itself (see
+        :func:`_is_own_fragment`).
 
         Called on every convergence pass with the live *rep_lookup*, so
         chains of merges resolve correctly across passes.
@@ -104,7 +129,16 @@ class PhotonDecay(PartitionConditionBase):
         # returns a PhotonDecay entry explaining what happened.
         photon_children: Dict[int, List['Particle']] = defaultdict(list)
         for p in partitioner.particles:
-            if p.pdg in _DECAY_PRODUCTS and p.parent_pdg == _PHOTON_PDG:
+            if p.parent_pdg != _PHOTON_PDG:
+                continue
+            if p.pdg in _DECAY_PRODUCTS:
+                photon_children[p.parent_id].append(p)
+            elif _is_own_fragment(p, partitioner.particle_lookup.get(p.parent_id)):
+                # A piece of the photon itself.  Without this it could only
+                # rejoin by drifting within distance_threshold of a sibling
+                # electron -- which is a coin flip: in one measured case two
+                # such pieces sat 0.01 mm and 5.30 mm from their nearest
+                # sibling, against a 5.2 mm threshold.
                 photon_children[p.parent_id].append(p)
 
         _SIBLING_STAGE = f"{self.name}: Sibling Grouping"

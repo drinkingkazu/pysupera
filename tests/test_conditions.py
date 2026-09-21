@@ -40,9 +40,9 @@ class TestPhotonDecay:
     def test_electron_child_of_photon_merges(self):
         photon = make_particle(1, PT_PHOTON, pdg=22,
                                pc=np.zeros((0, 3), dtype=np.float32),
-                               parent_id=1, root_id=1)
+                               parent_id=1, ancestor_id=1)
         electron = make_particle(2, PT_PRIMARY, pdg=11, parent_pdg=22,
-                                  parent_id=1, root_id=1,
+                                  parent_id=1, ancestor_id=1,
                                   offset=(0, 0, 0))
         prt = _part(photon, electron)
         parts = prt.partition(PhotonDecay(), verbose=False)
@@ -51,9 +51,9 @@ class TestPhotonDecay:
     def test_positron_child_of_photon_merges(self):
         photon = make_particle(1, PT_PHOTON, pdg=22,
                                pc=np.zeros((0, 3), dtype=np.float32),
-                               parent_id=1, root_id=1)
+                               parent_id=1, ancestor_id=1)
         positron = make_particle(2, PT_PRIMARY, pdg=-11, parent_pdg=22,
-                                  parent_id=1, root_id=1,
+                                  parent_id=1, ancestor_id=1,
                                   offset=(0.1, 0, 0))
         prt = _part(photon, positron)
         parts = prt.partition(PhotonDecay(), verbose=False)
@@ -62,11 +62,11 @@ class TestPhotonDecay:
     def test_both_decay_products_in_same_partition(self):
         photon = make_particle(1, PT_PHOTON, pdg=22,
                                pc=np.zeros((0, 3), dtype=np.float32),
-                               parent_id=1, root_id=1)
+                               parent_id=1, ancestor_id=1)
         electron = make_particle(2, PT_PRIMARY, pdg=11, parent_pdg=22,
-                                  parent_id=1, root_id=1)
+                                  parent_id=1, ancestor_id=1)
         positron = make_particle(3, PT_PRIMARY, pdg=-11, parent_pdg=22,
-                                  parent_id=1, root_id=1,
+                                  parent_id=1, ancestor_id=1,
                                   offset=(0.2, 0, 0))
         prt = _part(photon, electron, positron)
         parts = prt.partition(PhotonDecay(), verbose=False)
@@ -76,10 +76,10 @@ class TestPhotonDecay:
     def test_non_photon_parent_no_merge(self):
         # parent is a track (parent_pdg=13, not 22) → no PhotonDecay merge
         track = make_particle(1, PT_TRACK, pdg=13,
-                               parent_id=1, root_id=1,
+                               parent_id=1, ancestor_id=1,
                                offset=(0, 0, 0))
         electron = make_particle(2, PT_PRIMARY, pdg=11, parent_pdg=13,
-                                  parent_id=1, root_id=1,
+                                  parent_id=1, ancestor_id=1,
                                   offset=(50, 0, 0))  # far away
         prt = _part(track, electron)
         parts = prt.partition(PhotonDecay(), verbose=False)
@@ -93,10 +93,10 @@ class TestPhotonDecay:
 class TestTouchingEMShower:
     def test_touching_parent_child_electrons_merge(self):
         parent = make_particle(1, PT_PRIMARY, pdg=11,
-                                parent_id=1, root_id=1,
+                                parent_id=1, ancestor_id=1,
                                 offset=(0, 0, 0))
         child = make_particle(2, PT_COMPTON, pdg=11,
-                               parent_id=1, root_id=1,
+                               parent_id=1, ancestor_id=1,
                                offset=(0.05, 0, 0))  # very close → touching
         prt = _part(parent, child)
         parts = prt.partition(TouchingEMShower(), verbose=False)
@@ -104,11 +104,11 @@ class TestTouchingEMShower:
 
     def test_different_ancestor_no_merge(self):
         parent = make_particle(1, PT_PRIMARY, pdg=11,
-                                parent_id=1, root_id=1,
+                                parent_id=1, ancestor_id=1,
                                 offset=(0, 0, 0))
-        # child has different root_id → TouchingEMShower filter rejects
+        # child has different ancestor_id → TouchingEMShower filter rejects
         child = make_particle(2, PT_COMPTON, pdg=11,
-                               parent_id=1, root_id=99,   # different ancestor
+                               parent_id=1, ancestor_id=99,   # different ancestor
                                offset=(0.05, 0, 0))
         prt = _part(parent, child)
         parts = prt.partition(TouchingEMShower(), verbose=False)
@@ -116,10 +116,10 @@ class TestTouchingEMShower:
 
     def test_non_touching_parent_child_not_merged(self):
         parent = make_particle(1, PT_PRIMARY, pdg=11,
-                                parent_id=1, root_id=1,
+                                parent_id=1, ancestor_id=1,
                                 offset=(0, 0, 0))
         child = make_particle(2, PT_COMPTON, pdg=11,
-                               parent_id=1, root_id=1,
+                               parent_id=1, ancestor_id=1,
                                offset=(100, 0, 0))  # far away
         prt = _part(parent, child, D=5.0)
         parts = prt.partition(TouchingEMShower(), verbose=False)
@@ -128,10 +128,10 @@ class TestTouchingEMShower:
     def test_track_particle_not_included_as_candidate(self):
         # A track (pdg=13) parent should not produce EM shower candidates
         parent = make_particle(1, PT_TRACK, pdg=13,
-                                parent_id=1, root_id=1,
+                                parent_id=1, ancestor_id=1,
                                 offset=(0, 0, 0))
         child = make_particle(2, PT_COMPTON, pdg=11,
-                               parent_id=1, root_id=1,
+                               parent_id=1, ancestor_id=1,
                                offset=(0.05, 0, 0))
         prt = _part(parent, child)
         parts = prt.partition(TouchingEMShower(), verbose=False)
@@ -145,10 +145,10 @@ class TestTouchingEMShower:
 class TestCombineLEScatters:
     def test_two_touching_le_scatters_merge(self):
         le1 = make_particle(1, PT_IONIZATION, pdg=11,
-                             parent_id=1, root_id=1,
+                             parent_id=1, ancestor_id=1,
                              offset=(0, 0, 0))
         le2 = make_particle(2, PT_IONIZATION, pdg=11,
-                             parent_id=2, root_id=2,
+                             parent_id=2, ancestor_id=2,
                              offset=(0.05, 0, 0))  # touching
         assert le1.sem_type == SemanticType.kLEScatter
         assert le2.sem_type == SemanticType.kLEScatter
@@ -244,3 +244,47 @@ class TestAbsorbLEScatter:
         prt = _part(track, le)
         parts = prt.partition(AbsorbLEScatter(), verbose=False)
         assert _same_partition(parts, 1, 2)
+
+
+# ============================================================================
+# PhotonDecay: re-attaching the photon's own split-off pieces
+# ============================================================================
+
+from pysupera.conditions.photon_decay import _is_own_fragment   # noqa: E402
+
+
+class _Stub:
+    def __init__(self, pid, pdg, parent_id, parent_pdg, g4):
+        self.id, self.pdg = pid, pdg
+        self.parent_id, self.parent_pdg = parent_id, parent_pdg
+        self.geant4_id = g4
+
+
+class TestIsOwnFragment:
+    """
+    A split-off piece IS the parent photon, so it shares its geant4_id.  A
+    fluorescence X-ray is a distinct particle and must not match, or two
+    genuinely separate objects get merged.
+    """
+
+    def test_split_off_piece_matches(self):
+        parent = _Stub(1, 22, 1, 0, 500)
+        child = _Stub(9, 22, 1, 22, 500)
+        assert _is_own_fragment(child, parent)
+
+    def test_fluorescence_photon_does_not_match(self):
+        parent = _Stub(1, 22, 1, 0, 500)
+        child = _Stub(9, 22, 1, 22, 501)       # its own Geant4 track
+        assert not _is_own_fragment(child, parent)
+
+    def test_electron_child_does_not_match(self):
+        parent = _Stub(1, 22, 1, 0, 500)
+        assert not _is_own_fragment(_Stub(9, 11, 1, 22, 500), parent)
+
+    def test_missing_parent_does_not_match(self):
+        assert not _is_own_fragment(_Stub(9, 22, 1, 22, 500), None)
+
+    def test_missing_geant4_id_does_not_match(self):
+        class NoG4:
+            id, pdg, parent_id, parent_pdg = 9, 22, 1, 22
+        assert not _is_own_fragment(NoG4(), _Stub(1, 22, 1, 0, 500))
