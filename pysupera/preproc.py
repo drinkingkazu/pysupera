@@ -173,9 +173,10 @@ def _split_fragments(
 
     Returns
     -------
-    kept : Particle or None
-        Original particle, possibly with point_cloud trimmed to large-fragment
-        points only.  ``None`` if all fragments were small.
+    kept : Particle
+        Original particle, with ``point_cloud`` trimmed to the large-fragment
+        points -- empty when every fragment was small.  Never ``None``: the
+        particle is retained as a genealogy node either way.
     spawned : list of Particle
         Newly created kLEScatter particles, one per small fragment.
     next_id : int
@@ -208,9 +209,13 @@ def _split_fragments(
                 # file and hiding the fact that the pieces share an origin.
                 geant4_id        = getattr(p, "geant4_id", p.id),
                 parent_id        = p.id,
-                root_id          = p.root_id,
+                ancestor_id          = p.ancestor_id,
                 pdg              = p.pdg,
-                parent_pdg       = p.parent_pdg,
+                # The piece hangs off *p*, so its parent's PDG is p's own --
+                # not p's parent's.  Copying p.parent_pdg here would leave
+                # parent_id and parent_pdg describing different particles,
+                # and PhotonDecay keys off parent_pdg.
+                parent_pdg       = p.pdg,
                 interaction_id   = p._interaction_id,
                 interaction_type = p._interaction_type,
                 point_cloud      = frag_pc,
@@ -225,10 +230,22 @@ def _split_fragments(
         p.point_cloud = pc[large_mask]
         p.voxmap = _kept_vm
         return p, spawned, next_id
-    # Every fragment was small, so *p* is dropped.  References to it are
-    # repaired by the caller (see the dropped-particle remap in
-    # DefragmentBase.process).
-    return None, spawned, next_id
+
+    # Every fragment was small.  Keep *p* as a genealogy node with an empty
+    # cloud rather than dropping it -- its points now live in the spawned
+    # pieces.  Dropping it used to strand its whole subtree: a primary photon
+    # whose only deposits were two stray Compton/photoabsorption points would
+    # vanish, and the 534 MeV shower hanging off it would re-root on a
+    # secondary electron.  Over 100 events that removed 2,314 photons, every
+    # one of them the parent of an e+/e- pair, and 77% heading a subtree
+    # larger than min_pc_size.
+    #
+    # A neutral particle with no cloud of its own is the ordinary case the
+    # merging conditions already expect -- PhotonDecay is genealogical and
+    # needs no points -- so the node costs nothing and keeps the tree walkable.
+    p.point_cloud = pc[:0]
+    p.voxmap = subset_voxmap(getattr(p, 'voxmap', None), large_mask)
+    return p, spawned, next_id
 
 
 # ============================================================================
@@ -492,11 +509,12 @@ class DefragmentBase(ABC):
         # ---------------------------------------------------------------
         # Repair references to particles this pass removed
         # ---------------------------------------------------------------
-        # A particle whose every fragment was small is dropped from the event.
-        # Anything still pointing at it -- its real children, and the fragments
-        # split off from it -- is left with a dangling parent_id.
+        # Retained for safety: _split_fragments no longer drops anything, so
+        # this set is normally empty.  A particle removed by some other route
+        # would otherwise leave its children -- and the fragments split off
+        # from it -- with a dangling parent_id.
         # resolve_orphans later rewrites such a reference to the particle's own
-        # id while leaving root_id pointing at the original ancestor, producing
+        # id while leaving ancestor_id pointing at the original ancestor, producing
         # a particle that is its own parent yet claims a foreign root.  Redirect
         # to the dropped particle's parent instead, following chains of
         # consecutive drops, so the genealogy stays walkable.
@@ -511,11 +529,17 @@ class DefragmentBase(ABC):
                     pid = dropped[pid]
                 return pid
 
+            # parent_pdg has to follow parent_id, or the redirect leaves the
+            # two naming different particles again.
+            pdg_by_id = {int(x.id): int(x.pdg) for x in result + spawned}
             for q in result + spawned:
                 if int(q.parent_id) in dropped:
                     q.parent_id = _survivor(int(q.parent_id))
-                if int(q.root_id) in dropped:
-                    q.root_id = _survivor(int(q.root_id))
+                    new_pdg = pdg_by_id.get(int(q.parent_id))
+                    if new_pdg is not None:
+                        q.parent_pdg = new_pdg
+                if int(q.ancestor_id) in dropped:
+                    q.ancestor_id = _survivor(int(q.ancestor_id))
 
         cc_sizes = [len(xyz) for _, _, xyz in needs_cc]
         self.last_stats = {

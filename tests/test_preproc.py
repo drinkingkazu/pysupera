@@ -190,11 +190,11 @@ class TestScipyDefragmenter:
         large = _cluster_pts(10, (0, 0, 0))
         small = _cluster_pts(2, (100, 0, 0))
         p = make_particle(42, PT_PRIMARY, pdg=11, pc=np.vstack([large, small]),
-                          root_id=99)
+                          ancestor_id=99)
         result = self.defrag().process([p])
         spawned = next(r for r in result if r.id != 42)
         assert spawned.parent_id == 42
-        assert spawned.root_id == 99
+        assert spawned.ancestor_id == 99
 
     # ── sem_types filter ─────────────────────────────────────────────────
 
@@ -746,3 +746,82 @@ class TestVoxelizationMappingRoundtrip:
             assert len(ids) == len(set(ids.astype(int).tolist())), (
                 f"Particle {p.id}: output voxel IDs are not unique: {ids}"
             )
+
+
+# ============================================================================
+# Split-off fragment provenance
+# ============================================================================
+
+class TestSplitFragmentParentPdg:
+    """
+    A split-off piece hangs off the particle it came from, so parent_id and
+    parent_pdg must describe that same particle.  PhotonDecay keys off
+    parent_pdg, so a stale value silently breaks re-association.
+    """
+
+    def _two_far_clusters(self, pdg, parent_pdg, n_each):
+        # two clusters far enough apart to be separate components
+        a = np.zeros((n_each, 3), np.float32)
+        b = np.zeros((n_each, 3), np.float32) + 500.0
+        return make_particle(1, PT_PRIMARY, pdg=pdg, parent_pdg=parent_pdg,
+                             pc=np.concatenate([a, b]))
+
+    def test_spawned_piece_names_its_real_parent(self):
+        # big cluster keeps the particle alive; the small one is split off
+        a = np.zeros((20, 3), np.float32)
+        b = np.zeros((2, 3), np.float32) + 500.0
+        p = make_particle(1, PT_PRIMARY, pdg=22, parent_pdg=13,
+                          pc=np.concatenate([a, b]))
+        out = ScipyDefragmenter(distance_threshold=5.0,
+                                min_pc_size=5).process([p])
+        spawned = [q for q in out if q.id != 1]
+        assert spawned, "expected a split-off piece"
+        for q in spawned:
+            assert q.parent_id == 1
+            assert q.parent_pdg == 22        # the photon's PDG, not 13
+
+    def test_spawned_piece_inherits_geant4_id(self):
+        a = np.zeros((20, 3), np.float32)
+        b = np.zeros((2, 3), np.float32) + 500.0
+        p = make_particle(1, PT_PRIMARY, pdg=22, pc=np.concatenate([a, b]))
+        p.geant4_id = 77
+        out = ScipyDefragmenter(distance_threshold=5.0,
+                                min_pc_size=5).process([p])
+        for q in [x for x in out if x.id != 1]:
+            assert q.geant4_id == 77
+
+    def test_a_fully_split_particle_survives_as_a_genealogy_node(self):
+        # every fragment of particle 2 is small.  It used to be dropped,
+        # stranding its child 3; it must now survive with an empty cloud.
+        p1 = make_particle(1, PT_PRIMARY, pdg=13, n_pts=20)
+        p2 = self._two_far_clusters(22, 13, 2)
+        p2.id = 2; p2.parent_id = 1; p2.ancestor_id = 1
+        p3 = make_particle(3, PT_PRIMARY, pdg=11, parent_pdg=22,
+                           parent_id=2, ancestor_id=1, n_pts=20)
+        out = ScipyDefragmenter(distance_threshold=5.0,
+                                min_pc_size=5).process([p1, p2, p3])
+        by = {q.id: q for q in out}
+        assert 2 in by, "particle 2 must be kept as a genealogy node"
+        assert len(by[2].point_cloud) == 0, "its points moved to the pieces"
+        assert by[3].parent_id == 2          # the chain is still walkable
+        assert by[3].parent_pdg == 22
+
+    def test_its_points_move_to_the_spawned_pieces(self):
+        p = self._two_far_clusters(22, 13, 2)
+        out = ScipyDefragmenter(distance_threshold=5.0,
+                                min_pc_size=5).process([p])
+        by = {q.id: q for q in out}
+        assert len(by[p.id].point_cloud) == 0
+        spawned = [q for q in out if q.id != p.id]
+        assert sum(len(q.point_cloud) for q in spawned) == 4   # 2 + 2
+        for q in spawned:
+            assert q.parent_id == p.id and q.parent_pdg == 22
+
+    def test_nothing_is_dropped(self):
+        ps = [make_particle(1, PT_PRIMARY, pdg=13, n_pts=20),
+              self._two_far_clusters(22, 13, 1),
+              self._two_far_clusters(11, 22, 2)]
+        ps[1].id, ps[2].id = 2, 3
+        out = ScipyDefragmenter(distance_threshold=5.0,
+                                min_pc_size=5).process(ps)
+        assert {1, 2, 3} <= {q.id for q in out}
