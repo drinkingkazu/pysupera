@@ -78,7 +78,7 @@ from .format_edepsim_h5 import (
     _get_parent_pdg,
     _get_interaction_id,
     _get_interaction_type,
-    _get_root_id,
+    _get_ancestor_id,
     _to_index_space,
 )
 from ..data import Particle
@@ -228,9 +228,20 @@ def get_visible_segment_indices_by_track(
         )
 
         # Group visible segment indices by track ID.
-        for track_id in np.unique(track_ids_for_visible):
-            mask = track_ids_for_visible == track_id
-            track_to_indices[int(track_id)] = visible_seg_indices[mask]
+        #
+        # Sort once and split at the boundaries: O(N log N).  Comparing the
+        # whole array against each unique track instead is O(T*N), and with
+        # ~5k tracks over ~250k visible segments that single loop was the
+        # largest self-time cost in the whole pipeline.
+        if len(track_ids_for_visible):
+            order      = np.argsort(track_ids_for_visible, kind='stable')
+            tid_sorted = track_ids_for_visible[order]
+            seg_sorted = visible_seg_indices[order]
+            edges = np.flatnonzero(
+                np.r_[True, tid_sorted[1:] != tid_sorted[:-1], True]
+            )
+            for a, b in zip(edges[:-1], edges[1:]):
+                track_to_indices[int(tid_sorted[a])] = seg_sorted[a:b]
 
         result.append(track_to_indices)
 
@@ -468,6 +479,8 @@ class JaxtpcHDF5Reader(EventReaderBase):
         # ── Step 1: load particle metadata from the EDepSim file ──────────
         # These provide PDG code, track IDs, interaction type, etc.
         verts = self._edepsim_file[self._vertex_key][index]
+        #: vertices of the most recently read event, for the interactions table
+        self.last_vertices = verts
         parts = self._edepsim_file[self._part_key][index]
 
         # ── Step 2: load per-volume segment data from the JAXTPC seg file ─
@@ -514,12 +527,12 @@ class JaxtpcHDF5Reader(EventReaderBase):
         int_ids = _get_interaction_id(parts, verts)
 
 
-        _ids, _par, _root, _g4 = _to_index_space(parts, _get_root_id(parts))
+        _ids, _par, _root, _g4 = _to_index_space(parts, _get_ancestor_id(parts))
 
         return Particle.from_flat_arrays(
             ids                 = _ids,
             parent_ids          = _par,
-            root_ids            = _root,
+            ancestor_ids            = _root,
             pdgs                = parts['pdg'],
             parent_pdgs         = _get_parent_pdg(parts),
             interaction_ids     = int_ids,

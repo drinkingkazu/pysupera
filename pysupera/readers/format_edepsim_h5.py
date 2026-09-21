@@ -19,7 +19,7 @@ Expected HDF5 layout
                   per-event particle index instead (see _to_index_space).
     parent_track_id  Immediate parent track ID
     root_track_id     Root ancestor track ID.  Unreliable in some files -- see
-                  _get_root_id, which re-derives it from the parent chain.
+                  _get_ancestor_id, which re-derives it from the parent chain.
     pdg           PDG Monte Carlo particle code
     proc_start    G4 process type integer at particle start vertex
     subproc_start G4 process subtype integer at particle start vertex
@@ -277,7 +277,7 @@ def _to_index_space(parts: np.ndarray, root_track_ids: np.ndarray):
         from this list (a primary, or one whose parent was dropped upstream)
         becomes its own parent, which is the convention every genealogy walk
         in pysupera terminates on.
-    root_idx : ndarray of int32
+    ancestor_idx : ndarray of int32
         Index of each particle's primary ancestor.
     geant4_ids : ndarray of int32
         The original ``track_id`` values, unchanged.
@@ -288,14 +288,14 @@ def _to_index_space(parts: np.ndarray, root_track_ids: np.ndarray):
 
     ids = np.arange(n, dtype=np.int32)
     parent_idx = np.empty(n, dtype=np.int32)
-    root_idx = np.empty(n, dtype=np.int32)
+    ancestor_idx = np.empty(n, dtype=np.int32)
     for i in range(n):
         parent_idx[i] = index_of.get(int(parts['parent_track_id'][i]), i)
-        root_idx[i] = index_of.get(int(root_track_ids[i]), i)
-    return ids, parent_idx, root_idx, track_ids.astype(np.int32)
+        ancestor_idx[i] = index_of.get(int(root_track_ids[i]), i)
+    return ids, parent_idx, ancestor_idx, track_ids.astype(np.int32)
 
 
-def _get_root_id(parts: np.ndarray) -> np.ndarray:
+def _get_ancestor_id(parts: np.ndarray) -> np.ndarray:
     """
     Return the true primary ancestor track ID of every particle.
 
@@ -387,33 +387,35 @@ def _get_interaction_id(parts: np.ndarray, verts: np.ndarray) -> np.ndarray:
     track_ids = parts['track_id']
     parent_ids = parts['parent_track_id']
     # Use the walked primary rather than the stored ancestor field, which is
-    # unreliable -- see _get_root_id.
-    root_refs = _get_root_id(parts)
+    # unreliable -- see _get_ancestor_id.
+    ancestor_refs = _get_ancestor_id(parts)
     index_of = {int(t): i for i, t in enumerate(track_ids)}
 
     # Step 0: loop over root particles and match to one of vertices by (x,y,z,t) proximity.
-    root_indices = np.where(track_ids == root_refs)[0]
+    ancestor_indices = np.where(track_ids == ancestor_refs)[0]
 
-    for index in root_indices:
+    for index in ancestor_indices:
         p = parts[index]
-        for vtx in verts:
+        for vtx_row, vtx in enumerate(verts):
             if np.isclose(p['x'], vtx['x'], atol=1e-4) and \
                np.isclose(p['y'], vtx['y'], atol=1e-4) and \
                np.isclose(p['z'], vtx['z'], atol=1e-4) and \
                np.isclose(p['t'], vtx['t'], atol=1e-4):
                 # Match found, do something
-                interaction_ids[index] = vtx['interaction_id']
+                # The *row index* of the vertex, not its interaction_id
+                # field: this is what addresses the interactions table.
+                interaction_ids[index] = vtx_row
                 break
 
     # Step 1: for non-root particles, assign the same interaction ID as their
     # root particle.  A root reference that is absent from this event list is
     # left for step 2 rather than raising.
     for i in range(len(parts)):
-        if track_ids[i] == root_refs[i]:
+        if track_ids[i] == ancestor_refs[i]:
             continue
-        root_index = index_of.get(int(root_refs[i]))
-        if root_index is not None:
-            interaction_ids[i] = interaction_ids[root_index]
+        ancestor_index = index_of.get(int(ancestor_refs[i]))
+        if ancestor_index is not None:
+            interaction_ids[i] = interaction_ids[ancestor_index]
 
     # Step 2: fall back to the parent chain for anything still unassigned.
     #
@@ -653,6 +655,8 @@ class EDepSimHDF5Reader(EventReaderBase):
             index += n
 
         verts = self._file[self._vertex_key][index]
+        #: vertices of the most recently read event, for the interactions table
+        self.last_vertices = verts
         parts = self._file[self._part_key][index]
         steps = self._file[self._step_key][index]
         ass   = self._file[self._ass_key][index]
@@ -666,12 +670,12 @@ class EDepSimHDF5Reader(EventReaderBase):
         ])
 
 
-        _ids, _par, _root, _g4 = _to_index_space(parts, _get_root_id(parts))
+        _ids, _par, _root, _g4 = _to_index_space(parts, _get_ancestor_id(parts))
 
         return Particle.from_flat_arrays(
             ids                  = _ids,
             parent_ids           = _par,
-            root_ids             = _root,
+            ancestor_ids             = _root,
             pdgs                 = parts["pdg"],
             parent_pdgs          = _get_parent_pdg(parts),
             interaction_ids      = int_ids,
