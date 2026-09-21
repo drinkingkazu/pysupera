@@ -30,6 +30,18 @@ rapids = [
 numba = [
     "numba",
 ]
+# Required by pysupera.torchdata (training-data pipeline) only.
+torch = [
+    "torch",
+    # Per-process RSS, including DataLoader workers.  pysupera.profiling
+    # falls back to /proc without it, losing the worker figures.
+    "psutil",
+]
+# Weights & Biases logging of the training-data pipeline.  Optional:
+# pysupera.profiling.WandbLogger is a silent no-op when it is absent.
+wandb = [
+    "wandb",
+]
 dev = [
     "pytest",
     "jupyter",
