@@ -56,7 +56,7 @@ class Particle:
         ID of the direct parent particle.  Equals ``id`` for primary
         (root) particles that have no parent; use ``p.parent_id == p.id``
         to test whether a particle is primary.
-    root_id : int
+    ancestor_id : int
         ID of the primary ancestor particle from which this particle
         descends (root of the shower/track genealogy).
     pdg : int
@@ -95,7 +95,7 @@ class Particle:
         Kinetic energy at the end of the trajectory (MeV).
     mass : float32 or FLOAT_UNSET
         Particle rest mass (MeV/c²).
-    root_pdg : int or None
+    ancestor_pdg : int or None
         PDG code of the primary (root) ancestor particle.
     start_process_id : int or None
         Geant4/simulation process ID for this particle's creation.
@@ -129,7 +129,7 @@ class Particle:
         self,
         id,
         parent_id,
-        root_id,
+        ancestor_id,
         pdg,
         parent_pdg,
         interaction_id,
@@ -148,7 +148,7 @@ class Particle:
         kinetic_energy_start=FLOAT_UNSET,
         kinetic_energy_end=FLOAT_UNSET,
         mass=FLOAT_UNSET,
-        root_pdg=None,
+        ancestor_pdg=None,
         start_process_id=None,
         start_subprocess_id=None,
         start_process_name=None,
@@ -171,7 +171,7 @@ class Particle:
             are kept separately in ``geant4_id`` rather than used as the key.
         parent_id : int
             Index of the direct parent particle.  A primary is its own parent.
-        root_id : int
+        ancestor_id : int
             Index of the primary ancestor particle.
         pdg : int
             PDG Monte Carlo particle code.
@@ -206,7 +206,7 @@ class Particle:
         # synthetic particles) still gets a self-consistent object.
         self.geant4_id  = id if geant4_id is None else geant4_id
         self.parent_id  = parent_id
-        self.root_id    = root_id
+        self.ancestor_id    = ancestor_id
         self.pdg        = pdg
         self.parent_pdg = parent_pdg
         self._interaction_id = interaction_id
@@ -235,7 +235,7 @@ class Particle:
         self.kinetic_energy_start = np.float32(kinetic_energy_start)
         self.kinetic_energy_end   = np.float32(kinetic_energy_end)
         self.mass                 = np.float32(mass)
-        self.root_pdg             = root_pdg
+        self.ancestor_pdg             = ancestor_pdg
         self.start_process_id     = start_process_id
         self.start_subprocess_id  = start_subprocess_id
         self.start_process_name   = start_process_name
@@ -286,7 +286,7 @@ class Particle:
         cls,
         ids,
         parent_ids,
-        root_ids,
+        ancestor_ids,
         pdgs,
         parent_pdgs,
         interaction_ids,
@@ -309,7 +309,7 @@ class Particle:
             Unique particle identifiers.
         parent_ids : array-like of int, shape (N,)
             Direct parent particle IDs.
-        root_ids : array-like of int, shape (N,)
+        ancestor_ids : array-like of int, shape (N,)
             Root ancestor IDs.
         pdgs : array-like of int, shape (N,)
             PDG Monte Carlo codes.
@@ -346,7 +346,7 @@ class Particle:
         >>> particles = Particle.from_arrays(
         ...     ids=[0, 1],
         ...     parent_ids=[0, 0],
-        ...     root_ids=[0, 0],
+        ...     ancestor_ids=[0, 0],
         ...     pdgs=[11, 22],
         ...     parent_pdgs=[0, 11],
         ...     interaction_ids=[0, 1],
@@ -358,7 +358,7 @@ class Particle:
         """
         ids               = list(ids)
         parent_ids        = list(parent_ids)
-        root_ids          = list(root_ids)
+        ancestor_ids          = list(ancestor_ids)
         pdgs              = list(pdgs)
         parent_pdgs       = list(parent_pdgs)
         interaction_ids   = list(interaction_ids)
@@ -366,13 +366,13 @@ class Particle:
         point_clouds      = list(point_clouds)
 
         n = len(ids)
-        if not all(len(a) == n for a in (parent_ids, root_ids, pdgs,
+        if not all(len(a) == n for a in (parent_ids, ancestor_ids, pdgs,
                                           parent_pdgs, interaction_ids, interaction_types,
                                           point_clouds)):
             raise ValueError(
                 "All input arrays must have the same length. "
                 f"Got lengths: ids={len(ids)}, parent_ids={len(parent_ids)}, "
-                f"root_ids={len(root_ids)}, pdgs={len(pdgs)}, "
+                f"ancestor_ids={len(ancestor_ids)}, pdgs={len(pdgs)}, "
                 f"parent_pdgs={len(parent_pdgs)}, "
                 f"interaction_ids={len(interaction_ids)}, "
                 f"interaction_types={len(interaction_types)}, "
@@ -384,7 +384,7 @@ class Particle:
                 id=ids[i],
                 geant4_id=(None if geant4_ids is None else geant4_ids[i]),
                 parent_id=parent_ids[i],
-                root_id=root_ids[i],
+                ancestor_id=ancestor_ids[i],
                 pdg=pdgs[i],
                 parent_pdg=parent_pdgs[i],
                 interaction_id=interaction_ids[i],
@@ -400,7 +400,7 @@ class Particle:
         cls,
         ids,
         parent_ids,
-        root_ids,
+        ancestor_ids,
         pdgs,
         parent_pdgs,
         interaction_ids,
@@ -425,7 +425,7 @@ class Particle:
             Unique particle identifiers.
         parent_ids : array-like of int, shape (N,)
             Direct parent particle IDs.
-        root_ids : array-like of int, shape (N,)
+        ancestor_ids : array-like of int, shape (N,)
             Root ancestor IDs.
         pdgs : array-like of int, shape (N,)
             PDG Monte Carlo codes.
@@ -476,7 +476,7 @@ class Particle:
         >>> particles = Particle.from_flat_arrays(
         ...     ids=[0, 1],
         ...     parent_ids=[0, 0],
-        ...     root_ids=[0, 0],
+        ...     ancestor_ids=[0, 0],
         ...     pdgs=[11, 22],
         ...     parent_pdgs=[0, 11],
         ...     interaction_ids=[0, 1],
@@ -491,7 +491,7 @@ class Particle:
         """
         ids               = list(ids)
         parent_ids        = list(parent_ids)
-        root_ids          = list(root_ids)
+        ancestor_ids          = list(ancestor_ids)
         pdgs              = list(pdgs)
         parent_pdgs       = list(parent_pdgs)
         interaction_ids   = list(interaction_ids)
@@ -505,12 +505,12 @@ class Particle:
                 f"point_cloud_offsets must have shape (N, 2), "
                 f"got {offsets.shape}."
             )
-        if not all(len(a) == n for a in (parent_ids, root_ids, pdgs,
+        if not all(len(a) == n for a in (parent_ids, ancestor_ids, pdgs,
                                           parent_pdgs, interaction_ids, interaction_types)):
             raise ValueError(
                 "All scalar arrays must have the same length. "
                 f"Got lengths: ids={len(ids)}, parent_ids={len(parent_ids)}, "
-                f"root_ids={len(root_ids)}, pdgs={len(pdgs)}, "
+                f"ancestor_ids={len(ancestor_ids)}, pdgs={len(pdgs)}, "
                 f"parent_pdgs={len(parent_pdgs)}, "
                 f"interaction_ids={len(interaction_ids)}, "
                 f"interaction_types={len(interaction_types)}."
@@ -534,7 +534,7 @@ class Particle:
                 id=ids[i],
                 geant4_id=(None if geant4_ids is None else geant4_ids[i]),
                 parent_id=parent_ids[i],
-                root_id=root_ids[i],
+                ancestor_id=ancestor_ids[i],
                 pdg=pdgs[i],
                 parent_pdg=parent_pdgs[i],
                 interaction_id=interaction_ids[i],
@@ -550,9 +550,9 @@ class Particle:
         """Return a human-readable summary of this particle."""
         lines = [
             f"Particle(id={self.id}, parent_id={self.parent_id}, "
-            f"root_id={self.root_id}",
+            f"ancestor_id={self.ancestor_id}",
             f"  pdg={self.pdg}, parent_pdg={self.parent_pdg}, "
-            f"root_pdg={self.root_pdg}",
+            f"ancestor_pdg={self.ancestor_pdg}",
             f"  sem_type={self.sem_type}, interaction_type={self.interaction_type}",
             f"  point_cloud: shape={self.point_cloud.shape}",
         ]
