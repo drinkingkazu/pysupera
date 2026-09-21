@@ -978,7 +978,7 @@ const CMAP_CSS = [
 // Cloud columns (NCOLS=9):
 // pos  : 0=x  1=y  2=z
 // extra: 3=t  4=energy  5=interaction_id
-// extr2: 6=root_id  7=frag_id  8=inst_id
+// extr2: 6=ancestor_id  7=frag_id  8=inst_id
 const NCOLS = 9;
 
 const VERT_SHADER = `
@@ -1201,6 +1201,29 @@ function countInteractions(f32){
   return s.size;
 }
 
+// 3.0.0 -> 3.1.0 column renames.  The viewer reads the raw HDF5, so it has to
+// accept both spellings itself.
+const V3_ALIAS = {
+  geant4_trackid:   'geant4_id',
+  frag_sem_type:    'sem_type_frag',
+  inst_sem_type:    'sem_type_inst',
+  frag_parent_id:   'parent_frag_id',
+  inst_parent_id:   'parent_inst_id',
+  frag_pc_start:    'frag_non_le_start',
+  frag_pc_end:      'frag_non_le_end',
+  frag_pc_le_start: 'frag_le_start',
+  frag_pc_le_end:   'frag_le_end',
+  // 3.0.0 split one index where 3.1.0 has two adjacent ranges
+  inst_pc_end:      'inst_pc_split',
+  inst_pc_le_start: 'inst_pc_split',
+  inst_pc_le_end:   'inst_pc_end',
+};
+function v3Name(grp, n){
+  if(grp.keys().includes(n)) return n;
+  const alt = V3_ALIAS[n];
+  return (alt && grp.keys().includes(alt)) ? alt : n;
+}
+
 function colStats(f32){
   const N=f32.length/NCOLS; if(!N) return null;
   const mn=new Float32Array(NCOLS).fill(Infinity), mx=new Float32Array(NCOLS).fill(-Infinity);
@@ -1213,10 +1236,90 @@ function clearObjects(){
   objNLE=objLE=null;
 }
 
+
+// ── Format 3.0.0 cloud reconstruction ──────────────────────────────────────
+// 3.0.0 stores each point once as (x, y, z, t, dE, dX) and keeps the group
+// labels per *particle* rather than per point.  The rendering code below was
+// written against the 2.x event clouds -- (x,y,z,t,e,interaction,ancestor,
+// frag,inst) per point -- so rather than rewrite it, rebuild that view here
+// from the particle ranges.  Cheap: one pass per group, no per-point search.
+//
+// Labels come from the group ranges, not the particle's own range: only ~24%
+// of points belong to a particle that has a row, but every point lies inside
+// some stored fragment.
+function v3BuildCloud(evIdx, wantLE){
+  const evOff=hf.get('events').get('offsets').value;
+  const poOff=hf.get('points').get('offsets').value;
+  const a=Number(evOff[evIdx]), b=Number(evOff[evIdx+1]);
+  const pa=Number(poOff[evIdx]), pb=Number(poOff[evIdx+1]);
+  const nPts=pb-pa;
+  if(nPts<=0) return new Float32Array(0);
+  const pg=hf.get('particles');
+  const col=n=>pg.get(v3Name(pg,n)).slice([[a,b]]);
+  const id=col('id'), ancestor=col('ancestor_id');
+  const fragId=col('frag_id'), instId=col('inst_id');
+  const fS=col('frag_pc_start'), fE=col('frag_pc_end');
+  const fLS=col('frag_pc_le_start'), fLE=col('frag_pc_le_end');
+  const iS=col('inst_pc_start'), iSP=col('inst_pc_le_start'), iE=col('inst_pc_le_end');
+  const pts=hf.get('points').get('flat').slice([[pa,pb],[0,6]]);
+
+  const lblInt=new Float32Array(nPts).fill(-1), lblAnc=new Float32Array(nPts).fill(-1);
+  const lblFrag=new Float32Array(nPts).fill(-1), lblInst=new Float32Array(nPts).fill(-1);
+  // LE-ness is positional: each instance block is non-LE points
+  // [inst_pc_start, inst_pc_end) followed by LE points
+  // [inst_pc_le_start, inst_pc_le_end), and the two are adjacent.  No
+  // per-point label is stored, and none is needed.
+  const isLE=new Uint8Array(nPts);
+  const n=id.length;
+  for(let k=0;k<n;k++){
+    if(Number(instId[k])!==Number(id[k])) continue;
+    const a=Number(iS[k])-pa, sp=Number(iSP[k])-pa, e=Number(iE[k])-pa;
+    const v=Number(instId[k]);
+    for(let j=a;j<e;j++){ lblInst[j]=v; if(j>=sp) isLE[j]=1; }
+  }
+  // A fragment is two runs -- its non-LE side and its LE side -- because the
+  // other fragments' non-LE points lie between them.
+  for(let k=0;k<n;k++){
+    if(Number(fragId[k])!==Number(id[k])) continue;
+    const f=Number(fragId[k]), an=Number(ancestor[k]);
+    const runs=[[Number(fS[k]),Number(fE[k])],[Number(fLS[k]),Number(fLE[k])]];
+    for(const [rs,re] of runs){
+      if(rs<0) continue;
+      for(let j=rs-pa;j<re-pa;j++){ lblFrag[j]=f; lblAnc[j]=an; }
+    }
+  }
+  // interaction_id from the interactions table: authoritative and complete
+  if(hf.keys().includes('inter')){
+    const ig=hf.get('inter'), io=ig.get('offsets').value;
+    const ia=Number(io[evIdx]), ib=Number(io[evIdx+1]);
+    if(ib>ia){
+      const s0=ig.get('pc_start').slice([[ia,ib]]), e0=ig.get('pc_end').slice([[ia,ib]]);
+      for(let k=0;k<ib-ia;k++){
+        const s=Number(s0[k])-pa, e=Number(e0[k])-pa;
+        for(let j=s;j<e;j++) lblInt[j]=k;
+      }
+    }
+  }
+  let m=0; for(let j=0;j<nPts;j++) if(!!isLE[j]===!!wantLE) m++;
+  const out=new Float32Array(m*NCOLS);
+  let w=0;
+  for(let j=0;j<nPts;j++){
+    if(!!isLE[j]!==!!wantLE) continue;
+    const o=w*NCOLS, q=j*6;
+    out[o]=pts[q]; out[o+1]=pts[q+1]; out[o+2]=pts[q+2];
+    out[o+3]=pts[q+3]; out[o+4]=pts[q+4];          // dE; dX (q+5) unused here
+    out[o+5]=lblInt[j]; out[o+6]=lblAnc[j];
+    out[o+7]=lblFrag[j]; out[o+8]=lblInst[j];
+    w++;
+  }
+  return out;
+}
+
 // Read one event-cloud group from the HDF5 file.
-// Clouds are stored with NCOLS=9 columns: x,y,z,t,e,interaction_id,root_id,frag_id,inst_id
+// Clouds are stored with NCOLS=9 columns: x,y,z,t,e,interaction_id,ancestor_id,frag_id,inst_id
 function readCloud(grpName,evIdx){
   if(!hf) return new Float32Array(0);
+  if(FMT3) return v3BuildCloud(evIdx, grpName==='le_scatter_cloud');
   if(!hf.keys().includes(grpName)) return new Float32Array(0);
   const grp=hf.get(grpName);
   if(!grp.keys().includes('offsets')||!grp.keys().includes('flat')) return new Float32Array(0);
@@ -1650,6 +1753,7 @@ function buildInteractions(nleF32,leF32){
 
 function readParticleSlice(evIdx){
   if(!hf) return null;
+  if(FMT3) return v3ParticleSlice(evIdx);
   try{
     if(!hf.keys().includes('events')||!hf.keys().includes('particles')) return null;
     const evOff=hf.get('events').get('offsets').value;
@@ -1667,9 +1771,12 @@ function readParticleSlice(evIdx){
 
 // Does this file actually carry the step-1 fragment level?  write_fragments
 // defaults to false, in which case particle_fragments exists but is empty and
-// every parent_frag_id is -1, so fragment fields must not be presented as if
+// every frag_parent_id is -1, so fragment fields must not be presented as if
 // they were merely missing for this particle.
 let _FRAG_LEVEL=false;
+//: true when the open file is format 3.x (one particles table,
+//: one point array).  2.x files keep the old read paths.
+let FMT3=false;
 function probeFragLevel(){
   _FRAG_LEVEL=false;
   if(!hf) return false;
@@ -1682,9 +1789,65 @@ function probeFragLevel(){
   return _FRAG_LEVEL;
 }
 
+
+// Instance graph for 3.0.0: instances are the rows where inst_id == id, and
+// inst_parent_id already names the parent instance's particle id, so no
+// genealogy walk is needed here.
+function v3InstanceGraph(evIdx){
+  const evOff=hf.get('events').get('offsets').value;
+  const a=Number(evOff[evIdx]), b=Number(evOff[evIdx+1]);
+  if(a>=b) return null;
+  const pg=hf.get('particles'), col=n=>pg.get(n).slice([[a,b]]);
+  const id=col('id'), instId=col('inst_id'), parentInst=col('inst_parent_id');
+  const pdg=col('pdg'), ppdg=col('parent_pdg'), g4=col('geant4_trackid');
+  const intId=col('interaction_id'), sem=col('inst_sem_type');
+  const mcount=col('inst_merge_count');
+  const iS=col('inst_pc_start'), iE=col('inst_pc_end');
+
+  const nodes=[], rowOf=new Map();
+  for(let k=0;k<id.length;k++){
+    if(Number(instId[k])!==Number(id[k])) continue;
+    rowOf.set(Number(id[k]), nodes.length);
+    nodes.push({idx:nodes.length, id:Number(id[k]), g4Id:Number(g4[k]),
+      parentPid:Number(parentInst[k]), pdg:Number(pdg[k]),
+      parentPdg:Number(ppdg[k]), intId:Number(intId[k]),
+      semType:Number(sem[k]), fragId:-1,
+      members:Math.max(1,Number(mcount[k])),
+      ptCount:Number(iE[k])-Number(iS[k]),
+      eSum:null,x:0,y:0,vx:0,vy:0});
+  }
+  const edges=[], seen=new Set();
+  for(const nd of nodes){
+    const pi=rowOf.has(nd.parentPid)?rowOf.get(nd.parentPid):-1;
+    if(pi>=0&&pi!==nd.idx){
+      const key=pi+'>'+nd.idx;
+      if(!seen.has(key)){seen.add(key);edges.push({src:pi,dst:nd.idx});}
+    }
+  }
+  return {nodes,edges};
+}
+
+// interaction_id -> set of PDGs, for the Event Summary panel.
+function v3ParticleSlice(evIdx){
+  const evOff=hf.get('events').get('offsets').value;
+  const a=Number(evOff[evIdx]), b=Number(evOff[evIdx+1]);
+  if(a>=b) return null;
+  const pg=hf.get('particles');
+  const ii=pg.get('interaction_id').slice([[a,b]]);
+  const pd=pg.get('pdg').slice([[a,b]]);
+  const m=new Map();
+  for(let k=0;k<ii.length;k++){
+    const key=Number(ii[k]);
+    if(!m.has(key)) m.set(key,new Set());
+    m.get(key).add(Number(pd[k]));
+  }
+  return m;
+}
+
 // ── Instance graph ─────────────────────────────────────────────────────────
 function readInstanceGraph(evIdx){
   if(!hf) return null;
+  if(FMT3) return v3InstanceGraph(evIdx);
   try{
     const ks=hf.keys();
     if(!ks.includes('inst_events')||!ks.includes('particle_instances')) return null;
@@ -1701,17 +1864,18 @@ function readInstanceGraph(evIdx){
     const instSem    =pgk.includes('sem_type')?pg.get('sem_type').slice([[iStart,iEnd]]):null;
     const instPdgs   =pgk.includes('pdg')?pg.get('pdg').slice([[iStart,iEnd]]):null;
     const instParPdgs=pgk.includes('parent_pdg')?pg.get('parent_pdg').slice([[iStart,iEnd]]):null;
-    const instFragIds=pgk.includes('parent_frag_id')?pg.get('parent_frag_id').slice([[iStart,iEnd]]):null;
+    const instFragIds=pgk.includes(v3Name(pg,'frag_parent_id'))?pg.get(v3Name(pg,'frag_parent_id')).slice([[iStart,iEnd]]):null;
     // From format 2.2.0 the two id spaces are distinct: 'id' is pysupera's
-    // per-event particle index (usable as a direct row index), 'geant4_id' is
+    // per-event particle index (usable as a direct row index), 'geant4_trackid' is
     // the original Geant4 track id kept purely as provenance.  Older files
-    // have no geant4_id column, where the two happened to coincide.
-    const instG4Ids  =pgk.includes('geant4_id')?pg.get('geant4_id').slice([[iStart,iEnd]]):null;
+    // have no such column at all, where the two happened to coincide.
+    const _g4n = v3Name(pg,'geant4_trackid');
+    const instG4Ids  =pgk.includes(_g4n)?pg.get(_g4n).slice([[iStart,iEnd]]):null;
     // Prefer the stored instance-level parent pointer.  Deriving it by walking
     // the level-0 parent map only works when 'particles' was written, and that
     // table is empty under output_compact -- the default -- which used to
     // leave the genealogy graph with no edges at all.
-    const instPInst  =pgk.includes('parent_inst_id')?pg.get('parent_inst_id').slice([[iStart,iEnd]]):null;
+    const instPInst  =pgk.includes(v3Name(pg,'inst_parent_id'))?pg.get(v3Name(pg,'inst_parent_id')).slice([[iStart,iEnd]]):null;
     // member offsets → one member array per instance
     let memOff=null,memberFlat=null;
     if(pgk.includes('member_offsets')&&ks.includes('particle_instances_members')){
@@ -1773,7 +1937,7 @@ function readInstanceGraph(evIdx){
         members:Math.max(1,mCount),ptCount,eSum:null,x:0,y:0,vx:0,vy:0});
     }
     for(let i=0;i<nInst;i++){
-      // parent_inst_id is already an instance row index.  The parent-map walk
+      // inst_parent_id is already an instance row index.  The parent-map walk
       // stays as a fallback for files written before it was stored.
       const pi=(instPInst&&Number(instPInst[i])>=0&&Number(instPInst[i])!==i)
                  ?Number(instPInst[i])
@@ -2533,7 +2697,9 @@ async function openBuf(name, buf){
     const keys=hf.keys();
     console.log('[h5] file keys:', keys);
     if(!keys.includes('n_events')) throw new Error('Missing /n_events — not a pysupera file?');
-    if(!keys.includes('non_le_cloud')) throw new Error('Missing /non_le_cloud — regenerate with run_pysupera (format v2.1+)');
+    FMT3=keys.includes('points')&&!keys.includes('non_le_cloud');
+    if(!FMT3&&!keys.includes('non_le_cloud'))
+      throw new Error('Missing /non_le_cloud and /points — not a pysupera output?');
     nEvents=h5scalar(hf.get('n_events'));
     logMsg('Found '+nEvents+' event(s) in '+name,'log-ok');
     // Report which optional levels this file actually carries, so an empty
@@ -2546,10 +2712,10 @@ async function openBuf(name, buf){
                 &&Number(hf.get('particles').get('id').shape[0])>0; }catch(e){}
     let _hasG4=false;
     try{ _hasG4=hf.keys().includes('particle_instances')
-                &&hf.get('particle_instances').keys().includes('geant4_id'); }catch(e){}
+                &&hf.get('particle_instances').keys().includes('geant4_trackid'); }catch(e){}
     logMsg('format '+_fv+' \u00b7 fragment level: '+(_FRAG_LEVEL?'yes':'no')
            +' \u00b7 level-0 particles: '+(_hasL0?'yes':'no')
-           +' \u00b7 geant4_id: '+(_hasG4?'yes':'no'));
+           +' \u00b7 geant4_trackid: '+(_hasG4?'yes':'no'));
     document.getElementById('filename').textContent=name;
     document.getElementById('ev-total').textContent='/ '+nEvents;
     document.getElementById('ev-input').max=nEvents-1;
@@ -2609,7 +2775,8 @@ const _REMOTE_WORKER_SRC=`
       hf=new H5File(fname,'r');
       const keys=hf.keys();
       if(!keys.includes('n_events')) throw new Error('Missing /n_events');
-      if(!keys.includes('non_le_cloud')) throw new Error('Missing /non_le_cloud');
+      if(!keys.includes('non_le_cloud')&&!keys.includes('points'))
+        throw new Error('Missing /non_le_cloud and /points');
       const nv=hf.get('n_events').value;
       const nEvents=typeof nv==='bigint'?Number(nv):(Array.isArray(nv)?Number(nv[0]):Number(nv));
       self.postMessage({id,ok:true,nEvents,name});
@@ -2630,6 +2797,7 @@ const _REMOTE_WORKER_SRC=`
 };
 function _readCloud(grpName,evIdx){
   if(!hf) return new Float32Array(0);
+  if(hf.keys().includes('points')) return v3BuildCloud(evIdx, grpName==='le_scatter_cloud');
   const ks=hf.keys(); if(!ks.includes(grpName)) return new Float32Array(0);
   const grp=hf.get(grpName),gk=grp.keys();
   if(!gk.includes('offsets')||!gk.includes('flat')) return new Float32Array(0);
@@ -2656,6 +2824,7 @@ function _readParticleSliceEntries(evIdx){
   }catch(e){return [];}
 }
 function _readInstanceGraph(evIdx){
+  if(hf&&hf.keys().includes('points')) return v3InstanceGraph(evIdx);
   if(!hf) return null;
   try{
     const ks=hf.keys();
@@ -2672,17 +2841,18 @@ function _readInstanceGraph(evIdx){
     const instSem    =pgk.includes('sem_type')?pg.get('sem_type').slice([[iStart,iEnd]]):null;
     const instPdgs   =pgk.includes('pdg')?pg.get('pdg').slice([[iStart,iEnd]]):null;
     const instParPdgs=pgk.includes('parent_pdg')?pg.get('parent_pdg').slice([[iStart,iEnd]]):null;
-    const instFragIds=pgk.includes('parent_frag_id')?pg.get('parent_frag_id').slice([[iStart,iEnd]]):null;
+    const instFragIds=pgk.includes(v3Name(pg,'frag_parent_id'))?pg.get(v3Name(pg,'frag_parent_id')).slice([[iStart,iEnd]]):null;
     // From format 2.2.0 the two id spaces are distinct: 'id' is pysupera's
-    // per-event particle index (usable as a direct row index), 'geant4_id' is
+    // per-event particle index (usable as a direct row index), 'geant4_trackid' is
     // the original Geant4 track id kept purely as provenance.  Older files
-    // have no geant4_id column, where the two happened to coincide.
-    const instG4Ids  =pgk.includes('geant4_id')?pg.get('geant4_id').slice([[iStart,iEnd]]):null;
+    // have no such column at all, where the two happened to coincide.
+    const _g4n = v3Name(pg,'geant4_trackid');
+    const instG4Ids  =pgk.includes(_g4n)?pg.get(_g4n).slice([[iStart,iEnd]]):null;
     // Prefer the stored instance-level parent pointer.  Deriving it by walking
     // the level-0 parent map only works when 'particles' was written, and that
     // table is empty under output_compact -- the default -- which used to
     // leave the genealogy graph with no edges at all.
-    const instPInst  =pgk.includes('parent_inst_id')?pg.get('parent_inst_id').slice([[iStart,iEnd]]):null;
+    const instPInst  =pgk.includes(v3Name(pg,'inst_parent_id'))?pg.get(v3Name(pg,'inst_parent_id')).slice([[iStart,iEnd]]):null;
     let memOff=null,memberFlat=null;
     if(pgk.includes('member_offsets')&&ks.includes('particle_instances_members')){
       memOff=pg.get('member_offsets').slice([[iStart,iEnd+1]]);
@@ -2737,7 +2907,7 @@ function _readInstanceGraph(evIdx){
         members:Math.max(1,mCount),ptCount,eSum:null,x:0,y:0,vx:0,vy:0});
     }
     for(let i=0;i<nInst;i++){
-      // parent_inst_id is already an instance row index.  The parent-map walk
+      // inst_parent_id is already an instance row index.  The parent-map walk
       // stays as a fallback for files written before it was stored.
       const pi=(instPInst&&Number(instPInst[i])>=0&&Number(instPInst[i])!==i)
                  ?Number(instPInst[i])
@@ -3283,7 +3453,7 @@ let fpsT=performance.now(),fpsN=0;
         const vals=[
           pa[idx*3],pa[idx*3+1],pa[idx*3+2],   // x y z
           ea[idx*3],ea[idx*3+1],ea[idx*3+2],   // t energy int_id
-          e2[idx*3],e2[idx*3+1],e2[idx*3+2],   // root_id frag_id inst_id
+          e2[idx*3],e2[idx*3+1],e2[idx*3+2],   // ancestor_id frag_id inst_id
         ];
         const KEYS=['X','Y','Z','Time','Energy','Int. ID','Root ID','Frag ID','Inst ID'];
         const fmtV=(v,c)=>{
