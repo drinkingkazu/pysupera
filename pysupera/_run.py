@@ -53,15 +53,16 @@ def main(cfg: DictConfig) -> None:
     import time
     import numpy as np
     from collections import defaultdict
-    from pysupera import open_writer
+    from pysupera.io_v3 import open_writer_v3
     from pysupera.io import open_voxmap_writer
     from pysupera.partitioner import ParticlePartitioner
     from pysupera.merge import merge_em_showers
     from pysupera.config import build_conditions, build_preprocessor, build_merge_processor, build_voxelizer, build_reader, configure
     from pysupera.preproc import _voxelize_point_cloud
     from pysupera.utils import (resolve_orphans, validate_interaction_ids,
-                                validate_root_ids,
+                                validate_ancestor_ids,
                                 select_traceable_instances)
+    from pysupera.layout import build_layout, snapshot_groups
 
     configure(cfg)  # set module-level defaults (e.g. min_pc_size) before any Particle is created
 
@@ -79,13 +80,10 @@ def main(cfg: DictConfig) -> None:
     print(f"[run] merge_duplicates: {'enabled' if merge_processor is not None else 'disabled'}")
     print(f"[run] voxelize        : {_vox_info}")
     print(f"[run] preprocessor    : {cfg.particle.get('preprocessor', {}).get('name', 'scipy') if cfg.particle.get('defragment', False) else 'disabled'}")
-    print(f"[run] output_compact  : {bool(cfg.get('output_compact', False))}")
     print(f"[run] drop_le_scatter : {bool(cfg.get('drop_le_scatter', False))}")
-    print(f"[run] write_fragments  : {bool(cfg.get('write_fragments', False))}")
-    print(f"[run] write_event_clouds: {bool(cfg.get('write_event_clouds', True))}")
     print(f"[run] allow_empty_image: {bool(cfg.get('allow_empty_image', False))}")
     print(f"[run] check_interaction_id: {bool(cfg.get('check_interaction_id', True))}")
-    print(f"[run] check_root_id     : {bool(cfg.get('check_root_id', True))}")
+    print(f"[run] check_ancestor_id     : {bool(cfg.get('check_ancestor_id', True))}")
     print(f"[run] instance_output : {str(cfg.get('instance_output', 'traceable')).lower()}")
     print(f"[run] repack          : {bool((cfg.get('repack', {}) or {}).get('enabled', False))}")
     print(f"[run] input           : {cfg.io.input_path}")
@@ -128,8 +126,8 @@ def main(cfg: DictConfig) -> None:
     # Interaction-ID validation: raise by default, warn once when relaxed.
     _check_int_id = bool(cfg.get("check_interaction_id", True))
     _warned_int_id = False
-    _check_root_id = bool(cfg.get("check_root_id", True))
-    _warned_root_id = False
+    _check_ancestor_id = bool(cfg.get("check_ancestor_id", True))
+    _warned_ancestor_id = False
 
     _instance_output = str(cfg.get("instance_output", "traceable")).lower()
     if _instance_output not in ("all", "traceable"):
@@ -143,19 +141,15 @@ def main(cfg: DictConfig) -> None:
         _n_to_process = _n_available if _max_events < 0 else min(_max_events, _n_available)
         print(f"[run] {_n_available} events in input file, processing {_n_to_process}")
 
-        _output_compact     = bool(cfg.get('output_compact',     False))
-        _drop_le_scatter    = bool(cfg.get('drop_le_scatter',    False))
-        _write_event_clouds = bool(cfg.get('write_event_clouds', True))
-        _write_frags        = bool(cfg.get('write_fragments',    False))
-        # _is_le is always defined: used independently by drop_le_scatter output
-        # filtering AND by event-cloud LE/non-LE splitting (write_event_clouds).
+        _drop_le_scatter = bool(cfg.get('drop_le_scatter', False))
+        # Used by drop_le_scatter output filtering.
         from pysupera.utils import SemanticType as _ST
         _le_type = _ST.kLEScatter
         _is_le = lambda p: p.sem_type == _le_type
 
-        with open_writer(cfg.io.output_path,
-                         compression=cfg.io.compression,
-                         compression_opts=cfg.io.compression_opts) as writer, \
+        with open_writer_v3(cfg.io.output_path,
+                            compression=cfg.io.compression,
+                            compression_opts=cfg.io.compression_opts) as writer, \
              (open_voxmap_writer(cfg.io.output_path,
                                  compression=cfg.io.compression,
                                  compression_opts=cfg.io.compression_opts)
@@ -215,7 +209,7 @@ def main(cfg: DictConfig) -> None:
                     _ev_t['defragment'] = time.perf_counter() - _t
                     profile['defragment'] += _ev_t['defragment']
 
-                # ── Orphan resolution: repair dangling parent_id / root_id ──────
+                # ── Orphan resolution: repair dangling parent_id / ancestor_id ──────
                 # Must run before ParticlePartitioner so the genealogy tree is
                 # consistent for all conditions and merge_em_showers.
                 resolve_orphans(particles, verbose=cfg.verbose)
@@ -225,12 +219,12 @@ def main(cfg: DictConfig) -> None:
                 # then spawns particles with fresh ids and drops others, so by
                 # here the ids have gaps and `id` is no longer a row index.
                 # Renumber to 0..n-1 in list order and remap the genealogy.
-                # Runs after resolve_orphans, so every parent_id / root_id
+                # Runs after resolve_orphans, so every parent_id / ancestor_id
                 # already refers to a particle that is present.
                 _idmap = {int(_p.id): _k for _k, _p in enumerate(particles)}
                 for _k, _p in enumerate(particles):
                     _p.parent_id = _idmap.get(int(_p.parent_id), _k)
-                    _p.root_id   = _idmap.get(int(_p.root_id),   _k)
+                    _p.ancestor_id   = _idmap.get(int(_p.ancestor_id),   _k)
                 for _k, _p in enumerate(particles):
                     _p.id = _k
 
@@ -274,12 +268,12 @@ def main(cfg: DictConfig) -> None:
                     if _miss:
                         _warned_int_id = True
 
-                if _check_root_id:
-                    validate_root_ids(particles, raise_on_missing=True,
+                if _check_ancestor_id:
+                    validate_ancestor_ids(particles, raise_on_missing=True,
                                       verbose=cfg.verbose)
-                elif not _warned_root_id:
-                    if validate_root_ids(particles, raise_on_missing=False):
-                        _warned_root_id = True
+                elif not _warned_ancestor_id:
+                    if validate_ancestor_ids(particles, raise_on_missing=False):
+                        _warned_ancestor_id = True
 
                 # ── Particle statistics (after preprocessing, before partition) ──
                 _pc_lens = [len(p.point_cloud) for p in particles]
@@ -359,72 +353,13 @@ def main(cfg: DictConfig) -> None:
                     {id(r): r for r in partitioner.rep_lookup.values()}.values()
                 )
 
-                # Snapshot fragment member_ids BEFORE merge_em_showers mutates
-                # them in place (it extends the initiator's member_ids with the
-                # merged members), so the _frag_lookup we build afterwards
-                # reflects the original step-1 partitioning.
-                _frag_member_ids_snap = {
-                    id(_fr): (list(_fr.member_ids) if _fr.member_ids is not None else [_fr.id])
-                    for _fr in fragments
-                }
-
-                # Write fragments BEFORE step-2 merger, which mutates
-                # the initiator's member_ids / point_cloud in place.
-                # drop_le_scatter only affects output — algorithms always
-                # run on the full set of fragments/instances.
-                _frags_out = [f for f in fragments if not _is_le(f)] if _drop_le_scatter else fragments
-
-                # Build frag_lookup early so we can stamp parent_frag_id on
-                # reps before writing. Use the pre-step-2 snapshot so that
-                # merge_em_showers' in-place mutation of member_ids does not
-                # corrupt frag_id assignments.
-                # particle_id → fragment index in written list (in event)
-                _frag_lookup: dict = {}
-                for _fi, _fr in enumerate(_frags_out):
-                    for _pid in _frag_member_ids_snap[id(_fr)]:
-                        _frag_lookup[int(_pid)] = _fi
-
-                # particle_id lookup for parent-chain walks
-                _part_by_id: dict = {int(_p.id): _p for _p in particles}
-
-                def _find_parent_idx(_start_pid, _lookup, _pby, _exclude=None):
-                    """Walk the parent_id chain for the producer of a rep.
-
-                    Returns the index of the nearest ancestor that belongs to a
-                    *different* group than *_exclude*, or -1 if none exists.
-
-                    Skipping _exclude matters: when a rep's parent was merged
-                    into the rep's own group -- routine for an EM shower whose
-                    initiator is a late photon -- the lookup resolves to the
-                    rep itself, and without the skip the walk terminates there,
-                    reporting the rep as its own producer and dead-ending the
-                    production history.  Continuing past its own group finds
-                    the group the shower actually came from.
-                    """
-                    _visited: set = set()
-                    _pid = _start_pid
-                    while _pid is not None and _pid not in _visited:
-                        _visited.add(_pid)
-                        _hit = _lookup.get(int(_pid))
-                        if _hit is not None and _hit != _exclude:
-                            return _hit
-                        _pp = _pby.get(int(_pid))
-                        if _pp is None or _pp.parent_id == _pp.id:
-                            break
-                        _pid = _pp.parent_id
-                    return -1
-
-                for _fi, _fr in enumerate(_frags_out):
-                    _pfid = _find_parent_idx(_fr.parent_id, _frag_lookup,
-                                             _part_by_id, _exclude=_fi)
-                    _fr.parent_frag_id = _pfid if _pfid >= 0 else _fi  # fallback = own
-
-                _t = time.perf_counter()
-                # An empty list still advances the fragment event offsets, so
-                # the file stays internally consistent with zero rows written.
-                writer.append_fragments(_frags_out if _write_frags else [])
-                _ev_t['write_frags'] = time.perf_counter() - _t
-                profile['write_fragments'] += _ev_t['write_frags']
+                # Capture fragment membership NOW.  merge_em_showers returns
+                # the surviving representatives themselves as the instances --
+                # every instance object is also a fragment object -- and
+                # overwrites their member_ids and sem_type in place.  Reading
+                # fragment membership afterwards silently attributes most
+                # particles to the wrong fragment.
+                _frag_groups = snapshot_groups(fragments)
 
                 # ── Step-2 EM shower instance merger ───────────────────────
                 _t = time.perf_counter()
@@ -432,132 +367,39 @@ def main(cfg: DictConfig) -> None:
                 _ev_t['em_merge'] = time.perf_counter() - _t
                 profile['merge_em_showers'] += _ev_t['em_merge']
 
-                # Output filtering only — does not affect algorithm logic.
-                _insts_out = [i for i in instances if not _is_le(i)] if _drop_le_scatter else instances
-
-                # Drop instances that nothing visible depends on.  Applied
-                # before _inst_lookup is built so parent_inst_id is stamped
-                # against the rows that actually get written.
+                # Output filtering only — the algorithms above always ran on
+                # the full set.
+                _insts_out = ([i for i in instances if not _is_le(i)]
+                              if _drop_le_scatter else instances)
                 if _instance_output == 'traceable':
                     _insts_out = select_traceable_instances(
                         _insts_out, particles, verbose=cfg.verbose)
+                _inst_groups = snapshot_groups(_insts_out)
 
-                # Build inst_lookup and stamp parent_inst_id (and parent_frag_id
-                # for the instance rep's own fragment) before writing.
-                _inst_lookup: dict = {}  # particle_id → instance index (in event)
-                for _ii, _inst in enumerate(_insts_out):
-                    for _pid in (_inst.member_ids if _inst.member_ids is not None else [_inst.id]):
-                        _inst_lookup[int(_pid)] = _ii
-
-                for _ii, _inst in enumerate(_insts_out):
-                    _piid = _find_parent_idx(_inst.parent_id, _inst_lookup,
-                                             _part_by_id, _exclude=_ii)
-                    _inst.parent_inst_id = _piid if _piid >= 0 else _ii  # fallback = own
-                    _inst.parent_frag_id = (
-                        _frag_lookup.get(int(_inst.id), -1) if _write_frags else -1
+                # Every non-LE particle must belong to some instance, whether
+                # or not that instance is written.  Checked against the full
+                # list so the result does not depend on instance_output.
+                _covered: set = set()
+                for _inst in instances:
+                    _covered.update(int(m) for m in
+                                    (_inst.member_ids
+                                     if _inst.member_ids is not None
+                                     else [_inst.id]))
+                _uncovered = [int(_p.id) for _p in particles
+                              if not _is_le(_p) and int(_p.id) not in _covered]
+                if _uncovered:
+                    raise RuntimeError(
+                        f"Event {event_idx}: {len(_uncovered)} non-LE particle(s) "
+                        f"have no instance after step-2 merging: "
+                        f"{_uncovered[:10]}"
+                        f"{'...' if len(_uncovered) > 10 else ''}"
                     )
 
+                # ── Write ───────────────────────────────────────────────────
                 _t = time.perf_counter()
-                writer.append_instances(_insts_out)
-                _ev_t['write_inst'] = time.perf_counter() - _t
-                profile['write_instances'] += _ev_t['write_inst']
-
-                # ── Event-level union point clouds ──────────────────────
-                if _write_event_clouds:
-                    _t = time.perf_counter()
-
-                    # _frag_lookup and _inst_lookup are already built above
-                    # for parent_frag_id / parent_inst_id stamping; reuse them
-                    # here so cloud col indices match the HDF5 table rows.
-                    # LE particles get frag_id=-1 / inst_id=-1 when
-                    # drop_le_scatter=True — that is intentional.
-
-                    # Assert algorithmic correctness: every non-LE particle must
-                    # appear in SOME instance produced by merge_em_showers, even if
-                    # that instance is a kLEScatter one that gets filtered from output
-                    # by drop_le_scatter.  Use the full instances list here, not the
-                    # output-filtered _insts_out, so the check is independent of the
-                    # drop_le_scatter flag.
-                    _inst_lookup_full: dict = {}
-                    for _ii, _inst in enumerate(instances):
-                        for _pid in (_inst.member_ids if _inst.member_ids is not None else [_inst.id]):
-                            _inst_lookup_full[int(_pid)] = _ii
-                    _nle_ids = [int(_p.id) for _p in particles if not _is_le(_p)]
-                    _uncovered = [_pid for _pid in _nle_ids if _pid not in _inst_lookup_full]
-                    if _uncovered:
-                        raise RuntimeError(
-                            f"Event {event_idx}: {len(_uncovered)} non-LE particle(s) have no "
-                            f"instance after step-2 merger: "
-                            f"{_uncovered[:10]}"
-                            f"{'...' if len(_uncovered) > 10 else ''}"
-                        )
-
-                    def _build_cloud9(src_parts):
-                        """Return (N, 9) float32 array:
-                        x, y, z, t, energy, interaction_id, root_id, frag_id, inst_id."""
-                        rows = []
-                        for _p in src_parts:
-                            _pc = _p.point_cloud
-                            if len(_pc) == 0:
-                                continue
-                            _n = len(_pc)
-                            _pc5 = np.zeros((_n, 5), dtype=np.float32)
-                            _take = min(_pc.shape[1], 5)
-                            _pc5[:, :_take] = _pc[:, :_take]
-                            _pid_int = int(_p.id)
-                            _iid = np.full((_n, 1), float(_p._interaction_id),            dtype=np.float32)
-                            _rid = np.full((_n, 1), float(_p.root_id),                    dtype=np.float32)
-                            _fid = np.full((_n, 1), float(_frag_lookup.get(_pid_int, -1)), dtype=np.float32)
-                            _eid = np.full((_n, 1), float(_inst_lookup.get(_pid_int, -1)), dtype=np.float32)
-                            rows.append(np.concatenate([_pc5, _iid, _rid, _fid, _eid], axis=1))
-                        return np.concatenate(rows) if rows else np.empty((0, 9), dtype=np.float32)
-
-                    def _voxelize_cloud9(c9, vox_size, orig):
-                        """Voxelize (N, 9) cloud; integer-id cols (5-8) use majority-vote."""
-                        if len(c9) == 0:
-                            return c9
-                        c5_vox = _voxelize_point_cloud(c9[:, :5], vox_size, orig)
-                        coords = c9[:, :3]
-                        _org = coords.min(axis=0) if orig is None else orig
-                        _idx = np.floor((coords - _org) / vox_size).astype(np.int64)
-                        _, _inv = np.unique(_idx, axis=0, return_inverse=True)
-                        extra_cols = []
-                        for _col in range(5, 9):  # interaction_id, root_id, frag_id, inst_id
-                            # Q4: use majority-vote (mode) so a voxel shared by multiple
-                            # instances/fragments gets assigned the dominant ID, not the min.
-                            _int_vals = c9[:, _col].astype(np.int32)
-                            _pairs = np.column_stack([_inv, _int_vals])
-                            _upairs, _ucnts = np.unique(_pairs, axis=0, return_counts=True)
-                            _vox_col = _upairs[:, 0]
-                            _val_col = _upairs[:, 1]
-                            # Sort so highest-count entry per voxel comes first
-                            _sort_idx = np.lexsort([-_ucnts, _vox_col])
-                            _vox_sorted = _vox_col[_sort_idx]
-                            _val_sorted = _val_col[_sort_idx]
-                            _, _first = np.unique(_vox_sorted, return_index=True)
-                            _out = _val_sorted[_first].astype(np.float32)
-                            extra_cols.append(_out[:, None])
-                        return np.concatenate([c5_vox] + extra_cols, axis=1)
-
-                    _nle_parts = [p for p in particles if not _is_le(p)]
-                    _le_parts  = [p for p in particles if _is_le(p)]
-                    _nle_cloud = _build_cloud9(_nle_parts)
-                    _le_cloud  = _build_cloud9(_le_parts)
-                    if voxelizer is not None:
-                        _nle_cloud = _voxelize_cloud9(_nle_cloud, voxelizer.voxel_size, voxelizer.origin)
-                        _le_cloud  = _voxelize_cloud9(_le_cloud,  voxelizer.voxel_size, voxelizer.origin)
-                    writer.append_event_clouds(_nle_cloud, _le_cloud)
-                    _ev_t['write_clouds'] = time.perf_counter() - _t
-                    profile['write_event_clouds'] += _ev_t['write_clouds']
-
-                _t = time.perf_counter()
-                _particles_to_write = (
-                    []
-                    if _output_compact
-                    else ([p for p in particles if not _is_le(p)]
-                          if _drop_le_scatter else particles)
-                )
-                writer.append_event(_particles_to_write)
+                _layout = build_layout(particles, _frag_groups, _inst_groups,
+                                       vertices=getattr(store, 'last_vertices', None))
+                writer.append_event(_layout)
                 _ev_t['write_ev'] = time.perf_counter() - _t
                 profile['write_event'] += _ev_t['write_ev']
 

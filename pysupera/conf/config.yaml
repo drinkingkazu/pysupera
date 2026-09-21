@@ -52,14 +52,14 @@ enable_diagnostics: false
 # false          — warn once per event and continue.
 check_interaction_id: true
 
-# Verify that every particle's root_id is the primary its parent chain leads
+# Verify that every particle's ancestor_id is the primary its parent chain leads
 # to.  Guards the same class of upstream defect as check_interaction_id: an
 # EDepSim ancestor field that disagrees with parent_track_id puts whole
 # subtrees on a false root.
 #
 # true (default) — raise ValueError listing the inconsistent particles.
 # false          — warn once per event and continue.
-check_root_id: true
+check_ancestor_id: true
 
 # ---------------------------------------------------------------------------
 # Post-run repack (opt-in)
