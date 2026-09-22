@@ -664,30 +664,46 @@ class TestVoxelizationMappingRoundtrip:
 
     # ------------------------------------------------------------------ energy consistency
 
-    def test_energy_in_record_matches_input_energies(self):
+    def test_voxel_energy_is_the_sum_of_its_inputs(self):
         """
-        For each voxel, the sum of rec.input_energies must equal the merged
-        output voxel's energy column.
+        Each voxel's energy must equal the sum over the inputs the CSR names.
+
+        The energies are no longer stored beside the mapping -- they would
+        duplicate what the input already holds -- so they are looked up
+        through input_ids, which is also what a caller has to do.
         """
-        _EN = int(PointFeature.energy)
+        _EN, _ID = int(PointFeature.energy), int(PointFeature.id)
         p1, p2 = self._make_particles()
+        # energy by input id, captured before process() replaces the clouds
+        by_id = {int(r[_ID]): float(r[_EN])
+                 for p in (p1, p2) for r in p.point_cloud}
+
         vox = self._vox()
         results = vox.process([p1, p2])
-
-        # Build lookup: particle_id → output point cloud
         out_clouds = {p.id: p.point_cloud for p in results}
 
+        checked = 0
         for rec in vox.last_diagnostics:
             cloud_out = out_clouds[rec.particle_id]
             for v in range(rec.n_after):
-                sl       = slice(int(rec.voxel_offsets[v]), int(rec.voxel_offsets[v + 1]))
-                eng_sum  = float(rec.input_energies[sl].sum())
-                vox_eng  = float(cloud_out[v, _EN])
+                sl = slice(int(rec.voxel_offsets[v]),
+                           int(rec.voxel_offsets[v + 1]))
+                eng_sum = sum(by_id[int(i)] for i in rec.input_ids[sl])
                 np.testing.assert_allclose(
-                    eng_sum, vox_eng, rtol=1e-5,
-                    err_msg=f"Particle {rec.particle_id} voxel {v}: "
-                            f"input energy sum {eng_sum} != voxel energy {vox_eng}",
-                )
+                    eng_sum, float(cloud_out[v, _EN]), rtol=1e-5,
+                    err_msg=f"Particle {rec.particle_id} voxel {v}")
+                checked += 1
+        assert checked > 0, "no voxels were checked"
+
+    def test_every_input_appears_in_exactly_one_voxel(self):
+        """The CSR must partition the inputs -- none lost, none doubled."""
+        p1, p2 = self._make_particles()
+        vox = self._vox()
+        vox.process([p1, p2])
+        for rec in vox.last_diagnostics:
+            assert int(rec.voxel_offsets[-1]) == rec.n_before
+            assert len(rec.input_ids) == rec.n_before
+            assert len(set(int(i) for i in rec.input_ids)) == rec.n_before
 
     def test_energy_known_values_particle1(self):
         """Explicit check: particle 1 voxel energies must be 3.0 and 7.0."""
@@ -825,3 +841,46 @@ class TestSplitFragmentParentPdg:
         out = ScipyDefragmenter(distance_threshold=5.0,
                                 min_pc_size=5).process(ps)
         assert {1, 2, 3} <= {q.id for q in out}
+
+
+# ============================================================================
+# subset_voxmap
+# ============================================================================
+
+from pysupera.preproc import subset_voxmap                       # noqa: E402
+
+
+class TestSubsetVoxmap:
+    """
+    Splitting a cloud has to carry its provenance along.  This path had no
+    test and shipped broken once: the mapping is consumed by every
+    defragmentation split, so a wrong shape here fails the whole run.
+    """
+
+    def _vm(self):
+        # 3 voxels: voxel 0 <- deposits 10,11   1 <- 12   2 <- 13,14,15
+        return (np.array([0, 2, 3, 6], dtype=np.int64),
+                np.array([10, 11, 12, 13, 14, 15], dtype=np.int64))
+
+    def test_returns_a_pair(self):
+        assert len(subset_voxmap(self._vm(), np.array([True, False, True]))) == 2
+
+    def test_keeps_the_selected_voxels_deposits(self):
+        off, ids = subset_voxmap(self._vm(), np.array([True, False, True]))
+        assert off.tolist() == [0, 2, 5]
+        assert ids.tolist() == [10, 11, 13, 14, 15]
+
+    def test_a_single_voxel(self):
+        off, ids = subset_voxmap(self._vm(), np.array([False, True, False]))
+        assert off.tolist() == [0, 1] and ids.tolist() == [12]
+
+    def test_empty_selection(self):
+        off, ids = subset_voxmap(self._vm(), np.array([False, False, False]))
+        assert off.tolist() == [0] and len(ids) == 0
+
+    def test_none_passes_through(self):
+        assert subset_voxmap(None, np.array([True])) is None
+
+    def test_offsets_stay_a_valid_fencepost(self):
+        off, ids = subset_voxmap(self._vm(), np.array([True, True, True]))
+        assert off[0] == 0 and off[-1] == len(ids)

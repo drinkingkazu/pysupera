@@ -99,6 +99,23 @@ repack:
 #                   readout thresholds or heavily masked detector volumes.
 allow_empty_image: false
 
+# Verify that every JAXTPC group belongs to exactly one pysupera particle.
+#
+# Hits attach to groups, and a group carries one Geant4 track -- but
+# defragmentation splits a track across several pysupera particles, so the
+# group table is only usable while no group straddles a split.  Measured over
+# eight events none of 354,959 groups did, because a group is a tight spatial
+# cluster and defragmentation clusters at distance_threshold.  It is checked
+# rather than assumed.
+#
+# true (default) — raise, naming the group and the two particles.
+# false          — keep the first owner seen.  Lossy: prefer
+#                  particle.voxelize.store_mapping=true, which records the
+#                  exact deposit-level mapping instead.
+#
+# JAXTPC mode only; no groups exist otherwise.
+check_group_ownership: true
+
 # Verify that the particle list is self-consistent before partitioning:
 # every parent_id referenced by a particle must correspond to a particle
 # in the list.  Raises ValueError listing all missing parent IDs when

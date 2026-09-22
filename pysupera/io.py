@@ -1783,7 +1783,6 @@ def write_voxmap(main_path: str,
 
         /flat/
             input_ids      (n_total_mappings,)           int32
-            input_energies (n_total_mappings,)           float32
 
     Parameters
     ----------
@@ -1822,7 +1821,6 @@ def write_voxmap(main_path: str,
     # voxels/input_offsets collected as list (variable total voxels)
     vox_input_segs   = []   # one entry per particle: rec.voxel_offsets[1:] shifted
     flat_ids_segs    = []
-    flat_eng_segs    = []
 
     p_idx         = 0
     running_vox   = np.int64(0)
@@ -1839,7 +1837,6 @@ def write_voxmap(main_path: str,
             )
 
             flat_ids_segs.append(rec.input_ids.astype(np.int32))
-            flat_eng_segs.append(rec.input_energies.astype(np.float32))
 
             running_flat += np.int64(len(rec.input_ids))
             running_vox  += n_vox
@@ -1857,7 +1854,6 @@ def write_voxmap(main_path: str,
         vox_input_offsets = np.zeros(1, dtype=np.int64)
 
     flat_ids      = np.concatenate(flat_ids_segs)   if flat_ids_segs   else np.empty(0, dtype=np.int64)
-    flat_energies = np.concatenate(flat_eng_segs)   if flat_eng_segs   else np.empty(0, dtype=np.float32)
 
     # Write
     _cp = lambda n, size: (min(_CHUNK_PARTICLES, max(1, size)),)
@@ -1889,14 +1885,8 @@ def write_voxmap(main_path: str,
                 chunks=_cp2(n_total_mappings),
                 **ckw,
             )
-            fg.create_dataset(
-                "input_energies", data=flat_energies,
-                chunks=_cp2(n_total_mappings),
-                **ckw,
-            )
         else:
             fg.create_dataset("input_ids",      data=np.empty(0, dtype=np.int32))
-            fg.create_dataset("input_energies", data=np.empty(0, dtype=np.float32))
 
     return vpath
 
@@ -2047,23 +2037,18 @@ class VoxmapWriter:
                 cursor_vox   += n_vox
             vox_inp_ds[self._n_voxels + 1 : new_vox_end + 1] = bulk_inp_offs
 
-            # ---- flat input_ids and input_energies (one write each) ----------
+            # ---- flat input_ids (one write) ----------------------------------
             flat_ids_ds = self._f["flat/input_ids"]
-            flat_eng_ds = self._f["flat/input_energies"]
             flat_ids_ds.resize(new_flat_end, axis=0)
-            flat_eng_ds.resize(new_flat_end, axis=0)
 
             bulk_ids = np.empty(n_flat_total, dtype=np.int32)
-            bulk_eng = np.empty(n_flat_total, dtype=np.float32)
             cursor = 0
             for rec in vox_records:
                 n = len(rec.input_ids)
                 if n > 0:
                     bulk_ids[cursor : cursor + n] = rec.input_ids.astype(np.int32)
-                    bulk_eng[cursor : cursor + n] = rec.input_energies.astype(np.float32)
                 cursor += n
             flat_ids_ds[self._n_flat : new_flat_end] = bulk_ids
-            flat_eng_ds[self._n_flat : new_flat_end] = bulk_eng
 
         self._n_events    += 1
         self._n_particles += n_p
@@ -2108,9 +2093,6 @@ class VoxmapWriter:
         # offset arrays, which are cumulative over the file and stay int64.
         fg.create_dataset("input_ids",
                           shape=(0,), maxshape=(None,), dtype=np.int32,
-                          chunks=(_CHUNK_POINTS,), **ckw)
-        fg.create_dataset("input_energies",
-                          shape=(0,), maxshape=(None,), dtype=np.float32,
                           chunks=(_CHUNK_POINTS,), **ckw)
 
 
@@ -2175,7 +2157,6 @@ class VoxmapStore:
                 within this particle — i.e. shifted to start from 0).
             ``"input_ids"`` : np.ndarray, int64, shape (n_total_inputs,)
                 Input point IDs for all voxels of this particle.
-            ``"input_energies"`` : np.ndarray, float32, shape (n_total_inputs,)
                 Energy contributions corresponding to each input_id.
         """
         if index < 0 or index >= self._n_events:
@@ -2199,13 +2180,12 @@ class VoxmapStore:
         flat_end   = int(vox_input_bounds[-1])
 
         all_ids = self._f["flat/input_ids"     ][flat_start:flat_end]
-        all_eng = self._f["flat/input_energies"][flat_start:flat_end]
 
         result = []
         for k in range(n_parts):
             v_start = int(self._vox_offsets[p_start + k])     - vox_start
             v_end   = int(self._vox_offsets[p_start + k + 1]) - vox_start
-            # local fencepost into all_ids/all_eng (zero-indexed)
+            # local fencepost into all_ids (zero-indexed)
             local_vox_offsets = vox_input_bounds[v_start : v_end + 1] - flat_start
             f_s = int(local_vox_offsets[0])
             f_e = int(local_vox_offsets[-1])
@@ -2214,7 +2194,6 @@ class VoxmapStore:
                                       if self._particle_ids is not None else None,
                 "vox_input_offsets": local_vox_offsets - f_s,
                 "input_ids":         all_ids[f_s:f_e],
-                "input_energies":    all_eng[f_s:f_e],
             })
 
         return result

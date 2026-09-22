@@ -152,6 +152,33 @@ class EventWriterV3:
             g.create_dataset(c, shape=(0,), maxshape=(None,), dtype=dt,
                              chunks=(rows,), **self._ckw)
 
+        # groups/: JAXTPC group -> owning particle id, one int32 per group,
+        # -1 where no stored particle claims it.  Written only in JAXTPC
+        # mode; absent otherwise.  volume_offsets records where each volume's
+        # groups start so (volume, local group) is recoverable.
+        gg = f.create_group("groups")
+        gg.create_dataset("offsets", data=np.zeros(1, dtype=np.int64),
+                          maxshape=(None,), chunks=(rows,))
+        # Only the fragment is stored.  The instance is recoverable from it
+        # positionally -- a fragment's points lie inside exactly one
+        # instance's block -- so storing it too would be duplication.  See
+        # pysupera.provenance.instance_of_groups.
+        gg.create_dataset("fragment_id", shape=(0,), maxshape=(None,),
+                          dtype=np.int32, chunks=(_chunk_rows(1, 4),),
+                          **self._ckw)
+        # is_le is exact at group level: a group's deposits belong to one
+        # particle, so the flag is that particle's, not its instance's.
+        gg.create_dataset("is_le", shape=(0,), maxshape=(None,),
+                          dtype=np.int8, chunks=(_chunk_rows(1, 1),),
+                          **self._ckw)
+        gg.create_dataset("volume_offsets", shape=(0,), maxshape=(None,),
+                          dtype=np.int64, chunks=(rows,))
+        gg.create_dataset("volume_offsets_index",
+                          data=np.zeros(1, dtype=np.int64),
+                          maxshape=(None,), chunks=(rows,))
+        self._n_groups = 0
+        self._n_voloff = 0
+
         pg = f.create_group("particles")
         for c in COLUMNS:
             dt = _DTYPE[c]
@@ -159,6 +186,43 @@ class EventWriterV3:
                               chunks=(_chunk_rows(1, np.dtype(dt).itemsize,
                                                   _CHUNK_TARGET_BYTES_META),),
                               **self._ckw)
+
+    def append_group_owners(self, frag_owner, is_le=None, volume_offsets=()):
+        """
+        Append one event's group-ownership table.
+
+        Must be called once per event, in the same order as
+        :meth:`append_event`.  Pass empty arrays for events with no group
+        information, so the per-event offsets stay aligned.
+        """
+        g = self._f["groups"]
+        frag_owner = np.asarray(frag_owner, dtype=np.int32)
+        n = len(frag_owner)
+        if is_le is None:
+            is_le = np.zeros(n, dtype=np.int8)
+        is_le = np.asarray(is_le, dtype=np.int8)
+        if len(is_le) != n:
+            raise ValueError(
+                f"is_le must match the owner array: {len(is_le)} vs {n}")
+        for name, arr in (("fragment_id", frag_owner), ("is_le", is_le)):
+            ds = g[name]
+            ds.resize(self._n_groups + n, axis=0)
+            if n:
+                ds[self._n_groups:self._n_groups + n] = arr
+        self._n_groups += n
+        off = g["offsets"]
+        off.resize(off.shape[0] + 1, axis=0)
+        off[-1] = self._n_groups
+
+        vo = np.asarray(volume_offsets, dtype=np.int64)
+        vds = g["volume_offsets"]
+        vds.resize(self._n_voloff + len(vo), axis=0)
+        if len(vo):
+            vds[self._n_voloff:self._n_voloff + len(vo)] = vo
+        self._n_voloff += len(vo)
+        vidx = g["volume_offsets_index"]
+        vidx.resize(vidx.shape[0] + 1, axis=0)
+        vidx[-1] = self._n_voloff
 
     def append_event(self, layout):
         """Append one event described by an :class:`~pysupera.layout.EventLayout`."""
@@ -419,6 +483,32 @@ class EventStoreV3:
         cols["inst_pc_le_start"] = np.where(st >= 0, sp, -1).astype(sp.dtype)
         cols["inst_pc_le_end"] = en
         return cols
+
+    def group_owners(self, ev):
+        """
+        ``(instance_id, fragment_id, volume_offsets)`` for event *ev*, or
+        ``(None, None, None)`` when the file carries no group table
+        (non-JAXTPC runs).
+
+        Indexed by event-global group number; ``fragment_id`` is -1 where no
+        stored fragment claims the group.  The owning *instance* is not
+        stored -- derive it with
+        :func:`pysupera.provenance.instance_of_groups`.  *volume_offsets* says where
+        each volume's groups begin, so a plane's local group number can be
+        shifted into this space.  See :mod:`pysupera.provenance`.
+        """
+        if "groups/fragment_id" not in self._f:
+            return None, None, None
+        go = self._f["groups/offsets"]
+        if ev + 1 >= go.shape[0]:
+            return None, None, None
+        a, b = int(go[ev]), int(go[ev + 1])
+        vi = self._f["groups/volume_offsets_index"]
+        va, vb = int(vi[ev]), int(vi[ev + 1])
+        le = (self._f["groups/is_le"][a:b] if "groups/is_le" in self._f
+              else np.zeros(b - a, dtype=np.int8))
+        return (self._f["groups/fragment_id"][a:b], le,
+                self._f["groups/volume_offsets"][va:vb])
 
     def close(self):
         if self._f is not None:

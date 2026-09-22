@@ -599,7 +599,7 @@ def subset_voxmap(voxmap, mask):
     """
     Restrict a particle's voxel mapping to a subset of its point-cloud rows.
 
-    *voxmap* is the ``(voxel_offsets, input_ids, input_energies)`` triple
+    *voxmap* is the ``(voxel_offsets, input_ids)`` pair
     attached by :class:`VoxelizeProcessor`, whose ``voxel_offsets`` is a CSR
     fencepost over the particle's voxels in point-cloud row order.  *mask* is
     the boolean row selector used to split the cloud, so the same mask selects
@@ -609,17 +609,16 @@ def subset_voxmap(voxmap, mask):
     """
     if voxmap is None:
         return None
-    off, ids, en = voxmap
+    off, ids = voxmap
     sel = np.flatnonzero(mask)
     if len(sel) == 0:
-        return (np.zeros(1, dtype=np.int64),
-                ids[:0].copy(), en[:0].copy())
+        return np.zeros(1, dtype=np.int64), ids[:0].copy()
     counts = (off[sel + 1] - off[sel]).astype(np.int64)
     new_off = np.zeros(len(sel) + 1, dtype=np.int64)
     np.cumsum(counts, out=new_off[1:])
     take = np.concatenate([np.arange(off[i], off[i + 1]) for i in sel]) \
         if len(sel) else np.zeros(0, dtype=np.int64)
-    return new_off, ids[take].copy(), en[take].copy()
+    return new_off, ids[take].copy()
 
 
 def _merge_point_cloud(pc: np.ndarray) -> np.ndarray:
@@ -840,10 +839,6 @@ class VoxelizeRecord:
         grouping boundaries are given by :attr:`voxel_offsets`.
         ``None`` when :attr:`~VoxelizeProcessor.store_mapping` is
         ``False``.
-    input_energies : np.ndarray or None
-        Flat float32 array of length ``n_before`` holding the energy of
-        each input point in the same order as :attr:`input_ids`.
-        ``None`` when ``store_mapping`` is ``False``.
     voxel_offsets : np.ndarray or None
         Fencepost (CSR) int64 array of length ``n_after + 1``.  For
         output voxel ``v`` (0-based within this particle), the
@@ -857,7 +852,6 @@ class VoxelizeRecord:
     n_before       : int
     n_after        : int
     input_ids      : Optional[np.ndarray] = field(default=None, repr=False)
-    input_energies : Optional[np.ndarray] = field(default=None, repr=False)
     voxel_offsets  : Optional[np.ndarray] = field(default=None, repr=False)
 
     @property
@@ -1003,6 +997,7 @@ class VoxelizeProcessor:
         verbose: bool = False,
         merge_duplicates: bool = False,
         store_mapping: bool = False,
+        track_provenance: bool = False,
     ) -> None:
         vs = np.asarray(voxel_size, dtype=float)
         if vs.ndim == 0:
@@ -1032,12 +1027,16 @@ class VoxelizeProcessor:
         self.merge_duplicates: bool = bool(merge_duplicates)
         #: When ``True``, :meth:`process` populates the CSR mapping fields
         #: (:attr:`~VoxelizeRecord.input_ids`,
-        #: :attr:`~VoxelizeRecord.input_energies`,
         #: :attr:`~VoxelizeRecord.voxel_offsets`) on every
         #: :class:`VoxelizeRecord` in :attr:`last_diagnostics`, including
         #: unaffected particles (identity mapping).  When ``False`` (default)
         #: only affected particles are recorded and mapping fields are ``None``.
         self.store_mapping: bool = bool(store_mapping)
+        #: Compute the same CSR but only attach it to the particle, for
+        #: callers that need provenance in memory without writing the
+        #: deposit-level map to disk -- the group-ownership table is built
+        #: this way.  Implied by :attr:`store_mapping`.
+        self.track_provenance: bool = bool(track_provenance)
         #: :class:`VoxelizeRecord` list from the most recent :meth:`process`
         #: call.  When :attr:`store_mapping` is ``False``, only particles
         #: that had at least one merge are included.  When ``True``, every
@@ -1088,6 +1087,18 @@ class VoxelizeProcessor:
         n_total_before = total
         all_pts = np.concatenate(all_pcs)           # (total, n_cols)
         coords  = all_pts[:, :3]
+
+        # Reader-supplied deposit provenance, concatenated in the same order
+        # as the clouds.  All-or-nothing: if any contributing particle lacks
+        # it the array would be misaligned, so fall back to the id column.
+        _deps = [getattr(p, "deposit_id", None) for p in particles
+                 if len(p.point_cloud) > 0]
+        if _deps and all(d is not None and len(d) == n for d, n in
+                         zip(_deps, (len(p.point_cloud) for p in particles
+                                     if len(p.point_cloud) > 0))):
+            all_dep = np.concatenate(_deps).astype(np.int64)
+        else:
+            all_dep = None
 
         # Per-particle origins (preserves per-particle grid alignment)
         if self.origin is None:
@@ -1145,25 +1156,23 @@ class VoxelizeProcessor:
         # We sort input points by their assigned output voxel so all points
         # belonging to the same voxel are contiguous, then derive CSR offsets.
         # This reuses the already-computed inv array at O(total log total).
-        if self.store_mapping:
+        if self.store_mapping or self.track_provenance:
             sort_order   = np.argsort(inv, kind='stable')  # (total,)
             sorted_vox   = inv[sort_order]                 # voxel indices, sorted
             # Fencepost offsets over all n_out voxels
             vox_off_all  = np.searchsorted(
                 sorted_vox, np.arange(n_out + 1)
             ).astype(np.int64)                             # (n_out + 1,)
-            # Flat input IDs and energies in sorted-voxel order
-            _en_col = int(PointFeature.energy)
-            flat_ids = (
-                all_pts[sort_order, _id_col].astype(np.int64)
-                if n_cols > _id_col
-                else sort_order.astype(np.int64)
-            )
-            flat_en = (
-                all_pts[sort_order, _en_col].astype(np.float32)
-                if n_cols > _en_col
-                else np.zeros(total, dtype=np.float32)
-            )
+            # Flat input deposit IDs in sorted-voxel order.
+            # Provenance comes from the reader's int64 deposit array when
+            # present.  The float32 id column is the fallback: it is exact
+            # only to 2**24, which a large enough event would exceed.
+            if all_dep is not None:
+                flat_ids = all_dep[sort_order]
+            elif n_cols > _id_col:
+                flat_ids = all_pts[sort_order, _id_col].astype(np.int64)
+            else:
+                flat_ids = sort_order.astype(np.int64)
 
         for i, p in enumerate(particles):
             start, end = int(boundaries[i]), int(boundaries[i + 1])
@@ -1174,22 +1183,21 @@ class VoxelizeProcessor:
             if affected:
                 p.point_cloud = out[start:end]
                 n_affected   += 1
-            elif self.store_mapping:
+            elif self.store_mapping or self.track_provenance:
                 # When tracking the mapping, all particles get updated so that
                 # p.point_cloud[:, PointFeature.id] reflects the new voxel IDs
                 # that are also stored in the mapping record.
                 p.point_cloud = out[start:end]
 
             # Build VoxelizeRecord when affected OR when tracking the mapping.
-            if affected or self.store_mapping:
-                if self.store_mapping:
+            if affected or self.store_mapping or self.track_provenance:
+                if self.store_mapping or self.track_provenance:
                     inp_s    = int(vox_off_all[start])
                     inp_e    = int(vox_off_all[end])
                     p_off    = (vox_off_all[start:end + 1] - inp_s).astype(np.int64)
                     p_ids    = flat_ids[inp_s:inp_e].copy()
-                    p_en     = flat_en[inp_s:inp_e].copy()
                 else:
-                    p_off = p_ids = p_en = None
+                    p_off = p_ids = None
 
                 # Attach the mapping to the particle, not just to the
                 # diagnostics list.  Defragmentation runs after this stage and
@@ -1203,15 +1211,16 @@ class VoxelizeProcessor:
                 # voxel_offsets is a CSR over THIS particle's voxels, in the
                 # same order as its point-cloud rows, which is what lets a
                 # split reuse the very mask applied to the cloud.
-                if self.store_mapping:
-                    p.voxmap = (p_off, p_ids, p_en)
+                if self.store_mapping or self.track_provenance:
+                    p.voxmap = (p_off, p_ids)
+
+                p.deposit_id = None   # now carried by voxmap
 
                 rec = VoxelizeRecord(
                     particle_id    = p.id,
                     n_before       = n_before,
                     n_after        = n_after,
                     input_ids      = p_ids,
-                    input_energies = p_en,
                     voxel_offsets  = p_off,
                 )
                 self.last_diagnostics.append(rec)

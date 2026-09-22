@@ -250,6 +250,8 @@ def build_voxelizer(cfg: DictConfig, verbose: bool = False):
         verbose          = verbose,
         merge_duplicates = bool(vox_cfg.get('merge_duplicates', False)),
         store_mapping    = bool(vox_cfg.get('store_mapping',    False)),
+        # The group table needs the same CSR in memory, without writing it.
+        track_provenance = True,
     )
 
 

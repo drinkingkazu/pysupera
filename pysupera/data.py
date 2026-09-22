@@ -194,7 +194,14 @@ class Particle:
         for full descriptions.
         """
         # --- required fields -----------------------------------------------
-        #: Voxelization mapping, ``(voxel_offsets, input_ids, input_energies)``
+        #: Input deposit index per point, parallel to :attr:`point_cloud`
+        #: and int64 so a large index cannot round the way a float32 column
+        #: would.  Set by the reader; consumed by the voxelizer, which folds
+        #: it into :attr:`voxmap` and then drops it.  ``None`` when the
+        #: reader does not provide provenance.
+        self.deposit_id = None
+
+        #: Voxelization mapping, ``(voxel_offsets, input_ids)``
         #: or ``None`` when ``particle.voxelize.store_mapping`` is off.  Set by
         #: VoxelizeProcessor and carried on the particle so that later stages
         #: which split or drop particles keep it consistent.

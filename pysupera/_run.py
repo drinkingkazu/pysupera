@@ -54,6 +54,7 @@ def main(cfg: DictConfig) -> None:
     import numpy as np
     from collections import defaultdict
     from pysupera.io_v3 import open_writer_v3
+    from pysupera.provenance import build_group_owners, remap_owners, le_flags
     from pysupera.io import open_voxmap_writer
     from pysupera.partitioner import ParticlePartitioner
     from pysupera.merge import merge_em_showers
@@ -69,6 +70,12 @@ def main(cfg: DictConfig) -> None:
     merge_processor = build_merge_processor(cfg)  # None when merge_duplicates: false
     voxelizer       = build_voxelizer(cfg)         # None when voxelize.enabled: false
     preprocessor    = build_preprocessor(cfg)      # None when defragment: false
+    _check_group_owner = bool(cfg.get('check_group_ownership', True))
+
+    def _n_groups_of(_store):
+        """Total groups in the event just read, from the deposit map."""
+        _m = getattr(_store, 'last_deposit_to_group', None)
+        return 0 if _m is None or not len(_m) else int(_m.max()) + 1
 
     _write_voxmap = (voxelizer is not None
                      and bool(cfg.particle.voxelize.get('store_mapping', False)))
@@ -242,13 +249,12 @@ def main(cfg: DictConfig) -> None:
                         _vm = getattr(_p, 'voxmap', None)
                         if _vm is None:
                             continue
-                        _off, _ids, _en = _vm
+                        _off, _ids = _vm
                         _recs.append(VoxelizeRecord(
                             particle_id    = int(_p.id),
                             n_before       = int(len(_ids)),
                             n_after        = int(len(_off) - 1),
                             input_ids      = _ids,
-                            input_energies = _en,
                             voxel_offsets  = _off,
                         ))
                     vox_writer.append_event(_recs)
@@ -400,6 +406,33 @@ def main(cfg: DictConfig) -> None:
                 _layout = build_layout(particles, _frag_groups, _inst_groups,
                                        vertices=getattr(store, 'last_vertices', None))
                 writer.append_event(_layout)
+
+                # ── JAXTPC group ownership ─────────────────────────────────
+                # Which hits belong to which reconstructed object.  Hits
+                # attach to groups and groups attach to one particle, so this
+                # one table answers it for instances and fragments alike --
+                # see pysupera.provenance.  Absent outside JAXTPC mode, where
+                # there are no hits to group.
+                _d2g = getattr(store, 'last_deposit_to_group', None)
+                if _d2g is None:
+                    writer.append_group_owners(np.zeros(0, dtype=np.int32))
+                else:
+                    _owner = build_group_owners(
+                        particles, _d2g, _n_groups_of(store),
+                        check=_check_group_owner)
+                    # Record the fragment, not the particle: only a fraction
+                    # of particles get a row, so a particle id would often
+                    # name something the reader cannot resolve.  Every
+                    # fragment with points does get one.  The instance is
+                    # left out entirely -- it follows from the fragment.
+                    _frag_of = {int(m): int(g.rep_id)
+                                for g in _frag_groups for m in g.member_ids}
+                    _le_of = {int(p.id): (p.sem_type is _le_type)
+                              for p in particles}
+                    writer.append_group_owners(
+                        remap_owners(_owner, _frag_of),
+                        le_flags(_owner, _le_of),
+                        getattr(store, 'last_group_volume_offsets', ()))
                 _ev_t['write_ev'] = time.perf_counter() - _t
                 profile['write_event'] += _ev_t['write_ev']
 

@@ -270,6 +270,12 @@ def _build_visible_point_cloud(
     assigned as a global 0-based integer across all visible segments in
     the event.
 
+    The returned ``deposit_id`` is the *input* deposit index -- the row in
+    the seg file that produced each point -- offset per volume so one
+    integer identifies a deposit across the whole event.  It is carried as
+    int64 rather than in the float32 cloud, because the cloud is exact only
+    to 2**24 and a future hundredfold increase in deposits would reach that.
+
     Parameters
     ----------
     seg_volumes : list of dict
@@ -290,12 +296,28 @@ def _build_visible_point_cloud(
         ``offsets[i] = [start, end)`` into ``point_cloud_flat`` for
         particle *i*.  Particles with no visible segments get a zero-length
         slice (``start == end``).
+    deposit_id : np.ndarray, shape (M,), dtype int64
+        Event-global input deposit index for each row of
+        *point_cloud_flat*.
+    volume_offsets : list of int
+        Where each volume's deposits start in that global index, so
+        ``(volume, local index)`` can be recovered.
     """
     # Merge per-volume dicts into a single {track_id: list_of_segment_rows}
     # where each segment row is a 1-D float32 array of length 7.
     track_segs: dict[int, list[np.ndarray]] = {}
+    track_deps: dict[int, list[np.ndarray]] = {}
 
-    for seg_vol, vol_visible in zip(seg_volumes, visible_by_track):
+    # Deposit indices are per volume in the seg file; offset them so one
+    # integer names a deposit across the event.
+    volume_offsets: list[int] = []
+    _cum = 0
+    for sv in seg_volumes:
+        volume_offsets.append(_cum)
+        _cum += int(sv.get('n_actual', 0) or 0)
+
+    for _vi, (seg_vol, vol_visible) in enumerate(
+            zip(seg_volumes, visible_by_track)):
         if seg_vol.get('n_actual', 0) == 0:
             continue
         pos   = seg_vol['positions_mm']   # (N, 3)  x, y, z in mm
@@ -317,6 +339,8 @@ def _build_visible_point_cloud(
             chunk[:, PointFeature.dx]     = dx[seg_idx]
             # id column left as zero; assigned globally below.
             track_segs.setdefault(track_id, []).append(chunk)
+            track_deps.setdefault(track_id, []).append(
+                volume_offsets[_vi] + np.asarray(seg_idx, dtype=np.int64))
 
     # Concatenate chunks per track and build the flat array + offsets in the
     # same order as track_ids_edepsim so that Particle.from_flat_arrays
@@ -324,6 +348,7 @@ def _build_visible_point_cloud(
     n_particles = len(track_ids_edepsim)
     offsets = np.zeros((n_particles, 2), dtype=np.int64)
     flat_chunks: list[np.ndarray] = []
+    dep_chunks: list[np.ndarray] = []
     cursor = 0
 
     for i, tid in enumerate(track_ids_edepsim):
@@ -335,19 +360,22 @@ def _build_visible_point_cloud(
         combined = np.concatenate(chunks, axis=0)  # (M_i, 7)
         offsets[i] = [cursor, cursor + len(combined)]
         flat_chunks.append(combined)
+        dep_chunks.append(np.concatenate(track_deps[int(tid)], axis=0))
         cursor += len(combined)
 
     if flat_chunks:
         point_cloud_flat = np.concatenate(flat_chunks, axis=0)
+        deposit_id = np.concatenate(dep_chunks, axis=0)
     else:
         point_cloud_flat = np.zeros((0, 7), dtype=np.float32)
+        deposit_id = np.zeros(0, dtype=np.int64)
 
     # Assign global, event-wide, 0-based point IDs.
     point_cloud_flat[:, PointFeature.id] = np.arange(
         len(point_cloud_flat), dtype=np.float32
     )
 
-    return point_cloud_flat, offsets
+    return point_cloud_flat, offsets, deposit_id, volume_offsets
 
 
 # ---------------------------------------------------------------------------
@@ -497,7 +525,8 @@ class JaxtpcHDF5Reader(EventReaderBase):
         # ── Step 4: build the flat point cloud (visible segments only) ────
         # Segments are assembled in the same track order as `parts` so that
         # Particle.from_flat_arrays correctly matches metadata to point clouds.
-        point_cloud_flat, offsets = _build_visible_point_cloud(
+        (point_cloud_flat, offsets,
+         deposit_id, volume_offsets) = _build_visible_point_cloud(
             seg_volumes, visible_by_track, parts['track_id']
         )
 
@@ -529,7 +558,15 @@ class JaxtpcHDF5Reader(EventReaderBase):
 
         _ids, _par, _root, _g4 = _to_index_space(parts, _get_ancestor_id(parts))
 
-        return Particle.from_flat_arrays(
+        # ── Deposit provenance for this event ────────────────────────────
+        # deposit_to_group is per volume; concatenate it onto the same
+        # event-global index the point clouds now carry, and do the same for
+        # group_to_track so a group number is unambiguous event-wide.
+        self.last_deposit_to_group, self.last_group_volume_offsets = \
+            self._load_deposit_groups(event_key, seg_volumes)
+        self.last_deposit_volume_offsets = volume_offsets
+
+        _particles = Particle.from_flat_arrays(
             ids                 = _ids,
             parent_ids          = _par,
             ancestor_ids            = _root,
@@ -542,6 +579,46 @@ class JaxtpcHDF5Reader(EventReaderBase):
             min_pc_size         = self._min_pc_size,
             geant4_ids          = _g4,
         )
+
+        # Attach each particle's slice of the deposit index.  Kept beside the
+        # cloud rather than inside it: the cloud is float32 and exact only to
+        # 2**24, which a hundredfold rise in deposits per event would reach.
+        for _i, _p in enumerate(_particles):
+            _a, _b = int(offsets[_i][0]), int(offsets[_i][1])
+            _p.deposit_id = deposit_id[_a:_b]
+        return _particles
+
+    def _load_deposit_groups(self, event_key, seg_volumes):
+        """
+        ``(deposit_to_group, group_volume_offsets)`` for one event.
+
+        Both the deposit index and the group number are rebased onto an
+        event-global space, matching the deposit ids attached to the point
+        clouds, so a caller never has to know which volume a deposit came
+        from to look up its group.
+        """
+        import numpy as _np
+        ev = (self._inst_file[event_key]
+              if event_key in self._inst_file else None)
+        if ev is None:
+            return None, []
+        d2g, g_off, cum_g = [], [], 0
+        for vol_name in self._volume_names(ev):
+            vg = ev[vol_name]
+            key = next((k for k in _SEG_TO_GROUP_KEYS if k in vg), None)
+            if key is None or 'group_to_track' not in vg:
+                continue
+            g_off.append(cum_g)
+            d2g.append(vg[key][:].astype(_np.int64) + cum_g)
+            cum_g += len(vg['group_to_track'])
+        if not d2g:
+            return None, []
+        return _np.concatenate(d2g), g_off
+
+    @staticmethod
+    def _volume_names(ev):
+        """Volume subgroups of one event, in the order the seg loader uses."""
+        return sorted(k for k in ev.keys() if k.startswith('volume_'))
 
     def close(self) -> None:
         """Close all open HDF5 file handles."""
