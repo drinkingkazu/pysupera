@@ -1,0 +1,713 @@
+<!DOCTYPE html>
+<meta charset="utf-8">
+<title>pysupera — hits ⇄ voxels</title>
+<style>
+  :root{--bg:#0e1116;--panel:#161b22;--line:#2a313a;--text:#d8dee9;--text2:#8b949e;--accent:#58a6ff}
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--text);font:13px/1.45 ui-sans-serif,system-ui,sans-serif;height:100vh;display:flex;flex-direction:column}
+  header{padding:8px 12px;background:var(--panel);border-bottom:1px solid var(--line);display:flex;gap:14px;align-items:center;flex-wrap:wrap}
+  label{color:var(--text2);font-size:12px}
+  input[type=file]{font-size:11px;color:var(--text2);max-width:230px}
+  select,button{background:#21262d;color:var(--text);border:1px solid var(--line);border-radius:5px;padding:3px 8px;font-size:12px}
+  button:hover{border-color:var(--accent);cursor:pointer}
+  main{flex:1;display:flex;min-height:0}
+  #three{flex:1;min-width:0;position:relative;overflow:hidden}
+  #three canvas{position:absolute;inset:0;width:100%;height:100%;display:block}
+  #planes{width:46%;min-width:340px;border-left:1px solid var(--line);overflow:auto;padding:8px;display:flex;flex-direction:column;gap:8px}
+  .pw{background:var(--panel);border:1px solid var(--line);border-radius:6px;padding:6px}
+  .pw h4{margin:0 0 4px;font-size:11px;color:var(--text2);font-weight:600;letter-spacing:.04em}
+  canvas.plane{width:100%;display:block;background:#0a0d12;border-radius:4px;cursor:crosshair}
+  #banner{position:absolute;left:10px;right:10px;top:10px;background:#5a1d1d;border:1px solid #a33;border-radius:6px;padding:8px 10px;font-size:12px;display:none;z-index:5;white-space:pre-wrap}
+  #pinfo{position:absolute;right:10px;bottom:10px;background:rgba(13,17,23,.94);border:1px solid var(--line);border-radius:6px;padding:8px 11px;font-size:12px;z-index:4;display:none;font-variant-numeric:tabular-nums}
+  #pinfo table{border-collapse:collapse} #pinfo td{padding:1px 0}
+  #pinfo td:first-child{color:var(--text2);padding-right:12px}
+  #status{position:absolute;left:10px;bottom:10px;z-index:4;background:rgba(13,17,23,.9);border:1px solid var(--line);border-radius:6px;padding:7px 10px;font-size:12px;max-width:min(560px,90%);white-space:pre-wrap}
+  #log{position:absolute;right:10px;top:10px;background:rgba(13,17,23,.9);border:1px solid var(--line);border-radius:6px;padding:7px 10px;font-size:11px;color:var(--text2);max-height:32%;overflow:auto;max-width:44%}
+  .k{color:var(--text2)} .v{color:var(--text)} b{color:var(--accent)}
+</style>
+
+<header>
+  <label>output .h5 <input type="file" id="f-out" accept=".h5"></label>
+  <label>JAXTPC hits .h5 <input type="file" id="f-hit" accept=".h5"></label>
+  <label>event <select id="ev"></select></label>
+  <label>colour by
+    <select id="level"><option value="inst">instance</option><option value="frag">fragment</option><option value="inter">interaction</option></select>
+  </label>
+  <label>point size <input type="range" id="psize" min="1" max="8" step="0.5" value="3" style="width:80px"></label>
+  <label>others <input type="range" id="dim" min="0" max="1" step="0.02" value="0.12" style="width:80px"><span id="dimv" class="k">0.12</span></label>
+  <label><input type="checkbox" id="hidele"> hide LE</label>
+  <label><input type="checkbox" id="info" checked> point info</label>
+  <button id="fit">fit view (c)</button>
+  <span id="hint" class="k">load both files — hover anywhere to link 2D ⇄ 3D</span>
+</header>
+
+<main>
+  <div id="three"><div id="banner"></div><div id="status">no file loaded</div><div id="pinfo"></div><div id="log"></div></div>
+  <div id="planes"></div>
+</main>
+
+<script type="importmap">
+{"imports":{
+  "three":"https://cdn.jsdelivr.net/npm/three@0.163.0/build/three.module.js",
+  "three/addons/":"https://cdn.jsdelivr.net/npm/three@0.163.0/examples/jsm/"
+}}
+</script>
+
+<script type="module">
+import * as THREE from 'three';
+import {OrbitControls} from 'three/addons/controls/OrbitControls.js';
+
+// ---------------------------------------------------------------- state --
+const S = {
+  out:null, hit:null,           // h5wasm File handles
+  ev:0, level:'inst',
+  pts:null,                     // Float32Array xyz, 3 per voxel (visible only)
+  feat:null,                    // Float32Array, 6 per voxel: x,y,z,t,dE,dX
+  owner:null,                   // Int32Array: owning inst/frag id per voxel
+  isLE:null,                    // Uint8Array per voxel
+  hideLE:false,
+  planes:[],                    // {vol,plane,wires,times,q,owner,canvas,...}
+  sel:-1,                       // highlighted owner id, -1 = none
+  dim:0.12,                     // opacity of everything not selected
+  interOf:null,                 // instance id -> interaction id
+  instOfFrag:null,              // fragment id -> instance id (derived)
+  nEvents:0,
+};
+let H5File, FS, scene, camera, renderer, controls, cloud, raycaster, pointer;
+
+const logEl = document.getElementById('log');
+const statusEl = document.getElementById('status');
+const log = m => { logEl.textContent = (m + '\n' + logEl.textContent).slice(0, 4000); };
+const bannerEl = document.getElementById('banner');
+function banner(msg){
+  bannerEl.style.display = msg ? 'block' : 'none';
+  if(msg){ bannerEl.textContent = msg; log(msg.split('\n')[0]); }
+}
+
+// h5wasm decodes gzip/shuffle/szip and nothing else.  An LZ4 or Blosc
+// dataset does not raise -- it yields garbage -- so refuse up front rather
+// than draw a plausible wrong picture.
+const READABLE = new Set(['1', '2', '3', '4', '5', '6']);
+// h5wasm has reported `filters` as both an array of objects and a plain
+// map across versions; accept either, and stay quiet if neither, so the
+// guard can never itself become the reason nothing loads.
+function filterIds(d){
+  const f = d && d.filters;
+  if(!f) return [];
+  if(Array.isArray(f))
+    return f.map(x => String(x && x.id !== undefined ? x.id : x));
+  if(typeof f === 'object') return Object.keys(f).map(String);
+  return [];
+}
+function unreadableFilter(f, path){
+  try{
+    const bad = filterIds(f.get(path)).filter(i => !READABLE.has(i));
+    return bad.length ? bad.join(',') : null;
+  }catch(e){ return null; }
+}
+
+const LEVEL_NAME = {inst:'instance', frag:'fragment', inter:'interaction'};
+
+// Stable colour per owner id.  The same function drives the 3D points and the
+// 2D pixels, so a colour means the same object in both views -- that is the
+// whole demonstration.
+function ownerColor(id){
+  if(id < 0) return [0.30, 0.33, 0.38];
+  const h = Math.imul(id ^ 0x9e3779b9, 0x85ebca6b) >>> 0;
+  const hue = (h % 360) / 360;
+  const c = new THREE.Color().setHSL(hue, 0.68, 0.58);
+  return [c.r, c.g, c.b];
+}
+
+// ------------------------------------------------------------ h5 helpers --
+const has = (f, p) => { try { return f.get(p) !== null; } catch(e){ return false; } };
+const val = (f, p) => f.get(p).value;
+const sl  = (f, p, a, b) => f.get(p).slice([[a, b]]);
+
+// 3.0.0 wrote some columns under other names; accept either.
+const ALIAS = {
+  inst_pc_end:'inst_pc_split', inst_pc_le_start:'inst_pc_split',
+  inst_pc_le_end:'inst_pc_end', frag_pc_start:'frag_non_le_start',
+  frag_pc_end:'frag_non_le_end', frag_pc_le_start:'frag_le_start',
+  frag_pc_le_end:'frag_le_end',
+};
+function pcol(f, name){
+  const g = f.get('particles');
+  if(g.keys().includes(name)) return name;
+  const alt = ALIAS[name];
+  return (alt && g.keys().includes(alt)) ? alt : name;
+}
+
+// --------------------------------------------------------------- loading --
+async function boot(){
+  const h5wasm = (await import('https://cdn.jsdelivr.net/npm/h5wasm@0.7.3/dist/esm/hdf5_hl.js')).default;
+  const Module = await h5wasm.ready;
+  H5File = h5wasm.File; FS = Module.FS;
+  log('h5wasm ready');
+}
+const booted = boot();
+
+async function openFile(file, tag){
+  await booted;
+  const buf = new Uint8Array(await file.arrayBuffer());
+  FS.writeFile(tag, buf);
+  return new H5File(tag, 'r');
+}
+
+document.getElementById('f-out').onchange = async e => {
+  const f = e.target.files[0]; if(!f) return;
+  try{
+    S.out = await openFile(f, 'out.h5');
+    const ver = val(S.out, 'format_version');
+    S.nEvents = Number(val(S.out, 'n_events'));
+    log(`output: format ${ver}, ${S.nEvents} events`);
+
+    const badF = unreadableFilter(S.out, 'points/flat');
+    if(badF){
+      S.out = null;
+      return banner(
+        `This output uses HDF5 filter ${badF}, which the browser cannot decode.\n` +
+        `h5wasm handles gzip only, and an unsupported filter yields garbage rather\n` +
+        `than an error -- so the file is refused instead of drawn wrongly.\n\n` +
+        `    pysupera-repack ${f.name} out_gzip.h5 -c gzip`);
+    }
+    if(!has(S.out, 'groups/instance_id')){
+      banner(
+        `This output has no groups/ table, so hits cannot be linked to instances.\n` +
+        `It was written either before hit provenance existed or without JAXTPC input.\n` +
+        `Re-run with BOTH reader.jaxtpc_seg_path and reader.jaxtpc_inst_path set.\n\n` +
+        `The 3D view still works; the 2D planes will stay unlinked.`);
+    } else banner('');
+    const sel = document.getElementById('ev');
+    sel.innerHTML = '';
+    for(let i = 0; i < S.nEvents; i++){
+      const o = document.createElement('option'); o.value = i; o.textContent = i; sel.appendChild(o);
+    }
+    rebuild();
+  }catch(err){ log('ERROR opening output: ' + err.message); }
+};
+
+document.getElementById('f-hit').onchange = async e => {
+  const f = e.target.files[0]; if(!f) return;
+  try{
+    S.hit = await openFile(f, 'hits.h5');
+    const ek = S.hit.keys().filter(k => k.startsWith('event_')).sort();
+    log(`hits: ${ek.length} events`);
+    if(ek.length){
+      const vol = S.hit.get(ek[0]).keys().filter(k => k.startsWith('volume_'))[0];
+      const bad = vol ? unreadableFilter(S.hit, `${ek[0]}/${vol}/U/group_ids`) : null;
+      if(bad){
+        S.hit = null;
+        return banner(
+          `This hits file uses HDF5 filter ${bad}, which the browser cannot decode.\n` +
+          `Extract a gzip copy of just what the viewer reads:\n\n` +
+          `    pysupera-hits-subset ${f.name} hits_small.h5 -n ${S.nEvents || 10}`);
+      }
+    }
+    rebuild();
+  }catch(err){
+    log('ERROR opening hits: ' + err.message +
+        ' — h5wasm reads gzip only; repack with: pysupera-repack in.h5 out.h5 -c gzip');
+  }
+};
+
+document.getElementById('ev').onchange = e => { S.ev = +e.target.value; rebuild(); };
+document.getElementById('level').onchange = e => { S.level = e.target.value; rebuild(); };
+document.getElementById('psize').oninput = e => {
+  if(cloud) cloud.material.size = +e.target.value; render();
+};
+document.getElementById('dim').oninput = e => {
+  S.dim = +e.target.value;
+  document.getElementById('dimv').textContent = S.dim.toFixed(2);
+  paintCloud(); for(const p of S.planes) paintPlane(p);
+};
+document.getElementById('hidele').onchange = e => { S.hideLE = e.target.checked; rebuild(); };
+document.getElementById('info').onchange = e => {
+  if(!e.target.checked) document.getElementById('pinfo').style.display = 'none';
+};
+document.getElementById('fit').onclick = fitView;
+addEventListener('keydown', e => { if(e.key === 'c') fitView(); });
+
+// ------------------------------------------------- per-event voxel labels --
+// A voxel's owner comes from the instance (or fragment) block that contains
+// its row: ownership is positional, exactly as the format intends.
+function buildVoxels(){
+  const f = S.out, ev = S.ev;
+  const eo = val(f, 'events/offsets'), po = val(f, 'points/offsets');
+  const a = Number(eo[ev]), b = Number(eo[ev+1]);
+  const pa = Number(po[ev]), pb = Number(po[ev+1]);
+  const n = pb - pa;
+  if(n <= 0){
+    S.pts = new Float32Array(0); S.feat = new Float32Array(0);
+    S.owner = new Int32Array(0); S.isLE = new Uint8Array(0);
+    S.interOf = new Map(); S.instOfFrag = new Map();   // no stale maps
+    return;
+  }
+
+  const flat = f.get('points/flat').slice([[pa, pb], [0, 6]]);
+  const feat = Float32Array.from(flat);          // x,y,z,t,dE,dX per row
+
+  const col = nm => sl(f, 'particles/' + pcol(f, nm), a, b);
+  const id = col('id');
+  const key = S.level === 'frag' ? 'frag_id' : 'inst_id';
+  const gid = col(key);
+
+  // instance id -> interaction id, from the instance representatives.  The
+  // groups table stores an instance, not an interaction, so the 2D side
+  // needs this map too; keep it on S.
+  {
+    const iid = col('inst_id'), itr = col('interaction_id');
+    const m = new Map();
+    // instance blocks, for the containment lookup below
+    const lo = [], hi = [], who = [];
+    const is0 = col('inst_pc_start'), ie0 = col('inst_pc_end');
+    const is1 = col('inst_pc_le_start'), ie1 = col('inst_pc_le_end');
+    for(let k = 0; k < id.length; k++){
+      if(Number(iid[k]) !== Number(id[k])) continue;
+      m.set(Number(id[k]), Number(itr[k]));
+      const s = Number(is0[k]);
+      if(s < 0) continue;
+      lo.push(s); hi.push(Math.max(Number(ie1[k]), Number(ie0[k])));
+      who.push(Number(id[k]));
+    }
+    S.interOf = m;
+
+    // fragment -> instance, by which block the fragment's points fall in.
+    // inst_id marks a row as *being* an instance rep; it does not record
+    // membership, so this cannot be a column join.
+    const ord = lo.map((_, i) => i).sort((p, q) => lo[p] - lo[q]);
+    const L = ord.map(i => lo[i]), H = ord.map(i => hi[i]), W = ord.map(i => who[i]);
+    const fid = col('frag_id');
+    const fs0 = col('frag_pc_start'), fs1 = col('frag_pc_le_start');
+    const fmap = new Map();
+    for(let k = 0; k < id.length; k++){
+      if(Number(fid[k]) !== Number(id[k])) continue;
+      let p = Number(fs0[k]); if(p < 0) p = Number(fs1[k]);
+      if(p < 0) continue;
+      let a2 = 0, b2 = L.length;               // upper bound
+      while(a2 < b2){ const mid = (a2 + b2) >> 1; if(L[mid] <= p) a2 = mid + 1; else b2 = mid; }
+      const j = a2 - 1;
+      if(j >= 0 && p < H[j]) fmap.set(Number(id[k]), W[j]);
+    }
+    S.instOfFrag = fmap;
+  }
+  const owner = new Int32Array(n).fill(-1);
+  // LE-ness is positional: a point is LE exactly when it falls in its
+  // instance's inst_pc_le range.  Read it from the instance blocks even
+  // when colouring by fragment, so the mask means the same thing either way.
+  const isLE = new Uint8Array(n);
+  {
+    const iid = col('inst_id');
+    const ls = col('inst_pc_le_start'), le = col('inst_pc_le_end');
+    for(let k = 0; k < id.length; k++){
+      if(Number(iid[k]) !== Number(id[k])) continue;
+      if(Number(ls[k]) < 0) continue;
+      const lo = Number(ls[k]) - pa, hi = Number(le[k]) - pa;
+      for(let j = Math.max(0, lo); j < Math.min(n, hi); j++) isLE[j] = 1;
+    }
+  }
+
+  if(S.level !== 'frag'){
+    const s0 = col('inst_pc_start'), e0 = col('inst_pc_end');
+    const s1 = col('inst_pc_le_start'), e1 = col('inst_pc_le_end');
+    for(let k = 0; k < id.length; k++){
+      if(Number(gid[k]) !== Number(id[k])) continue;
+      const v = Number(id[k]);
+      // in interaction mode the block still belongs to an instance; the
+      // label is that instance's interaction
+      const w = S.level === 'inter'
+        ? (S.interOf.has(v) ? S.interOf.get(v) : -1) : v;
+      for(const [x, y] of [[s0[k], e0[k]], [s1[k], e1[k]]]){
+        const lo = Number(x) - pa, hi = Number(y) - pa;
+        if(Number(x) < 0) continue;
+        for(let j = Math.max(0, lo); j < Math.min(n, hi); j++) owner[j] = w;
+      }
+    }
+  }else{
+    const s0 = col('frag_pc_start'), e0 = col('frag_pc_end');
+    const s1 = col('frag_pc_le_start'), e1 = col('frag_pc_le_end');
+    for(let k = 0; k < id.length; k++){
+      if(Number(gid[k]) !== Number(id[k])) continue;
+      const v = Number(id[k]);
+      for(const [x, y] of [[s0[k], e0[k]], [s1[k], e1[k]]]){
+        if(Number(x) < 0) continue;
+        const lo = Number(x) - pa, hi = Number(y) - pa;
+        for(let j = Math.max(0, lo); j < Math.min(n, hi); j++) owner[j] = v;
+      }
+    }
+  }
+  // Drop LE rows here rather than at draw time, so the raycaster cannot
+  // pick something the user asked not to see.
+  if(S.hideLE){
+    const keep = [];
+    for(let j = 0; j < n; j++) if(!isLE[j]) keep.push(j);
+    const m = keep.length;
+    const f2 = new Float32Array(m * 6), o2 = new Int32Array(m),
+          l2 = new Uint8Array(m), p2 = new Float32Array(m * 3);
+    for(let i = 0; i < m; i++){
+      const j = keep[i];
+      for(let c = 0; c < 6; c++) f2[i*6+c] = feat[j*6+c];
+      for(let c = 0; c < 3; c++) p2[i*3+c] = feat[j*6+c];
+      o2[i] = owner[j];
+    }
+    S.feat = f2; S.pts = p2; S.owner = o2; S.isLE = l2;
+    log(`hide LE: ${n.toLocaleString()} -> ${m.toLocaleString()} voxels`);
+    return;
+  }
+  const p3 = new Float32Array(n * 3);
+  for(let i = 0; i < n; i++)
+    for(let c = 0; c < 3; c++) p3[i*3+c] = feat[i*6+c];
+  S.feat = feat; S.pts = p3; S.owner = owner; S.isLE = isLE;
+}
+
+// --------------------------------------------------- per-event hit labels --
+// group_ids on a plane are local to the volume; volume_offsets shifts them
+// into the event-global numbering the groups/ table uses.
+function buildPlanes(){
+  S.planes = [];
+  if(!S.hit || !S.out || !has(S.out, 'groups/instance_id')) return;
+  const f = S.out, ev = S.ev;
+  const go = val(f, 'groups/offsets');
+  if(ev + 1 >= go.length) return;
+  const ga = Number(go[ev]), gb = Number(go[ev+1]);
+  if(gb <= ga) return;
+  // groups/ stores only the fragment.  The instance follows from it by
+  // containment -- a fragment's points lie inside one instance's block --
+  // and the interaction follows from the instance.  Nothing else is stored
+  // because nothing else needs to be.
+  const fragOwner = sl(f, 'groups/fragment_id', ga, gb);
+  let ownerOfGroup = fragOwner;
+  if(S.level !== 'frag'){
+    ownerOfGroup = new Int32Array(fragOwner.length).fill(-1);
+    for(let i = 0; i < fragOwner.length; i++){
+      const fid = Number(fragOwner[i]);
+      if(fid < 0) continue;
+      const iid = S.instOfFrag ? (S.instOfFrag.get(fid) ?? -1) : -1;
+      ownerOfGroup[i] = (S.level === 'inter')
+        ? (iid >= 0 && S.interOf.has(iid) ? S.interOf.get(iid) : -1)
+        : iid;
+    }
+  }
+  // A group's deposits belong to one particle, so its LE flag is exact --
+  // an instance normally mixes an LE and a non-LE side, so the instance
+  // could not answer this.
+  const leOfGroup = has(f, 'groups/is_le') ? sl(f, 'groups/is_le', ga, gb) : null;
+  if(S.hideLE && !leOfGroup)
+    log('note: this file has no groups/is_le, so "hide LE" affects the 3D view only');
+  const vi = val(f, 'groups/volume_offsets_index');
+  const voloff = sl(f, 'groups/volume_offsets', Number(vi[ev]), Number(vi[ev+1]));
+
+  const ekey = 'event_' + String(ev).padStart(3, '0');
+  if(!S.hit.keys().includes(ekey)){ log(`hits file has no ${ekey}`); return; }
+  const evg = S.hit.get(ekey);
+  const vols = evg.keys().filter(k => k.startsWith('volume_')).sort();
+
+  vols.forEach((vol, vidx) => {
+    const base = vidx < voloff.length ? Number(voloff[vidx]) : 0;
+    const vg = evg.get(vol);
+    for(const plane of ['U', 'V', 'Y']){
+      if(!vg.keys().includes(plane)) continue;
+      const pg = vg.get(plane);
+      const need = ['center_wires', 'center_times', 'group_ids'];
+      if(!need.every(k => pg.keys().includes(k))) continue;
+      const wires = pg.get('center_wires').value;
+      const times = pg.get('center_times').value;
+      const gids  = pg.get('group_ids').value;
+      const q = pg.keys().includes('peak_charges') ? pg.get('peak_charges').value : null;
+      const own = new Int32Array(wires.length).fill(-1);
+      const hle = new Uint8Array(wires.length);
+      const grp = new Int32Array(wires.length).fill(-1);
+      for(let h = 0; h < wires.length; h++){
+        const g = Number(gids[h]) + base - ga;
+        if(g >= 0 && g < ownerOfGroup.length){
+          own[h] = Number(ownerOfGroup[g]);
+          grp[h] = g;
+          if(leOfGroup) hle[h] = Number(leOfGroup[g]) ? 1 : 0;
+        }
+      }
+      if(S.hideLE && leOfGroup){
+        const keep = [];
+        for(let h = 0; h < wires.length; h++) if(!hle[h]) keep.push(h);
+        S.planes.push({vol, plane,
+          wires: keep.map(h => Number(wires[h])),
+          times: keep.map(h => Number(times[h])),
+          q: q ? keep.map(h => Number(q[h])) : null,
+          owner: Int32Array.from(keep.map(h => own[h])),
+          grp: Int32Array.from(keep.map(h => grp[h])),
+          le: new Uint8Array(keep.length)});
+      } else {
+        S.planes.push({vol, plane, wires, times, q, owner:own, grp, le:hle});
+      }
+    }
+  });
+  log(`${S.planes.length} plane images, ${S.planes.reduce((a,p)=>a+p.wires.length,0).toLocaleString()} hits`);
+}
+
+// ------------------------------------------------------------- 2D drawing --
+function drawPlanes(){
+  const host = document.getElementById('planes');
+  host.innerHTML = '';
+  for(const p of S.planes){
+    const wrap = document.createElement('div'); wrap.className = 'pw';
+    const nSel = S.sel >= 0 ? p.owner.reduce((a, o) => a + (o === S.sel ? 1 : 0), 0) : 0;
+    const h = document.createElement('h4');
+    h.textContent = `${p.vol} / ${p.plane} — ${p.wires.length.toLocaleString()} hits` +
+                    (S.sel >= 0 ? `   ·   ${nSel.toLocaleString()} highlighted` : '');
+    wrap.appendChild(h);
+    const cv = document.createElement('canvas'); cv.className = 'plane';
+    cv.width = 640; cv.height = 200;
+    wrap.appendChild(cv); host.appendChild(wrap);
+    p.canvas = cv;
+    paintPlane(p);
+    cv.onmousemove = e => {
+      const r = cv.getBoundingClientRect();
+      const hIdx = pickHit(p, (e.clientX - r.left) / r.width, (e.clientY - r.top) / r.height);
+      if(hIdx >= 0){
+        infoHit(p, hIdx);
+        select(p.owner[hIdx], `2D ${p.vol}/${p.plane} hit ${hIdx}`);
+      }
+    };
+    cv.onmouseleave = () => {};
+  }
+}
+
+function planeExtent(p){
+  let w0 = Infinity, w1 = -Infinity, t0 = Infinity, t1 = -Infinity;
+  for(let i = 0; i < p.wires.length; i++){
+    const w = Number(p.wires[i]), t = Number(p.times[i]);
+    if(w < w0) w0 = w; if(w > w1) w1 = w;
+    if(t < t0) t0 = t; if(t > t1) t1 = t;
+  }
+  if(!isFinite(w0)){ w0 = 0; w1 = 1; t0 = 0; t1 = 1; }
+  return {w0, w1:Math.max(w1, w0+1), t0, t1:Math.max(t1, t0+1)};
+}
+
+function paintPlane(p){
+  const cv = p.canvas, ctx = cv.getContext('2d');
+  ctx.clearRect(0, 0, cv.width, cv.height);
+  const ex = planeExtent(p); p._ex = ex;
+  const sw = cv.width / (ex.w1 - ex.w0), st = cv.height / (ex.t1 - ex.t0);
+  const dim = S.sel >= 0;
+  for(let i = 0; i < p.wires.length; i++){
+    const on = !dim || p.owner[i] === S.sel;
+    const [r, g, b] = ownerColor(p.owner[i]);
+    ctx.globalAlpha = on ? 1 : S.dim;
+    ctx.fillStyle = `rgb(${r*255|0},${g*255|0},${b*255|0})`;
+    const x = (Number(p.wires[i]) - ex.w0) * sw;
+    const y = (Number(p.times[i]) - ex.t0) * st;
+    const s = on && dim ? 3 : 1.6;
+    ctx.fillRect(x - s/2, y - s/2, s, s);
+  }
+  ctx.globalAlpha = 1;
+}
+
+function pickHit(p, fx, fy){
+  const ex = p._ex || planeExtent(p);
+  const w = ex.w0 + fx * (ex.w1 - ex.w0), t = ex.t0 + fy * (ex.t1 - ex.t0);
+  const tolW = (ex.w1 - ex.w0) / 120, tolT = (ex.t1 - ex.t0) / 60;
+  let best = -1, bd = Infinity;
+  for(let i = 0; i < p.wires.length; i++){
+    const dw = (Number(p.wires[i]) - w) / tolW, dt = (Number(p.times[i]) - t) / tolT;
+    const d = dw*dw + dt*dt;
+    if(d < bd && d < 1){ bd = d; best = i; }
+  }
+  return best;
+}
+
+// ------------------------------------------------------------- 3D drawing --
+function hostSize(){
+  const host = document.getElementById('three');
+  const r = host.getBoundingClientRect();
+  // Fall back to the window if flex has not resolved yet: a 0x0 canvas
+  // renders nothing and swallows every mouse event, which looks exactly
+  // like a broken viewer.
+  return {w: Math.max(1, Math.round(r.width) || host.clientWidth || innerWidth * 0.5),
+          h: Math.max(1, Math.round(r.height) || host.clientHeight || innerHeight - 60)};
+}
+
+function resize3D(){
+  if(!renderer) return;
+  const {w, h} = hostSize();
+  camera.aspect = w / h; camera.updateProjectionMatrix();
+  renderer.setSize(w, h, false);
+}
+
+function initThree(){
+  const host = document.getElementById('three');
+  const {w, h} = hostSize();
+  scene = new THREE.Scene(); scene.background = new THREE.Color(0x0e1116);
+  camera = new THREE.PerspectiveCamera(55, w / h, 0.1, 1e6);
+  camera.position.set(600, 600, 600);
+  renderer = new THREE.WebGLRenderer({antialias:true});
+  renderer.setPixelRatio(devicePixelRatio);
+  renderer.setSize(w, h, false);
+  host.appendChild(renderer.domElement);
+  controls = new OrbitControls(camera, renderer.domElement);
+  raycaster = new THREE.Raycaster(); raycaster.params.Points.threshold = 8;
+  pointer = new THREE.Vector2();
+  renderer.domElement.addEventListener('mousemove', on3DMove);
+  new ResizeObserver(resize3D).observe(host);
+  addEventListener('resize', resize3D);
+  log(`3D canvas ${w}x${h}`);
+  // A plain loop rather than render-on-demand: one points cloud is cheap,
+  // and it removes every "the canvas existed but never drew" failure.
+  (function tick(){ requestAnimationFrame(tick); controls.update();
+                    renderer.render(scene, camera); })();
+}
+const render = () => {};   // the loop draws; kept so call sites stay honest
+
+function buildCloud(){
+  if(cloud){ scene.remove(cloud); cloud.geometry.dispose(); cloud.material.dispose(); cloud = null; }
+  const n = S.pts.length / 3;
+  if(!n) return;
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute('position', new THREE.BufferAttribute(S.pts, 3));
+  // RGBA, not RGB: dimming by darkening still occludes, so the unselected
+  // points have to be genuinely transparent.  depthWrite off keeps them
+  // from hiding the selection behind them, which is the whole point.
+  const col = new Float32Array(n * 4);
+  geo.setAttribute('color', new THREE.BufferAttribute(col, 4));
+  const mat = new THREE.PointsMaterial({size:+document.getElementById('psize').value,
+                                        vertexColors:true, sizeAttenuation:false,
+                                        transparent:true, depthWrite:false});
+  cloud = new THREE.Points(geo, mat); scene.add(cloud);
+  paintCloud();
+}
+
+function paintCloud(){
+  if(!cloud) return;
+  const n = S.owner.length;
+  const col = cloud.geometry.attributes.color.array;
+  const dimming = S.sel >= 0;
+  for(let i = 0; i < n; i++){
+    const [r, g, b] = ownerColor(S.owner[i]);
+    const on = !dimming || S.owner[i] === S.sel;
+    col[i*4] = r; col[i*4+1] = g; col[i*4+2] = b;
+    col[i*4+3] = on ? 1 : S.dim;
+  }
+  cloud.geometry.attributes.color.needsUpdate = true;
+}
+
+const fmt = (v, d = 3) => (v === undefined || v === null || Number.isNaN(v))
+  ? '\u2014' : (Math.abs(v) >= 1e5 || (v !== 0 && Math.abs(v) < 1e-3)
+                 ? Number(v).toExponential(2) : Number(v).toFixed(d));
+
+function showInfo(rows){
+  const el = document.getElementById('pinfo');
+  if(!document.getElementById('info').checked){ el.style.display = 'none'; return; }
+  el.innerHTML = '<table>' + rows.map(
+    ([k, v]) => `<tr><td>${k}</td><td>${v}</td></tr>`).join('') + '</table>';
+  el.style.display = 'block';
+}
+
+function infoVoxel(i){
+  const f = S.feat, o = i * 6;
+  showInfo([
+    ['voxel', i.toLocaleString()],
+    ['x y z', `${fmt(f[o],1)}  ${fmt(f[o+1],1)}  ${fmt(f[o+2],1)}`],
+    ['time', fmt(f[o+3], 2)],
+    ['dE', fmt(f[o+4], 4)],
+    ['dX', fmt(f[o+5], 4)],
+    ['dE/dX', f[o+5] > 0 ? fmt(f[o+4] / f[o+5], 3) : '\u2014'],
+    ['LE', S.isLE && S.isLE[i] ? 'yes' : 'no'],
+    [LEVEL_NAME[S.level],
+     S.owner[i] < 0 ? '\u2014' : String(S.owner[i])],
+  ]);
+}
+
+function infoHit(p, h){
+  showInfo([
+    ['hit', `${p.vol} / ${p.plane} #${h}`],
+    ['wire', String(Number(p.wires[h]))],
+    ['time', String(Number(p.times[h]))],
+    ['peak charge', p.q ? fmt(Number(p.q[h]), 2) : '\u2014'],
+    ['group', p.grp && p.grp[h] >= 0 ? String(p.grp[h]) : '\u2014'],
+    ['LE', p.le && p.le[h] ? 'yes' : 'no'],
+    [LEVEL_NAME[S.level],
+     p.owner[h] < 0 ? '\u2014' : String(p.owner[h])],
+  ]);
+}
+
+function on3DMove(e){
+  if(!cloud) return;
+  const r = renderer.domElement.getBoundingClientRect();
+  pointer.x = ((e.clientX - r.left) / r.width) * 2 - 1;
+  pointer.y = -((e.clientY - r.top) / r.height) * 2 + 1;
+  raycaster.setFromCamera(pointer, camera);
+  const hits = raycaster.intersectObject(cloud, false);
+  if(hits.length){
+    const i = hits[0].index;
+    infoVoxel(i);
+    select(S.owner[i], `3D voxel ${i}`);
+  }
+}
+
+function fitView(){
+  const n = S.pts.length / 3; if(!n) return;
+  let mn = [1e30,1e30,1e30], mx = [-1e30,-1e30,-1e30];
+  for(let i = 0; i < n; i++) for(let d = 0; d < 3; d++){
+    const v = S.pts[i*3+d]; if(v < mn[d]) mn[d] = v; if(v > mx[d]) mx[d] = v;
+  }
+  const c = mn.map((v,i) => (v + mx[i]) / 2);
+  const span = Math.max(...mx.map((v,i) => v - mn[i]), 1);
+  controls.target.set(c[0], c[1], c[2]);
+  camera.position.set(c[0] + span, c[1] + span*0.7, c[2] + span);
+  camera.near = span/1000; camera.far = span*20; camera.updateProjectionMatrix();
+  controls.update(); render();
+}
+
+// ------------------------------------------------------------- selection --
+// One owner id drives both views; that is the link being demonstrated.
+function select(id, why){
+  id = Number(id);
+  if(id === S.sel) return;
+  S.sel = id;
+  paintCloud();
+  for(const p of S.planes) paintPlane(p);
+  let nVox = 0; for(const o of S.owner) if(o === id) nVox++;
+  let nHit = 0; for(const p of S.planes) for(const o of p.owner) if(o === id) nHit++;
+  const lvl = LEVEL_NAME[S.level];
+  statusEl.innerHTML = id < 0
+    ? `<span class="k">${why} — unowned</span>`
+    : `<b>${lvl} ${id}</b>\n<span class="k">voxels</span> <span class="v">${nVox.toLocaleString()}</span>` +
+      `   <span class="k">hits</span> <span class="v">${nHit.toLocaleString()}</span>\n<span class="k">via ${why}</span>`;
+  // repaint headers (highlight counts)
+  drawPlaneHeaders();
+}
+function drawPlaneHeaders(){
+  document.querySelectorAll('#planes .pw').forEach((w, i) => {
+    const p = S.planes[i]; if(!p) return;
+    const nSel = S.sel >= 0 ? p.owner.reduce((a, o) => a + (o === S.sel ? 1 : 0), 0) : 0;
+    w.querySelector('h4').textContent =
+      `${p.vol} / ${p.plane} — ${p.wires.length.toLocaleString()} hits` +
+      (S.sel >= 0 ? `   ·   ${nSel.toLocaleString()} highlighted` : '');
+  });
+}
+
+// ----------------------------------------------------------------- rebuild --
+function rebuild(){
+  if(!S.out) return;
+  if(!scene) initThree();
+  S.sel = -1;
+  try{
+    buildVoxels();
+    buildPlanes();
+    buildCloud();
+    drawPlanes();
+    fitView();
+    const nv = S.owner.length;
+    const owned = S.owner.reduce((a,o) => a + (o >= 0 ? 1 : 0), 0);
+    const nOwners = new Set(Array.from(S.owner).filter(o => o >= 0)).size;
+    log(`event ${S.ev}: ${nv.toLocaleString()} voxels, ${nOwners} distinct owners, ` +
+        `${S.planes.length} planes`);
+    if(nv > 0 && nOwners <= 1)
+      banner(`Every voxel resolved to the same owner (${nOwners}).  That is almost\n` +
+             `certainly a decode problem rather than physics -- check the file is gzip.`);
+    statusEl.innerHTML = `<b>event ${S.ev}</b>\n<span class="k">voxels</span> ` +
+      `<span class="v">${nv.toLocaleString()}</span> (${owned.toLocaleString()} owned)   ` +
+      `<span class="k">planes</span> <span class="v">${S.planes.length}</span>` +
+      (S.hit ? '' : '\n<span class="k">load the JAXTPC hits file to see the 2D projections</span>');
+    document.getElementById('hint').textContent = 'hover a 3D voxel or a 2D pixel';
+  }catch(err){ log('ERROR: ' + err.message); statusEl.textContent = 'error: ' + err.message; }
+}
+</script>

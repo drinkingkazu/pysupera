@@ -56,6 +56,7 @@ app = [
 run_pysupera        = "pysupera._run:main"
 pysupera-app        = "pysupera.app:main"
 pysupera-repack     = "pysupera.io:repack_cli"
+pysupera-hits-subset = "pysupera.hits_subset:main"
 
 [tool.setuptools.packages.find]
 where = ["."]

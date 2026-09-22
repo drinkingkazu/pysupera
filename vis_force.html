@@ -693,7 +693,7 @@ body.dragover #canvas-wrap::after{
           <option value="4">Energy</option>
           <option value="3">Time</option>
           <option value="5">Interaction ID</option>
-          <option value="6">Root Track ID</option>
+          <option value="6">Ancestor Track ID</option>
           <option value="7">Fragment ID</option>
           <option value="8" selected>Instance ID</option>
           <option value="9">PDG code</option>
@@ -2434,7 +2434,7 @@ function _onIconHover(el,entered){
     `<div class="ip-det-row"><span class="ip-det-key">centroid x</span><span class="ip-det-val">${d.xc}</span></div>`+
     `<div class="ip-det-row"><span class="ip-det-key">centroid y</span><span class="ip-det-val">${d.yc}</span></div>`+
     `<div class="ip-det-row"><span class="ip-det-key">centroid z</span><span class="ip-det-val">${d.zc}</span></div>`+
-    `<div class="ip-det-row"><span class="ip-det-key">Root tracks</span><span class="ip-det-val">${d.nroots}</span></div>`+
+    `<div class="ip-det-row"><span class="ip-det-key">Ancestors</span><span class="ip-det-val">${d.nroots}</span></div>`+
     `<div class="ip-det-row"><span class="ip-det-key">Cloud source</span><span class="ip-det-val">${d.src}</span></div>`+
     (d.pdg&&d.pdg!=='—'?`<div class="ip-det-pdg"><span style="color:var(--text2);font-size:11px">PDG codes &nbsp;</span>${d.pdg}</div>`:'')+
     _instPtHistHTML(_intId);
@@ -2502,7 +2502,7 @@ function _renderInterDetailById(intId){
     `<div class="ip-det-row"><span class="ip-det-key">centroid x</span><span class="ip-det-val">${d.xc}</span></div>`+
     `<div class="ip-det-row"><span class="ip-det-key">centroid y</span><span class="ip-det-val">${d.yc}</span></div>`+
     `<div class="ip-det-row"><span class="ip-det-key">centroid z</span><span class="ip-det-val">${d.zc}</span></div>`+
-    `<div class="ip-det-row"><span class="ip-det-key">Root tracks</span><span class="ip-det-val">${d.nroots}</span></div>`+
+    `<div class="ip-det-row"><span class="ip-det-key">Ancestors</span><span class="ip-det-val">${d.nroots}</span></div>`+
     `<div class="ip-det-row"><span class="ip-det-key">Cloud source</span><span class="ip-det-val">${d.src}</span></div>`+
     (d.pdg&&d.pdg!=='—'?`<div class="ip-det-pdg"><span style="color:var(--text2);font-size:11px">PDG codes &nbsp;</span>${d.pdg}</div>`:'')+
     _instPtHistHTML(_intId);

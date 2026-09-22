@@ -19,6 +19,7 @@ A Python library for grouping simulated LArTPC particles into physics partitions
 4. [Quick Start](#quick-start)
    - [Python API](#python-api)
    - [Interactive Event Viewer (`pysupera-app`)](#interactive-event-viewer-pysupera-app)
+   - [Browser viewers (`vis_force.html`, `vis_hits.html`)](#browser-viewers-vis_forcehtml-vis_hitshtml)
 5. [Workflow](#workflow)
    - [Input: the `Particle` object](#input-the-particle-object)
    - [Step 0 — Configuration](#step-0--configuration)
@@ -33,6 +34,8 @@ A Python library for grouping simulated LArTPC particles into physics partitions
    - [Particle columns](#particle-columns)
    - [Interaction columns](#interaction-columns)
    - [ID conventions](#id-conventions)
+   - [Hit provenance (JAXTPC mode)](#hit-provenance-jaxtpc-mode)
+     - [Seeing it](#seeing-it)
    - [Expert and debugging output](#expert-and-debugging-output)
 7. [Training Data (PyTorch)](#training-data-pytorch)
    - [Voxel merging](#voxel-merging)
@@ -193,6 +196,72 @@ The **PARTICLE FILTER** and **show legend** checkbox take effect immediately wit
 <p align="center">
   <img src="figures/dash_display.png" alt="pysupera-app event display" width="900"/>
 </p>
+
+---
+
+### Browser viewers (`vis_force.html`, `vis_hits.html`)
+
+Two standalone HTML files that read an output file directly in the browser —
+no server, no install, nothing to launch. Open the file and pick your HDF5.
+They answer different questions:
+
+| | `vis_force.html` | `vis_hits.html` |
+|---|---|---|
+| **question** | what is in this event, and how is it grouped? | which readout hits belong to which object? |
+| **inputs** | the pysupera output | the output **and** the JAXTPC hits file |
+| **views** | one 3-D cloud, plus an instance-genealogy graph | 3-D cloud beside the six 2-D readout planes |
+| **needs** | any 3.x output | JAXTPC mode, so `groups/` exists |
+
+Both read HDF5 through **h5wasm, which decodes gzip only**, so the inputs have
+to be repacked first — see [Compression](#compression).
+
+#### `vis_force.html` — exploring one event
+
+Colour the cloud by energy, time, interaction id, ancestor track id, fragment
+id, instance id or PDG code, with a selectable colormap and optional log
+scale. LE and non-LE points toggle independently, energy and time thresholds
+slide, and a bounding box clips the view. An animation plays the event by
+time, and an interaction panel and a force-directed instance-genealogy graph
+open alongside.
+
+Shortcuts: `c` centre · `a` axes · `s` screenshot · `space` play/pause ·
+`r` reset animation · `o` auto-rotate · `i` interaction panel · `g` graph ·
+`d` debug log · `?` help.
+
+#### `vis_hits.html` — linking 3-D to the readout
+
+3-D voxels on the left, the 2-D planes built from hits on the right, and the
+same colour meaning the same object in both. **Hover a 3-D voxel and its hits
+light up across all six plane images; hover a 2-D pixel and its voxels light
+up in 3-D.** The link is a single owner id, so the two views cannot disagree.
+
+| control | |
+|---|---|
+| **colour by** | instance, fragment or interaction — the last two derived, not read |
+| **others** | opacity of everything not under the cursor. The cloud uses RGBA vertex colours with depth-write off, so unselected points are genuinely transparent and never hide the selection behind them |
+| **hide LE** | drops low-energy points from both views. Filtering happens at build time, so the picker cannot select something hidden |
+| **point info** | x/y/z, time, dE, dX, dE/dX, LE and owner in 3-D; wire, time, peak charge, group, LE and owner in 2-D |
+| **c** | fit the view |
+
+Preparing its two inputs:
+
+```bash
+pysupera-repack out.h5 out_gz.h5 -c gzip              # the pysupera output
+pysupera-hits-subset sim_wire_hits_0000.h5 hits_small.h5 -n 10
+```
+
+`-c gzip` is not optional: omitting it keeps each dataset's existing filter,
+leaving a file the browser cannot read. The second command exists because the
+hits file is mostly per-tick arrays the viewer never opens — keeping only
+`center_wires`, `center_times`, `peak_charges` and `group_ids` takes a
+3-event sample from 1279.7 MiB to 2.73 MiB.
+
+`vis_hits.html` refuses to draw rather than show something false: a red
+banner appears for a filter it cannot decode, a missing `groups/` table, or
+an event where every voxel resolves to one owner. Files written before the
+group table, or before `groups/is_le`, still load — it says what is missing
+and shows what it can. The mapping it displays is described under
+[Hit provenance](#hit-provenance-jaxtpc-mode).
 
 ---
 
@@ -616,6 +685,97 @@ readers see the absolute form.
 Both merge stages operate within a single particle, so `dE` and `dX` both sum
 over a particle-voxel and **dE/dX is column 4 / column 5**, exactly. Guard
 against `dX == 0`: EDepSim writes zero-length steps, a few percent of voxels.
+
+### Hit provenance (JAXTPC mode)
+
+Which readout hits belong to which reconstructed object. A hit is the
+projection of a JAXTPC *group*, and `groups/` records the fragment that owns
+each group, plus one bit saying whether that group is low-energy:
+
+```python
+with read_events_v3("out.h5") as store:
+    frag_owner, is_le, vol_offsets = store.group_owners(ev)
+
+groups = np.flatnonzero(frag_owner == my_fragment_id)
+gid    = inst_file[f"event_{ev:03d}/volume_0/U/group_ids"][:] + vol_offsets[0]
+hits   = np.flatnonzero(np.isin(gid, groups))
+```
+
+Both arrays are indexed by event-global group number, `-1` where nothing
+claims the group; `vol_offsets` shifts a plane's local group number into that
+space. `pysupera.provenance` has `hits_of_groups` and `groups_of_particles`
+for the same joins.
+
+For instances, derive rather than read — `instance_of_groups(view,
+frag_owner)` returns the owning instance per group, and the interaction
+follows from the instance's `interaction_id`:
+
+```python
+from pysupera.provenance import instance_of_groups
+inst_owner = instance_of_groups(store[ev], frag_owner)
+```
+
+#### What is stored, and what is not
+
+| | stored? | why |
+|---|---|---|
+| fragment | yes | the only usable key — see below |
+| instance | **no** | a fragment's points lie inside exactly one instance's block, so it follows by containment (verified exact on 29,201 groups) |
+| interaction | **no** | follows from the instance's `interaction_id` |
+| LE flag | yes | irreducible — see below |
+
+**Why the fragment and not the particle.** The particle is the natural key and
+does not work: a group's owner is usually an ordinary member particle, and
+only about a sixth of particles get a row — 6,605 of 6,777 owners were
+unresolvable in one event. Every fragment *with points* is stored by
+construction (0 missing of 29,201), so the fragment is the finest key that
+always resolves.
+
+Note that `inst_id` and `frag_id` are **self-markers**, not membership: each
+equals `id` on a representative row and is `-1` everywhere else. Membership is
+positional, via the point ranges, which is why deriving the instance is a
+containment search rather than a column join.
+
+**Why the LE flag cannot be derived.** LE-ness is an attribute of the pysupera
+particle, and a fragment mixes LE and non-LE members by design — that is what
+its two point ranges are for. Measured, 26–30% of fragments contain both LE
+and non-LE groups, so the fragment cannot answer it. Deriving it would mean
+knowing which *point rows* a group produced, which is the opt-in deposit map
+below. The bit costs 0.17 bytes/group; making it derivable instead, by storing
+the owning particles as rows, costs about 20× more.
+
+#### Why groups and not voxels
+
+`group_to_track` gives each group one Geant4 track, but defragmentation splits
+a track across several pysupera particles, so `track → particle` is
+one-to-many and cannot regroup hits. What rescues it is that a group never
+straddles a split — a group is a tight spatial cluster and defragmentation
+clusters at `distance_threshold`. Over eight events, none of 354,959 groups
+spanned two particles. So `group → particle` *is* a function, and
+`hit → group → particle → fragment` is a chain of functions.
+
+Going via voxels would be worse as well as larger: a group's deposits land in
+2–4 different voxels 38% of the time, so `hit ↔ voxel` is many-to-many and
+would need charge apportionment (`qs_fractions` in the inst file).
+
+The invariant is checked per event, not assumed — `check_group_ownership`
+(default true) raises naming the group and the two particles. `groups/` costs
+about 21% of the output under LZ4, less under gzip.
+
+#### Seeing it
+
+`vis_hits.html` shows this mapping directly — 3-D voxels beside the 2-D
+readout planes, hover either side to light up the other. See
+[Browser viewers](#browser-viewers-vis_forcehtml-vis_hitshtml) for its
+controls and for preparing its two inputs.
+
+#### Exact per-voxel provenance — `particle.voxelize.store_mapping=true`
+
+Off by default. Writes `<output>_voxmap.h5`, a CSR giving the input deposits
+behind every output voxel. This is the exact record the group table
+compresses, so it is the thing to enable if `check_group_ownership` ever
+fires — and the only way to answer "which deposits made *this* voxel". It is
+roughly ten times larger.
 
 ### Compression
 
