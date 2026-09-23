@@ -1,0 +1,48 @@
+# @package _global_
+#
+# Everything needed to run the cubic_pixel detector on its SENSOR HITS, so
+# that only the file paths stay on the command line:
+#
+#   run_pysupera preset=cubic_pixel_hits \
+#       io.input_path=edepsim.h5 io.output_path=out.h5 \
+#       reader.jaxtpc_seg_path=batch/step/run/name_step_0000_00.h5 \
+#       reader.jaxtpc_inst_path=batch/hits/run/name_hits_0000_00.h5 \
+#       reader.jaxtpc_sensor_path=batch/sensor/run/name_sensor_0000_00.h5
+#
+# Anything here can still be overridden on the command line, which wins.
+#
+# A preset rather than the reader config because two of these live outside
+# the reader package -- min_pc_size under particle, and the two top-level
+# checks -- and because they are only right together.
+
+defaults:
+  - override /reader: jaxtpc_pixel
+
+reader:
+  # A point is a fired pixel, not a Geant4 deposit.
+  point_source: hits
+
+particle:
+  # Extent below which a particle is a low-energy scatter, in 3 mm voxels.
+  # The rule is the cell count of a blob one track-width across; the width
+  # depends on how hard the hits are cut, so this and
+  # reader.hit_charge_threshold have to move together:
+  #
+  #   threshold    track width   min_pc_size   agreement with truth@5
+  #   -----------------------------------------------------------------
+  #     0 e-          13.1 mm         85              99.0%
+  #   500 e-           6.5 mm         13              95.5%
+  #
+  # Mixing them is what to avoid: 85 at a 500 e- threshold agrees on only
+  # 85.2% of particles.  The uncut pairing keeps all the charge and 4.18M
+  # points per event; this one keeps 73.5% of the charge and 190k points.
+  min_pc_size: 13
+
+# Must clear the pixel diagonal (pitch * sqrt(2) = 6.11 mm) or
+# defragmentation measures the pixel grid instead of the physics.
+distance_threshold: 6.2
+
+# A group's hits can straddle a fragment split here -- the readout leaves
+# gaps the deposit cloud does not have -- so the invariant the groups/ table
+# rests on does not hold and the run resolves by majority instead.
+check_group_ownership: false

@@ -1,0 +1,178 @@
+# JAXTPC pixel-readout input.
+#
+#   run_pysupera reader=jaxtpc_pixel \
+#       io.input_path=edepsim.h5 io.output_path=out.h5 \
+#       reader.jaxtpc_seg_path=batch/step/run/name_step_0000_00.h5 \
+#       reader.jaxtpc_inst_path=batch/hits/run/name_hits_0000_00.h5
+#
+# As reader=jaxtpc_wire, but the readout is a single Pixel plane per volume
+# recording two pixel indices and a drift tick -- a natively 3-D image.  That
+# is what makes point_source=hits possible here and not for wire.
+#
+# For the detected-image mode, add:
+#
+#       reader.point_source=hits \
+#       reader.jaxtpc_sensor_path=batch/sensor/run/name_sensor_0000_00.h5 \
+#       reader.pixel_pitch_mm=4.32 'reader.pixel_drift_direction=[-1,1]' \
+#       check_group_ownership=false distance_threshold=6.2
+#
+# distance_threshold must clear the pixel diagonal (pitch * sqrt(2)) or
+# defragmentation measures the pixel grid instead of the physics, and
+# check_group_ownership must be off because a group's hits can straddle a
+# fragment split.  Both are explained in the README.
+
+defaults:
+  - edepsim_h5
+  - _self_
+
+# Path to the JAXTPC seg/step HDF5 file.
+jaxtpc_seg_path: ???
+
+# Path to the JAXTPC inst/hits HDF5 file.
+jaxtpc_inst_path: ???
+
+# ---------------------------------------------------------------------------
+# What a point is  (JAXTPC pixel readout only)
+# ---------------------------------------------------------------------------
+# deposits (default) — a point is a Geant4 energy deposit that the readout
+#                      detected.  The geometry is truth geometry; the readout
+#                      only decides which deposits survive.
+# hits               — a point is a fired pixel.  (py, pz, tick) is converted
+#                      back to (x, y, z), so the cloud carries pixelation,
+#                      diffusion, threshold and the drift-time ambiguity, and
+#                      the partitioner sees what the detector saw.  Requires a
+#                      pixel-readout hits file; wire readout has no 3-D image
+#                      to convert.
+#
+# Roughly 4.2M points per event against 143k detected deposits, so expect the
+# run to cost accordingly.
+point_source: deposits
+
+# How the drift coordinate is obtained, when point_source=hits.
+#
+# Writing T for the time a hit's tick stands for, measured from the tick at
+# which a deposit sitting on the anode at Geant4 t=0 would be recorded:
+#
+#     T = (tick - reference_tick) * time_step
+#
+# nominal  (default) x = x_anode -/+ T * drift_velocity.  What a detector can
+#          actually do: assume the interaction happened at the beam time.  The
+#          resulting x is offset from the true x by exactly
+#          drift_direction * drift_velocity * t0 -- the interaction's own
+#          Geant4 time turned into a displacement.  Measured on a 10-event
+#          batch, t0 is constant within an interaction (max spread 0.53 us)
+#          and differs across the interactions of one event by up to 1094 us,
+#          i.e. 175 cm.  So each interaction keeps its shape to sub-mm and
+#          slides bodily along x.  Use this to study what the t0 ambiguity
+#          does to grouping.
+# true_t0  x = x_anode -/+ (T - t0) * drift_velocity, using the truth t0 of
+#          each group: the drift position the detector would measure with
+#          perfect timing.  Pixelation, diffusion, threshold and tick
+#          quantisation all survive; only the ambiguity goes.  Reproduces
+#          truth x to ~0.3 mm on group centres, 5.8 mm per hit.
+hit_x_from: nominal
+
+# Drop sensor hits carrying less than this much charge, in the units the
+# JAXTPC hits file uses: ionisation electrons induced on the pixel.  0
+# disables the cut.
+#
+# Compared against the magnitude, matching JAXTPC's own encoder: the readout
+# response is bipolar and about 16% of hits are negative, which is signal
+# rather than noise.
+#
+# Why a default at all.  JAXTPC applies no threshold worth the name -- 1
+# electron in the batch this was developed against -- so every pixel
+# carrying any induced-field influence reaches the point cloud: 4.18M points
+# for an event whose truth is 216k deposits, with the brightest 2% carrying
+# half the charge and the rest forming a halo two to three pixels wide
+# around every real deposit.
+#
+# For scale, the same run's sensor file states threshold_adc 7.0 at
+# 182 electrons_per_adc, i.e. 1274 electrons on the digitised waveform; 500
+# is deliberately below that.
+hit_charge_threshold: 500
+
+# ---------------------------------------------------------------------------
+# Pixel geometry  (required by point_source=hits)
+# ---------------------------------------------------------------------------
+# These are detector constants, so they are *configured* and then checked --
+# not measured.  The reader applies them as stated, converts each group's hit
+# centre, and compares against the deposits behind it; a disagreement raises,
+# naming the offending number and what the data says it should be.
+#
+# The order matters.  Deriving a constant from the same truth it is later
+# checked against cannot catch a geometry that is wrong but linear: the fit
+# simply absorbs the error, and a detector effect this mode exists to measure
+# is calibrated away instead of measured.  Hence config first, fit as audit.
+#
+# Where the numbers live:
+#   anode face          config/volume_ranges in the hits file (read for you)
+#   drift velocity      sensor file config attrs, via jaxtpc_sensor_path
+#   sampling period     likewise
+#   pixel pitch         the detector YAML only -- no output file records it
+#   drift direction     likewise
+#
+# Run without them once and the error lists what the data is consistent with,
+# so the values can be copied from it and then verified on the next run.
+
+# JAXTPC sensor HDF5 file.  Supplies velocity_cm_us and time_step_us, so they
+# do not have to be restated here.  Optional if both are given below.
+jaxtpc_sensor_path: ~
+
+# Pixel pitch in mm (square grid assumed).  Defaulted to the cubic_pixel
+# detector this was developed against (pixel_pitch 0.432 cm); change it for
+# another geometry.  A wrong value does not pass silently -- the calibration
+# check reproduces the truth deposits and raises, naming what the data says.
+pixel_pitch_mm: 4.32
+
+# Which way electrons drift, per volume: +1 toward the x_max face, -1 toward
+# x_min.  The anode is that face.  A single int applies to every volume; a
+# list gives one per volume, e.g. [-1, 1] for a shared central cathode.
+# Defaulted to cubic_pixel's two volumes about a central cathode.
+pixel_drift_direction: [-1, 1]
+
+# Override the sensor file, or stand in for it when there is none.
+drift_velocity_mm_us: ~
+readout_time_step_us: ~
+
+# Measure the geometry from the truth deposits instead of configuring it.
+# Off by default and deliberately awkward: it makes the consistency check
+# circular, since the constants then come from the data they are compared
+# with.  Useful only for a first look at an unfamiliar batch.
+pixel_geometry_from_fit: false
+
+# The tick at which a deposit sitting on the anode at Geant4 t=0 is recorded.
+# This is the anchor the whole drift coordinate hangs from, and it is kept
+# separate from the anode because a fit cannot tell the two apart: the fitted
+# intercept is x_anode + drift_direction * mm_per_tick * reference_tick.
+#
+# 0 (default) — the readout window opens at Geant4 t=0, which is the case
+#               whenever pre_window_us is 0.  A run with a pre-window has
+#               reference_tick = pre_window_us / time_step.
+#
+# Unlike the constants above this one is *not* checked against truth: it is a
+# choice about where t=0 sits, not a measurement, so asking "what if the
+# trigger were 100 ticks later" must not be reported as a broken detector.
+# Its distance from the data is reported as reference_tick_offset_mm instead.
+#
+# It also decides whether points can leave the detector.  On a run where the
+# readout window is exactly one full drift (num_time_steps 2701 at 0.8 mm per
+# tick = 2160 mm) and the reference tick is 0, the recordable ticks map exactly
+# onto [anode, cathode] and a nominal x cannot fall outside the volume; the t0
+# displacement instead pushes charge off the end of the window, where it is
+# never recorded.  Both are counted in the run report, and neither is clipped.
+hit_reference_tick: 0
+
+# What lands in the energy column, when point_source=hits.
+#
+# charge  (default) the charge the readout measured.  Note the response is
+#         bipolar, so ~16% of hits carry negative charge; that is the signal,
+#         not an error, and it sums correctly per group.
+# true_de the group's true deposited energy, shared over its hits in
+#         proportion to charge.  Comparable with deposit mode's energy column,
+#         at the cost of putting a truth quantity into a detected cloud.
+#
+# The dx column is 0 in both cases: a hit is a pixel and a tick, and has no
+# path length.  Anything reading dE/dx will see zero.
+hit_energy: charge
+

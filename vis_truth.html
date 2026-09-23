@@ -1,0 +1,915 @@
+<!DOCTYPE html>
+<meta charset="utf-8">
+<title>pysupera — labels on truth vs sensor points</title>
+<style>
+  /* Surfaces and ink are the data-viz reference instance's dark mode, nudged
+     to the pane colour the other two viewers already use. */
+  :root{
+    --bg:#0e1116; --panel:#161b22; --line:#2a313a;
+    --text:#d8dee9; --text2:#8b949e; --accent:#58a6ff;
+    /* Categorical slots 1-6, dark steps, in the documented fixed order.
+       Never cycled: a seventh category folds into "other" (--cat-other). */
+    --cat-1:#3987e5; --cat-2:#d95926; --cat-3:#199e70;
+    --cat-4:#c98500; --cat-5:#d55181; --cat-6:#008300;
+    --cat-other:#6e7681;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--text);font:13px/1.45 ui-sans-serif,system-ui,sans-serif;height:100vh;display:flex;flex-direction:column}
+  header{padding:7px 12px;background:var(--panel);border-bottom:1px solid var(--line);display:flex;gap:13px;align-items:center;flex-wrap:wrap}
+  label{color:var(--text2);font-size:12px}
+  input[type=file]{font-size:11px;color:var(--text2);max-width:230px}
+  select,button{background:#21262d;color:var(--text);border:1px solid var(--line);border-radius:5px;padding:3px 8px;font-size:12px}
+  button:hover{border-color:var(--accent);cursor:pointer}
+  #filters{padding:5px 12px;background:var(--panel);border-bottom:1px solid var(--line);display:flex;gap:10px;align-items:center;flex-wrap:wrap;font-size:11px;color:var(--text2)}
+  #filters label{display:inline-flex;align-items:center;gap:4px;cursor:pointer}
+  .sw{width:10px;height:10px;border-radius:2px;display:inline-block}
+  main{flex:1;display:flex;min-height:0}
+  .pane{flex:1;min-width:0;position:relative;overflow:hidden}
+  .pane + .pane{border-left:1px solid var(--line)}
+  .pane canvas{position:absolute;inset:0;width:100%;height:100%;display:block}
+  .ttl{position:absolute;left:10px;top:9px;z-index:4;background:rgba(13,17,23,.9);border:1px solid var(--line);border-radius:6px;padding:5px 9px;font-size:11px;color:var(--text2);white-space:pre-wrap}
+  .ttl b{color:var(--text)}
+  #banner{position:absolute;left:10px;right:10px;top:10px;background:#5a1d1d;border:1px solid #a33;border-radius:6px;padding:8px 10px;font-size:12px;display:none;z-index:6;white-space:pre-wrap}
+  #note{position:absolute;left:10px;right:10px;top:10px;background:#1d3a5a;border:1px solid #36c;border-radius:6px;padding:7px 10px;font-size:12px;display:none;z-index:5;white-space:pre-wrap}
+  #pinfo{position:absolute;right:10px;bottom:10px;background:rgba(13,17,23,.95);border:1px solid var(--line);border-radius:6px;padding:8px 11px;font-size:12px;z-index:4;display:none;font-variant-numeric:tabular-nums}
+  #pinfo table{border-collapse:collapse} #pinfo td{padding:1px 0}
+  #pinfo td:first-child{color:var(--text2);padding-right:14px}
+  #legend{position:absolute;left:10px;bottom:10px;background:rgba(13,17,23,.92);border:1px solid var(--line);border-radius:6px;padding:7px 10px;font-size:11px;z-index:4;max-height:44%;overflow:auto}
+  #legend .row{display:flex;align-items:center;gap:6px;margin:2px 0}
+  #status{position:absolute;right:10px;top:9px;background:rgba(13,17,23,.9);border:1px solid var(--line);border-radius:6px;padding:5px 9px;font-size:11px;color:var(--text2);z-index:4;white-space:pre-wrap;max-width:46%}
+  #log{position:absolute;right:10px;bottom:10px;background:rgba(13,17,23,.9);border:1px solid var(--line);border-radius:6px;padding:6px 9px;font-size:11px;color:var(--text2);max-height:28%;overflow:auto;max-width:60%;z-index:3}
+  .k{color:var(--text2)} .v{color:var(--text)} b{color:var(--accent)}
+</style>
+
+<header>
+  <label>output .h5 <input type="file" id="f-out" accept=".h5"></label>
+  <label>truth .h5 <input type="file" id="f-tru" accept=".h5"></label>
+  <label>event <select id="ev"></select></label>
+  <label>colour by
+    <select id="mode">
+      <option value="energy">energy</option>
+      <option value="sem">instance semantic type</option>
+      <option value="frag">fragment id</option>
+      <option value="inst" selected>instance id</option>
+      <option value="inter">interaction id</option>
+      <option value="pdg">particle type (PDG)</option>
+    </select>
+  </label>
+  <label>highlight
+    <select id="hl">
+      <option value="inst" selected>instance</option>
+      <option value="frag">fragment</option>
+      <option value="inter">interaction</option>
+    </select>
+  </label>
+  <label>point size <input type="range" id="psize" min="1" max="8" step="0.5" value="2.5" style="width:70px"></label>
+  <label>others <input type="range" id="dim" min="0" max="1" step="0.01" value="0.03" style="width:80px"><span id="dimv" class="k">0.03</span></label>
+  <label><input type="checkbox" id="logE" checked> log scale</label>
+  <label><input type="checkbox" id="sync" checked> sync cameras</label>
+  <label><input type="checkbox" id="hideun" checked> hide undetected</label>
+  <label>truth &ge; <input type="range" id="thrL" min="0" max="99" step="1" value="0" style="width:90px"><span id="thrLv" class="k">all</span></label>
+  <label>sensor &ge; <input type="range" id="thrR" min="0" max="99" step="1" value="0" style="width:90px"><span id="thrRv" class="k">all</span></label>
+  <button id="fit">fit (c)</button>
+  <span id="hint" class="k">load the pysupera output and its truth companion</span>
+</header>
+<div id="filters"><span>show semantic type:</span></div>
+
+<main>
+  <div class="pane" id="pane-true">
+    <div class="ttl"><b>truth deposits</b>   Geant4, labelled through deposit &rarr; group &rarr; fragment</div>
+    <div id="banner"></div><div id="note"></div><div id="legend"></div><div id="log"></div>
+  </div>
+  <div class="pane" id="pane-nom">
+    <div class="ttl"><b>pysupera points</b>   the cloud the algorithms actually ran on</div>
+    <div id="status">no file loaded</div><div id="pinfo"></div>
+  </div>
+</main>
+
+<script type="importmap">
+{"imports":{
+  "three":"https://cdn.jsdelivr.net/npm/three@0.163.0/build/three.module.js",
+  "three/addons/":"https://cdn.jsdelivr.net/npm/three@0.163.0/examples/jsm/"
+}}
+</script>
+
+<script type="module">
+import * as THREE from 'three';
+import {OrbitControls} from 'three/addons/controls/OrbitControls.js';
+// ---------------------------------------------------------------- state --
+// Two independent point sets, so nothing is shared by index.  What *is*
+// shared is the label space: both sides resolve to the same fragment,
+// instance and interaction ids, which is what lets one hover light up both.
+const S = {
+  out:null, tru:null, ev:0, nEvents:0,
+  L:null, R:null,                  // per-pane data, see makeSide()
+  sel:-1, dim:0.03, mode:'inst', hl:'inst',
+  cols:null, idRow:null, instOfFrag:null,
+  semShow:new Set(), hideUndetected:true,
+  // Percentile positions of the two display cuts; the absolute value each
+  // stands for is read off the pane's own distribution and shown in the
+  // header, so the number in the caption is a real threshold.
+  thrPct:{L:0, R:0}, thrVal:{L:0, R:0},
+  // What the right pane's energy column holds -- read from the file rather
+  // than guessed from the presence of negative values.
+  meta:{},
+};
+let H5File, FS;
+const V = {L:null, R:null};
+
+const logEl = document.getElementById('log');
+const statusEl = document.getElementById('status');
+const log = m => { logEl.textContent = (m + '\n' + logEl.textContent).slice(0, 3000); };
+function banner(id, msg){
+  const el = document.getElementById(id);
+  el.style.display = msg ? 'block' : 'none';
+  if(msg) el.textContent = msg;
+}
+const makeSide = () => ({pts:null, n:0, frag:null, inst:null, inter:null,
+                         sem:null, pdg:null, isLE:null, energy:null,
+                         key:null, visible:null, extra:null});
+
+// ------------------------------------------------------------- palette --
+// Categorical slots 1-6 in the documented fixed order, dark steps.  Six hues
+// cannot clear the all-pairs CVD floor -- no six in this lightness band can --
+// so identity is never carried by colour alone here: a legend is always up,
+// every class can be isolated with the filter strip, and the hover panel
+// names the class in words.  Validated on the adjacent pairlist: worst CVD
+// dE 8.4, worst normal-vision dE 19.3 against the #0e1116 surface.
+const CAT = ['#3987e5','#d95926','#199e70','#c98500','#d55181','#008300'];
+const CAT_OTHER = '#6e7681';
+
+const SEM = {1:'shower', 2:'track', 3:'delta', 4:'Michel', 5:'LE scatter', 6:'unknown'};
+const SEM_ORDER = [2, 1, 3, 4, 5, 6];      // track and shower first: the common pair
+const SEM_COLOR = {};
+SEM_ORDER.forEach((v, i) => { SEM_COLOR[v] = CAT[i]; });
+
+// A fixed table, not a generated hue per species: the tail folds into "other".
+const PDG_ORDER = [
+  [13,'mu-'], [-13,'mu+'], [11,'e-'], [-11,'e+'], [22,'gamma'],
+  [2212,'proton'], [2112,'neutron'], [211,'pi+'], [-211,'pi-'],
+];
+const PDG_NAME = new Map(PDG_ORDER);
+const PDG_COLOR = new Map();
+// Nine species over six slots would cycle, which the palette rule forbids, so
+// only the first six get a hue and the rest join "other" with the tail.
+PDG_ORDER.slice(0, 6).forEach(([p], i) => PDG_COLOR.set(p, CAT[i]));
+
+// Sequential: one hue, monotonic in lightness.  Reversed for a dark surface,
+// so "near zero" is the step that recedes into the background and the largest
+// value is the brightest.  Blue 700 -> 100 from the reference ramp.
+const SEQ = ['#0d366b','#104281','#184f95','#1c5cab','#256abf','#2a78d6',
+             '#3987e5','#5598e7','#6da7ec','#86b6ef','#9ec5f4','#b7d3f6','#cde2fb'];
+
+// Diverging: the energy column is dE in deposit mode but *charge* in hit
+// mode, and the readout response is bipolar -- about a sixth of hits are
+// negative.  Signed data around a meaningful zero is a diverging encoding,
+// not a sequential one, so when negatives are present the ramp switches:
+// blue and red poles about a neutral gray midpoint, equal steps per arm,
+// symmetric about zero so that zero is always the gray.
+const DIV_NEG = '#3987e5', DIV_MID = '#383835', DIV_POS = '#e34948';
+function lerpHex(a, b, f){
+  const A = hex2rgb(a), B = hex2rgb(b);
+  return [A[0]+(B[0]-A[0])*f, A[1]+(B[1]-A[1])*f, A[2]+(B[2]-A[2])*f];
+}
+
+const hex2rgb = h => [parseInt(h.slice(1,3),16)/255,
+                      parseInt(h.slice(3,5),16)/255,
+                      parseInt(h.slice(5,7),16)/255];
+const CAT_RGB = CAT.map(hex2rgb);
+const SEQ_RGB = SEQ.map(hex2rgb);
+const OTHER_RGB = hex2rgb(CAT_OTHER);
+const DIV_RGB = (() => {
+  const n = 6, out = [];
+  for(let i = n; i > 0; i--) out.push(lerpHex(DIV_NEG, DIV_MID, 1 - i/n));
+  out.push(hex2rgb(DIV_MID));
+  for(let i = 1; i <= n; i++) out.push(lerpHex(DIV_MID, DIV_POS, i/n));
+  return out;
+})();
+const rgb2css = c => `rgb(${c.map(v => Math.round(v*255)).join(',')})`;
+
+// Ids run to thousands, so they cannot have a legend and cannot be assigned
+// from a fixed list.  A stable hash keeps one object one colour across both
+// panes and across a re-render, which is all the id modes need to do --
+// identity here is carried by the hover highlight, not by telling two hues
+// apart.
+function hashColor(id){
+  if(id < 0) return [0.30,0.33,0.38];
+  const h = Math.imul(id ^ 0x9e3779b9, 0x85ebca6b) >>> 0;
+  const c = new THREE.Color().setHSL((h % 360)/360, 0.62, 0.60);
+  return [c.r, c.g, c.b];
+}
+
+
+// ------------------------------------------------------------ h5 helpers --
+// h5wasm has reported attrs as bare values and as {value,...} wrappers
+// across versions; accept either.
+function attr(f, path, name){
+  try{
+    const a = f.get(path).attrs[name];
+    if(a === undefined || a === null) return null;
+    return (typeof a === 'object' && 'value' in a) ? a.value : a;
+  }catch(e){ return null; }
+}
+const has = (f,p) => { try { return f.get(p) !== null; } catch(e){ return false; } };
+const val = (f,p) => f.get(p).value;
+const sl  = (f,p,a,b) => f.get(p).slice([[a,b]]);
+const READABLE = new Set(['1','2','3','4','5','6']);
+function filterIds(d){
+  const f = d && d.filters;
+  if(!f) return [];
+  if(Array.isArray(f)) return f.map(x => String(x && x.id !== undefined ? x.id : x));
+  if(typeof f === 'object') return Object.keys(f).map(String);
+  return [];
+}
+function unreadableFilter(f, path){
+  try{ const bad = filterIds(f.get(path)).filter(i => !READABLE.has(i));
+       return bad.length ? bad.join(',') : null; }catch(e){ return null; }
+}
+
+
+// --------------------------------------------------------------- loading --
+async function boot(){
+  const h5wasm = (await import('https://cdn.jsdelivr.net/npm/h5wasm@0.7.3/dist/esm/hdf5_hl.js')).default;
+  const Module = await h5wasm.ready;
+  H5File = h5wasm.File; FS = Module.FS;
+  log('h5wasm ready');
+}
+const booted = boot();
+
+async function open1(file, tag){
+  await booted;
+  FS.writeFile(tag, new Uint8Array(await file.arrayBuffer()));
+  return new H5File(tag, 'r');
+}
+
+document.getElementById('f-out').onchange = async e => {
+  const f = e.target.files[0]; if(!f) return;
+  try{
+    S.out = await open1(f, 'out.h5');
+    S.nEvents = Number(val(S.out, 'n_events'));
+    S.meta = {};
+    for(const k of ['point_source','hit_energy','hit_x_from','readout_type']){
+      const a = attr(S.out, '/', k);
+      if(a !== null) S.meta[k] = String(a);
+    }
+    log(`output: format ${val(S.out,'format_version')}, ${S.nEvents} events`);
+    const bad = unreadableFilter(S.out, 'points/flat');
+    if(bad){ S.out = null; return banner('banner',
+      `This output uses HDF5 filter ${bad}, which the browser cannot decode.\n` +
+      `h5wasm handles gzip only.\n\n    pysupera-repack ${f.name} out_gzip.h5 -c gzip`); }
+    if(!has(S.out, 'groups/fragment_id')){
+      S.out = null; return banner('banner',
+      `This output has no groups/ table, so a truth deposit cannot be tied to\n` +
+      `the object that claimed it.  Re-run with both reader.jaxtpc_seg_path and\n` +
+      `reader.jaxtpc_inst_path set.`);
+    }
+    banner('banner','');
+    const sel = document.getElementById('ev'); sel.innerHTML = '';
+    for(let i = 0; i < S.nEvents; i++){
+      const o = document.createElement('option'); o.value = i; o.textContent = i;
+      sel.appendChild(o);
+    }
+    rebuild();
+  }catch(err){ log('ERROR opening output: ' + err.message); }
+};
+
+document.getElementById('f-tru').onchange = async e => {
+  const f = e.target.files[0]; if(!f) return;
+  try{
+    S.tru = await open1(f, 'truth.h5');
+    const ek = S.tru.keys().filter(k => k.startsWith('event_'));
+    log(`truth: ${ek.length} events`);
+    const bad = ek.length ? unreadableFilter(S.tru, `${ek[0]}/volume_0/positions`) : null;
+    if(bad){ S.tru = null; return banner('banner',
+      `The truth file uses HDF5 filter ${bad}, which the browser cannot decode.\n` +
+      `Make it with:  pysupera-truth-subset step.h5 hits.h5 truth_small.h5`); }
+    rebuild();
+  }catch(err){ log('ERROR opening truth: ' + err.message); }
+};
+
+document.getElementById('ev').onchange   = e => { S.ev = +e.target.value; rebuild(); };
+document.getElementById('mode').onchange = e => { S.mode = e.target.value; paint(); };
+document.getElementById('hl').onchange   = e => { S.hl = e.target.value; buildKeys(); S.sel = -1; paint(); };
+document.getElementById('logE').onchange = () => paint();
+document.getElementById('psize').oninput = e => {
+  for(const v of [V.L, V.R]) if(v && v.cloud){
+    v.cloud.material.size = +e.target.value;
+    if(v.selCloud) v.selCloud.material.size = +e.target.value;
+  }
+};
+document.getElementById('dim').oninput = e => {
+  S.dim = +e.target.value;
+  document.getElementById('dimv').textContent = S.dim.toFixed(2);
+  paint();
+};
+document.getElementById('hideun').onchange = e => {
+  S.hideUndetected = e.target.checked; applyFilter(); paint();
+};
+for(const tag of ['L','R'])
+  document.getElementById('thr'+tag).oninput = e => {
+    S.thrPct[tag] = +e.target.value; applyFilter(); paint();
+  };
+document.getElementById('fit').onclick = fitView;
+addEventListener('keydown', e => { if(e.key === 'c') fitView(); });
+
+// ------------------------------------------- the shared label dictionary --
+// SEM, SEM_ORDER and SEM_COLOR come from the shared palette block above.
+const SEM_LE = 5;
+
+// Both panes look labels up here, by *id* rather than by row, because the
+// two sides index nothing in common.
+function buildDictionary(a, b){
+  const f = S.out;
+  const col = nm => f.get('particles').keys().includes(nm)
+    ? sl(f, 'particles/' + nm, a, b) : null;
+  const c = {};
+  for(const k of ['id','inst_id','frag_id','interaction_id','pdg','inst_sem_type',
+                  'inst_parent_id','geant4_trackid',
+                  'inst_pc_start','inst_pc_end','inst_pc_le_start','inst_pc_le_end',
+                  'frag_pc_start','frag_pc_end','frag_pc_le_start','frag_pc_le_end'])
+    c[k] = col(k);
+  S.cols = c;
+  S.idRow = new Map();
+  for(let k = 0; k < c.id.length; k++) S.idRow.set(Number(c.id[k]), k);
+
+  // fragment -> instance, by which instance block the fragment's points fall
+  // in.  inst_id marks a row as *being* a representative; it does not record
+  // membership, so this has to be a containment search.
+  const lo = [], hi = [], who = [];
+  for(let k = 0; k < c.id.length; k++){
+    if(Number(c.inst_id[k]) !== Number(c.id[k])) continue;
+    const s = Number(c.inst_pc_start[k]); if(s < 0) continue;
+    lo.push(s); hi.push(Math.max(Number(c.inst_pc_le_end[k]), Number(c.inst_pc_end[k])));
+    who.push(Number(c.id[k]));
+  }
+  const ord = lo.map((_,i) => i).sort((p,q) => lo[p]-lo[q]);
+  const L = ord.map(i => lo[i]), H = ord.map(i => hi[i]), W = ord.map(i => who[i]);
+  const m = new Map();
+  for(let k = 0; k < c.id.length; k++){
+    if(Number(c.frag_id[k]) !== Number(c.id[k])) continue;
+    let p = Number(c.frag_pc_start[k]); if(p < 0) p = Number(c.frag_pc_le_start[k]);
+    if(p < 0) continue;
+    let a2 = 0, b2 = L.length;
+    while(a2 < b2){ const mid = (a2+b2) >> 1; if(L[mid] <= p) a2 = mid+1; else b2 = mid; }
+    const j = a2 - 1;
+    if(j >= 0 && p < H[j]) m.set(Number(c.id[k]), W[j]);
+  }
+  S.instOfFrag = m;
+}
+// The sensor pane's column is charge when the run asked for charge, true dE
+// when it asked for that, and true dE whenever the points are deposits.
+function sensorQuantity(){
+  if(S.meta.point_source === 'hits')
+    return S.meta.hit_energy === 'true_de'
+      ? {name:'dE', unit:'MeV'} : {name:'charge', unit:''};
+  return {name:'dE', unit:'MeV'};
+}
+const rowOf = id => S.idRow.has(id) ? S.idRow.get(id) : -1;
+const attrById = (id, key) => { const r = rowOf(id);
+  return (r >= 0 && S.cols[key]) ? Number(S.cols[key][r]) : -1; };
+
+// ------------------------------------------------------ the right pane --
+// The cloud pysupera actually ran on.  Ownership is positional here, which
+// is what the format intends.
+function rowsOf(n, pa, starts, ends){
+  const row = new Int32Array(n).fill(-1);
+  for(let s = 0; s < starts.length; s++)
+    for(let k = 0; k < starts[s].length; k++){
+      const a = Number(starts[s][k]); if(a < 0) continue;
+      const q0 = Math.max(0, a - pa), q1 = Math.min(n, Number(ends[s][k]) - pa);
+      for(let j = q0; j < q1; j++) row[j] = k;
+    }
+  return row;
+}
+
+function buildRight(a, b){
+  const f = S.out, po = val(f,'points/offsets');
+  const pa = Number(po[S.ev]), pb = Number(po[S.ev+1]), n = pb - pa;
+  const R = makeSide(); R.n = n;
+  if(n <= 0){ R.pts = new Float32Array(0); return R; }
+  const flat = Float32Array.from(f.get('points/flat').slice([[pa,pb],[0,6]]));
+  R.pts = new Float32Array(n*3); R.energy = new Float32Array(n);
+  for(let i = 0; i < n; i++){
+    R.pts[i*3] = flat[i*6]; R.pts[i*3+1] = flat[i*6+1]; R.pts[i*3+2] = flat[i*6+2];
+    R.energy[i] = flat[i*6+4];
+  }
+  const c = S.cols;
+  const ir = rowsOf(n, pa, [c.inst_pc_start, c.inst_pc_le_start],
+                           [c.inst_pc_end,   c.inst_pc_le_end]);
+  const fr = rowsOf(n, pa, [c.frag_pc_start, c.frag_pc_le_start],
+                           [c.frag_pc_end,   c.frag_pc_le_end]);
+  R.isLE = new Uint8Array(n);
+  for(let k = 0; k < c.id.length; k++){
+    if(Number(c.inst_id[k]) !== Number(c.id[k])) continue;
+    const s0 = Number(c.inst_pc_le_start[k]); if(s0 < 0) continue;
+    const q0 = Math.max(0, s0-pa), q1 = Math.min(n, Number(c.inst_pc_le_end[k])-pa);
+    for(let j = q0; j < q1; j++) R.isLE[j] = 1;
+  }
+  R.frag = new Int32Array(n); R.inst = new Int32Array(n);
+  R.inter = new Int32Array(n); R.sem = new Int32Array(n); R.pdg = new Int32Array(n);
+  for(let i = 0; i < n; i++){
+    R.frag[i]  = fr[i] >= 0 ? Number(c.id[fr[i]]) : -1;
+    R.inst[i]  = ir[i] >= 0 ? Number(c.id[ir[i]]) : -1;
+    R.inter[i] = ir[i] >= 0 ? Number(c.interaction_id[ir[i]]) : -1;
+    R.pdg[i]   = ir[i] >= 0 ? Number(c.pdg[ir[i]]) : -1;
+    R.sem[i]   = R.isLE[i] ? SEM_LE : (ir[i] >= 0 ? Number(c.inst_sem_type[ir[i]]) : -1);
+  }
+  return R;
+}
+
+// ------------------------------------------------------- the left pane --
+// Truth deposits, labelled through the group.  A deposit knows its group
+// (deposit_to_group, from the JAXTPC hits file) and groups/ says which
+// fragment owns that group -- so the label travels backwards down the same
+// chain the reconstruction came up.  A deposit whose group was never
+// detected has no owner, and is shown as such rather than dropped.
+function buildLeft(){
+  const L = makeSide();
+  if(!S.tru) return L;
+  const f = S.out, ekey = 'event_' + String(S.ev).padStart(3,'0');
+  if(!S.tru.keys().includes(ekey)){ log(`truth file has no ${ekey}`); return L; }
+  const go = val(f,'groups/offsets');
+  const ga = Number(go[S.ev]), gb = Number(go[S.ev+1]);
+  const fragOwner = sl(f, 'groups/fragment_id', ga, gb);
+  const leOwner = has(f,'groups/is_le') ? sl(f, 'groups/is_le', ga, gb) : null;
+  const vi = val(f,'groups/volume_offsets_index');
+  const voff = sl(f, 'groups/volume_offsets', Number(vi[S.ev]), Number(vi[S.ev+1]));
+
+  const evg = S.tru.get(ekey);
+  const vols = evg.keys().filter(k => k.startsWith('volume_'))
+                 .sort((x,y) => (+x.split('_')[1]) - (+y.split('_')[1]));
+  const px = [], pf = [], pe = [], pl = [], pq = [];
+  vols.forEach((vol, vidx) => {
+    const vg = evg.get(vol);
+    if(!vg.keys().includes('positions')) return;
+    const p = vg.get('positions').value;
+    const at = k => { const a = vg.attrs[k];
+                      return Number(a && typeof a === 'object' && 'value' in a ? a.value : a); };
+    const st = at('pos_step_mm'), ox = at('pos_origin_x'),
+          oy = at('pos_origin_y'), oz = at('pos_origin_z');
+    const de = vg.keys().includes('de') ? vg.get('de').value : null;
+    const ch = vg.keys().includes('charge') ? vg.get('charge').value : null;
+    const d2g = vg.get('deposit_to_group').value;
+    const base = vidx < voff.length ? Number(voff[vidx]) : 0;
+    const n = d2g.length;
+    for(let i = 0; i < n; i++){
+      px.push(Number(p[i*3])*st + ox, Number(p[i*3+1])*st + oy, Number(p[i*3+2])*st + oz);
+      const g = Number(d2g[i]) + base;
+      const owned = g >= 0 && g < fragOwner.length;
+      pf.push(owned ? Number(fragOwner[g]) : -1);
+      pl.push(owned && leOwner ? (Number(leOwner[g]) ? 1 : 0) : 0);
+      pe.push(de ? Number(de[i]) : 0);
+      pq.push(ch ? Number(ch[i]) : NaN);
+    }
+  });
+  const n = pf.length;
+  L.n = n; L.pts = Float32Array.from(px); L.energy = Float32Array.from(pe);
+  L.frag = Int32Array.from(pf); L.isLE = Uint8Array.from(pl);
+  L.extra = Float32Array.from(pq);        // ionisation electrons per deposit
+  L.inst = new Int32Array(n); L.inter = new Int32Array(n);
+  L.sem = new Int32Array(n); L.pdg = new Int32Array(n);
+  for(let i = 0; i < n; i++){
+    const fid = L.frag[i];
+    const iid = fid >= 0 && S.instOfFrag.has(fid) ? S.instOfFrag.get(fid) : -1;
+    L.inst[i]  = iid;
+    L.inter[i] = iid >= 0 ? attrById(iid, 'interaction_id') : -1;
+    L.pdg[i]   = iid >= 0 ? attrById(iid, 'pdg') : -1;
+    L.sem[i]   = fid < 0 ? -1
+               : L.isLE[i] ? SEM_LE
+               : (iid >= 0 ? attrById(iid, 'inst_sem_type') : -1);
+  }
+  return L;
+}
+
+// ------------------------------------------------------------ selection --
+function buildKeys(){
+  for(const S_ of [S.L, S.R]){
+    if(!S_ || !S_.n) continue;
+    S_.key = S.hl === 'frag' ? S_.frag : S.hl === 'inter' ? S_.inter : S_.inst;
+  }
+}
+// A slider position is a percentile of |value| on that pane; the absolute
+// number it lands on is what gets displayed, because "hits above 5 ADC" is
+// quotable and "the faintest 60%" is not.
+function thresholdFor(side, pct){
+  if(!side || !side.n || pct <= 0) return 0;
+  const a = [];
+  for(let i = 0; i < side.n; i++) a.push(Math.abs(side.energy[i]));
+  a.sort((x,y) => x-y);
+  return a[Math.min(a.length-1, Math.floor(pct/100 * a.length))];
+}
+
+function applyFilter(){
+  for(const [tag, S_] of [['L', S.L], ['R', S.R]]){
+    if(!S_) continue;
+    const thr = S.thrVal[tag] = thresholdFor(S_, S.thrPct[tag]);
+    const vis = new Uint8Array(S_.n);
+    let kept = 0, q = 0, qAll = 0;
+    for(let i = 0; i < S_.n; i++){
+      const undetected = S_.frag[i] < 0;
+      const shown = undetected ? !S.hideUndetected : S.semShow.has(S_.sem[i]);
+      const a = Math.abs(S_.energy[i]);
+      qAll += a;
+      const pass = shown && a >= thr;
+      vis[i] = pass ? 1 : 0;
+      if(pass){ kept++; q += a; }
+    }
+    S_.visible = vis;
+    S_.kept = kept; S_.qKept = qAll > 0 ? q/qAll : 0;
+  }
+  showThresholds();
+}
+
+function showThresholds(){
+  const u = sensorQuantity().unit;
+  const unit = {L:' MeV', R: u ? ' ' + u : ''};
+  for(const tag of ['L','R']){
+    const side = tag === 'L' ? S.L : S.R;
+    const el = document.getElementById('thr' + tag + 'v');
+    if(!side || !side.n){ el.textContent = 'all'; continue; }
+    el.textContent = S.thrPct[tag] <= 0 ? 'all'
+      : `${fmt(S.thrVal[tag], 3)}${unit[tag]} · ${(100*side.kept/side.n).toFixed(0)}% pts,`
+        + ` ${(100*side.qKept).toFixed(1)}% q`;
+  }
+}
+function buildFilters(){
+  const host = document.getElementById('filters');
+  host.innerHTML = '<span>show semantic type:</span>';
+  const present = new Set();
+  for(const S_ of [S.L, S.R])
+    if(S_) for(let i = 0; i < S_.n; i++) if(S_.sem[i] > 0) present.add(S_.sem[i]);
+  S.semShow = new Set(present);
+  for(const v of SEM_ORDER){
+    if(!present.has(v)) continue;
+    const lab = document.createElement('label');
+    const cb = document.createElement('input'); cb.type = 'checkbox'; cb.checked = true;
+    cb.onchange = () => { cb.checked ? S.semShow.add(v) : S.semShow.delete(v);
+                          applyFilter(); paint(); };
+    const sw = document.createElement('span');
+    sw.className = 'sw'; sw.style.background = SEM_COLOR[v] || CAT_OTHER;
+    lab.append(cb, sw, document.createTextNode(SEM[v] || ('type '+v)));
+    host.appendChild(lab);
+  }
+  applyFilter();
+}
+
+// ------------------------------------------------------------- colouring --
+const symlog = (v, lin) => Math.sign(v) * Math.log10(1 + Math.abs(v)/lin);
+const unsymlog = (t, lin) => Math.sign(t) * (Math.pow(10, Math.abs(t)) - 1) * lin;
+
+// Per pane: the left holds true dE in MeV and the right holds charge in hit
+// mode, so one shared scale would be meaningless.  Each side gets its own,
+// and the legend says so.
+function energyRamp(side){
+  const lg = document.getElementById('logE').checked;
+  const raw = [], mags = [];
+  let anyNeg = false;
+  for(let i = 0; i < side.n; i++){
+    if(!side.visible[i]) continue;
+    const e = side.energy[i];
+    if(e < 0) anyNeg = true;
+    raw.push(e); if(e !== 0) mags.push(Math.abs(e));
+  }
+  if(!raw.length) return {lo:0, hi:1, lg, lin:1, diverging:false, clipped:false};
+  mags.sort((a,b)=>a-b);
+  const lin = Math.max(mags.length ? mags[Math.floor(mags.length*0.25)] : 1, 1e-12);
+  const vals = lg ? raw.map(v => symlog(v, lin)) : raw.slice();
+  vals.sort((a,b)=>a-b);
+  const q = f => vals[Math.min(vals.length-1, Math.max(0, Math.round(f*(vals.length-1))))];
+  let lo = q(0.02), hi = q(0.98);
+  const clipped = lo > vals[0] || hi < vals[vals.length-1];
+  const diverging = anyNeg;
+  if(diverging){ const m = Math.max(Math.abs(lo), Math.abs(hi)); lo = -m; hi = m; }
+  if(hi <= lo) hi = lo + 1e-9;
+  return {lo, hi, lg, lin, diverging, clipped};
+}
+
+function colourOf(side, i, ramp){
+  switch(S.mode){
+    case 'energy': {
+      let e = side.energy[i];
+      if(ramp.lg) e = symlog(e, ramp.lin);
+      const f = Math.min(1, Math.max(0, (e - ramp.lo)/(ramp.hi - ramp.lo)));
+      const R = ramp.diverging ? DIV_RGB : SEQ_RGB;
+      return R[Math.min(R.length-1, Math.round(f*(R.length-1)))];
+    }
+    case 'sem': { const j = SEM_ORDER.indexOf(side.sem[i]);
+                  return j >= 0 ? CAT_RGB[j] : OTHER_RGB; }
+    case 'pdg': { const c = PDG_COLOR.get(side.pdg[i]);
+                  return c ? hex2rgb(c) : OTHER_RGB; }
+    case 'frag':  return hashColor(side.frag[i]);
+    case 'inter': return hashColor(side.inter[i]);
+    default:      return hashColor(side.inst[i]);
+  }
+}
+
+function paint(){
+  const dimming = S.sel >= 0;
+  let ramp = null;
+  for(const [side, v] of [[S.L, V.L], [S.R, V.R]]){
+    if(!side || !v || !v.cloud || !side.n) continue;
+    const r = energyRamp(side);
+    if(!ramp) ramp = r;
+    const col = v.cloud.geometry.attributes.color.array;
+    const rgbs = new Float32Array(side.n*3);
+    let nSel = 0;
+    for(let i = 0; i < side.n; i++){
+      const c = colourOf(side, i, r);
+      rgbs[i*3] = c[0]; rgbs[i*3+1] = c[1]; rgbs[i*3+2] = c[2];
+      const picked = dimming && side.key[i] === S.sel;
+      if(picked && side.visible[i]) nSel++;
+      col[i*4] = c[0]; col[i*4+1] = c[1]; col[i*4+2] = c[2];
+      col[i*4+3] = !side.visible[i] ? 0 : picked ? 0 : (dimming ? S.dim : 1);
+    }
+    v.cloud.geometry.attributes.color.needsUpdate = true;
+    const sp = new Float32Array(nSel*3), sc = new Float32Array(nSel*3);
+    let k = 0;
+    if(nSel) for(let i = 0; i < side.n; i++){
+      if(!(dimming && side.visible[i] && side.key[i] === S.sel)) continue;
+      sp[k*3] = side.pts[i*3]; sp[k*3+1] = side.pts[i*3+1]; sp[k*3+2] = side.pts[i*3+2];
+      sc[k*3] = rgbs[i*3]; sc[k*3+1] = rgbs[i*3+1]; sc[k*3+2] = rgbs[i*3+2];
+      k++;
+    }
+    const g = v.selCloud.geometry;
+    g.setAttribute('position', new THREE.BufferAttribute(sp, 3));
+    g.setAttribute('color', new THREE.BufferAttribute(sc, 3));
+    v.selCloud.material.size = v.cloud.material.size;
+    v.selCloud.visible = nSel > 0;
+    v.nSel = nSel;
+  }
+  drawLegend(ramp);
+  if(S.sel >= 0) showCounts();
+}
+
+function drawLegend(ramp){
+  const el = document.getElementById('legend');
+  const rows = [];
+  const sw = (c,t) => `<div class="row"><span class="sw" style="background:${c}"></span><span>${t}</span></div>`;
+  if(S.mode === 'energy' && ramp){
+    const ramps = ramp.diverging ? DIV_RGB.map(rgb2css) : SEQ;
+    rows.push(`<div class="row"><span>energy &mdash; each pane scaled on its own</span></div>`,
+      `<div class="row">${ramps.map(c=>`<span style="background:${c};width:11px;height:11px;display:inline-block"></span>`).join('')}</div>`,
+      `<div class="row"><span class="k">left: true dE (MeV) &middot; right: ${sensorQuantity().name}</span></div>`);
+  } else if(S.mode === 'sem'){
+    for(const v of SEM_ORDER) if(S.semShow.has(v)) rows.push(sw(SEM_COLOR[v], SEM[v]));
+    rows.push(sw(CAT_OTHER, 'undetected / unowned'));
+  } else if(S.mode === 'pdg'){
+    for(const [p,nm] of PDG_ORDER.slice(0,6)) rows.push(sw(PDG_COLOR.get(p), nm));
+    rows.push(sw(CAT_OTHER, 'other'));
+  } else {
+    const what = S.mode === 'frag' ? 'fragment' : S.mode === 'inter' ? 'interaction' : 'instance';
+    rows.push(`<div class="row"><span>colour = ${what} id</span></div>`,
+              `<div class="row"><span class="k">shared across both panes; hover to identify</span></div>`);
+  }
+  el.innerHTML = rows.join('');
+}
+
+// ------------------------------------------------------------ 3D panes --
+function hostSize(host){
+  const r = host.getBoundingClientRect();
+  return {w: Math.max(1, Math.round(r.width) || host.clientWidth || innerWidth*0.5),
+          h: Math.max(1, Math.round(r.height) || host.clientHeight || innerHeight - 90)};
+}
+function resizeView(v){
+  if(!v || !v.renderer) return;
+  const {w, h} = hostSize(v.host);
+  v.camera.aspect = w/h; v.camera.updateProjectionMatrix();
+  v.renderer.setSize(w, h, false);
+}
+function makeView(hostId, name){
+  const host = document.getElementById(hostId);
+  const {w, h} = hostSize(host);
+  const v = {host, name, cloud:null};
+  v.scene = new THREE.Scene(); v.scene.background = new THREE.Color(0x0e1116);
+  v.camera = new THREE.PerspectiveCamera(55, w/h, 0.1, 1e6);
+  v.camera.position.set(600,600,600);
+  v.renderer = new THREE.WebGLRenderer({antialias:true});
+  v.renderer.setPixelRatio(devicePixelRatio);
+  v.renderer.setSize(w, h, false);
+  host.appendChild(v.renderer.domElement);
+  v.controls = new OrbitControls(v.camera, v.renderer.domElement);
+  // Pan in the plane of the screen rather than along the ground plane, so
+  // dragging up moves the scene up whatever the camera is doing.
+  v.controls.screenSpacePanning = true;
+  host.addEventListener('pointerenter', () => { ACTIVE = v; });
+  v.raycaster = new THREE.Raycaster();
+  v.pointer = new THREE.Vector2();
+  v.renderer.domElement.addEventListener('mousemove', e => onMove(v, e));
+  v.controls.addEventListener('change', () => syncFrom(v));
+  new ResizeObserver(() => resizeView(v)).observe(host);
+  addEventListener('resize', () => resizeView(v));
+  (function tick(){ requestAnimationFrame(tick);
+                    v.controls.update(); v.renderer.render(v.scene, v.camera); })();
+  log(`3D canvas (${name}) ${w}x${h}`);
+  return v;
+}
+
+// Camera sync is what makes the two panes comparable: the displacement is
+// along x, so the same viewpoint either side is the whole point.
+let syncing = false;
+function syncFrom(src){
+  if(syncing || !document.getElementById('sync').checked) return;
+  syncing = true;
+  // Copy to every other view rather than to a named sibling: the two
+  // viewers call their panes different things, and hard-coding one set of
+  // names into shared code is how this silently stopped working once.
+  for(const dst of Object.values(V)){
+    if(!dst || dst === src || !dst.camera) continue;
+    dst.camera.position.copy(src.camera.position);
+    dst.camera.up.copy(src.camera.up);
+    dst.controls.target.copy(src.controls.target);
+    dst.camera.updateProjectionMatrix();
+    dst.controls.update();
+  }
+  syncing = false;
+}
+
+// Which pane the cursor is over, so the arrow keys move that one.
+let ACTIVE = null;
+
+// OrbitControls pans on right-drag, which not everyone finds.  This is the
+// same screen-space translation bound to the arrow keys: shift both the
+// camera and its target by the same vector, so the view slides without
+// turning.
+function panView(v, dxPix, dyPix){
+  if(!v) return;
+  const el = v.renderer.domElement;
+  const dist = new THREE.Vector3()
+      .subVectors(v.camera.position, v.controls.target).length();
+  const half = dist * Math.tan((v.camera.fov / 2) * Math.PI / 180);
+  const sx = 2 * dxPix * half / Math.max(1, el.clientHeight);
+  const sy = 2 * dyPix * half / Math.max(1, el.clientHeight);
+  const m = v.camera.matrix.elements;
+  const right = new THREE.Vector3(m[0], m[1], m[2]).multiplyScalar(-sx);
+  const up    = new THREE.Vector3(m[4], m[5], m[6]).multiplyScalar(sy);
+  const d = right.add(up);
+  v.camera.position.add(d);
+  v.controls.target.add(d);
+  v.controls.update();
+  syncFrom(v);
+}
+
+const PAN_KEYS = {ArrowLeft:[-1,0], ArrowRight:[1,0],
+                  ArrowUp:[0,1], ArrowDown:[0,-1]};
+addEventListener('keydown', e => {
+  const k = PAN_KEYS[e.key];
+  if(!k) return;
+  const v = ACTIVE || Object.values(V).find(x => x);
+  if(!v) return;
+  e.preventDefault();
+  const step = (e.shiftKey ? 160 : 40);
+  panView(v, k[0] * step, k[1] * step);
+});
+
+function buildCloud(v, pts){
+  if(v.cloud){ v.scene.remove(v.cloud); v.cloud.geometry.dispose();
+               v.cloud.material.dispose(); v.cloud = null; }
+  if(v.selCloud){ v.scene.remove(v.selCloud); v.selCloud.geometry.dispose();
+                  v.selCloud.material.dispose(); v.selCloud = null; }
+  const n = pts ? pts.length/3 : 0;
+  if(!n) return;
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute('position', new THREE.BufferAttribute(pts, 3));
+  geo.setAttribute('color', new THREE.BufferAttribute(new Float32Array(n*4), 4));
+  // alphaTest discards the fully transparent points outright, so a class
+  // hidden by the filter cannot write depth and punch holes in what is left.
+  const mat = new THREE.PointsMaterial({size:+document.getElementById('psize').value,
+                                        vertexColors:true, sizeAttenuation:false,
+                                        transparent:true, depthWrite:true,
+                                        alphaTest:0.01});
+  v.cloud = new THREE.Points(geo, mat); v.scene.add(v.cloud);
+
+  // A second pass holding just the selection.  One cloud cannot do both
+  // jobs: with depthWrite on, a faint point in front discards the selected
+  // point behind it; with depthWrite off, a third of a million faint points
+  // sum into a wash and the selection stops reading at all.  So the bulk
+  // writes depth and stays crisp, and this draws over the top of it with
+  // depthTest off.
+  const selGeo = new THREE.BufferGeometry();
+  selGeo.setAttribute('position', new THREE.BufferAttribute(new Float32Array(0), 3));
+  selGeo.setAttribute('color', new THREE.BufferAttribute(new Float32Array(0), 3));
+  v.selCloud = new THREE.Points(selGeo, new THREE.PointsMaterial({
+    size:+document.getElementById('psize').value, vertexColors:true,
+    sizeAttenuation:false, depthTest:false, depthWrite:false}));
+  v.selCloud.renderOrder = 2;
+  v.scene.add(v.selCloud);
+}
+
+
+function fitOne(v, pts){
+  if(!v || !pts || !pts.length) return;
+  const n = pts.length/3;
+  let mn=[1e30,1e30,1e30], mx=[-1e30,-1e30,-1e30];
+  for(let i=0;i<n;i++) for(let d=0;d<3;d++){
+    const q=pts[i*3+d]; if(q<mn[d])mn[d]=q; if(q>mx[d])mx[d]=q; }
+  const c = mn.map((q,i)=>(q+mx[i])/2);
+  const span = Math.max(...mx.map((q,i)=>q-mn[i]), 1);
+  v.controls.target.set(c[0],c[1],c[2]);
+  v.camera.position.set(c[0]+span, c[1]+span*0.7, c[2]+span);
+  v.camera.near = span/1000; v.camera.far = span*20;
+  v.camera.updateProjectionMatrix();
+  v.raycaster.params.Points.threshold = Math.max(span/250, 1e-6);
+  v.controls.update();
+}
+function fitView(){
+  // Frame both panes on the union so a difference in extent reads as one.
+  const a = S.L && S.L.pts ? S.L.pts : new Float32Array(0);
+  const b = S.R && S.R.pts ? S.R.pts : new Float32Array(0);
+  const both = new Float32Array(a.length + b.length);
+  both.set(a, 0); both.set(b, a.length);
+  fitOne(V.L, both); fitOne(V.R, both);
+}
+
+function onMove(v, e){
+  const side = v === V.L ? S.L : S.R;
+  if(!v.cloud || !side || !side.n) return;
+  const r = v.renderer.domElement.getBoundingClientRect();
+  v.pointer.x = ((e.clientX-r.left)/r.width)*2-1;
+  v.pointer.y = -((e.clientY-r.top)/r.height)*2+1;
+  v.raycaster.setFromCamera(v.pointer, v.camera);
+  for(const h of v.raycaster.intersectObject(v.cloud, false)){
+    if(!side.visible[h.index]) continue;
+    infoPoint(side, h.index, v.name);
+    select(side.key[h.index]);
+    return;
+  }
+}
+
+const fmt = (x, d=3) => (x === undefined || x === null || Number.isNaN(x))
+  ? '—' : (Math.abs(x) >= 1e5 || (x !== 0 && Math.abs(x) < 1e-3)
+                 ? Number(x).toExponential(2) : Number(x).toFixed(d));
+const pdgName = p => PDG_NAME.has(p) ? `${p} (${PDG_NAME.get(p)})` : (p === -1 ? '—' : String(p));
+
+
+function infoPoint(side, i, where){
+  const iid = side.inst[i], fid = side.frag[i];
+  const parent = iid >= 0 ? attrById(iid, 'inst_parent_id') : -1;
+  const isPrimary = parent >= 0 && parent === iid;
+  const g4 = fid >= 0 ? attrById(fid, 'geant4_trackid') : -1;
+  const rows = [
+    ['point', `${i.toLocaleString()} <span class="k">(${where})</span>`],
+    ['x y z', `${fmt(side.pts[i*3],1)}  ${fmt(side.pts[i*3+1],1)}  ${fmt(side.pts[i*3+2],1)}`],
+    [side === S.L ? 'true dE' : sensorQuantity().name,
+     fmt(side.energy[i], 4) + (side === S.L ? ' MeV'
+       : (sensorQuantity().unit ? ' ' + sensorQuantity().unit : ''))],
+    ...(side === S.L && side.extra && !Number.isNaN(side.extra[i])
+        ? [['ionisation charge', fmt(side.extra[i], 4) + ' e-']] : []),
+    ['geant4 track id', g4 < 0 ? '—' : `${g4} <span class="k">(fragment rep)</span>`],
+    ['fragment id', fid < 0 ? '— <span class="k">(undetected)</span>' : String(fid)],
+    ['instance id', iid < 0 ? '—' : String(iid)],
+    ['interaction id', side.inter[i] < 0 ? '—' : String(side.inter[i])],
+    ['semantic type', SEM[side.sem[i]] || '—'],
+    ['low energy', side.isLE[i] ? 'yes' : 'no'],
+    ['pdg', pdgName(side.pdg[i])],
+    ['parent instance', isPrimary ? '— <span class="k">(primary)</span>'
+                       : parent < 0 ? '—' : String(parent)],
+    ['parent pdg', isPrimary ? '—' : pdgName(parent >= 0 ? attrById(parent,'pdg') : -1)],
+  ];
+  const el = document.getElementById('pinfo');
+  el.innerHTML = '<table>' + rows.map(([k,v]) => `<tr><td>${k}</td><td>${v}</td></tr>`).join('') + '</table>';
+  el.style.display = 'block';
+}
+
+function showCounts(){
+  const lvl = S.hl === 'frag' ? 'fragment' : S.hl === 'inter' ? 'interaction' : 'instance';
+  const l = V.L ? (V.L.nSel|0) : 0, r = V.R ? (V.R.nSel|0) : 0;
+  statusEl.innerHTML = S.sel < 0 ? '' :
+    `<b>${lvl} ${S.sel}</b>\n<span class="k">truth deposits</span> <span class="v">${l.toLocaleString()}</span>` +
+    `   <span class="k">pysupera points</span> <span class="v">${r.toLocaleString()}</span>`;
+}
+function select(key){
+  key = Number(key);
+  if(key === S.sel) return;
+  S.sel = key; paint();
+}
+
+// ----------------------------------------------------------------- rebuild --
+function rebuild(){
+  if(!S.out) return;
+  if(!V.L) V.L = makeView('pane-true', 'truth deposit');
+  if(!V.R) V.R = makeView('pane-nom', 'pysupera point');
+  S.sel = -1;
+  try{
+    const eo = val(S.out,'events/offsets');
+    const a = Number(eo[S.ev]), b = Number(eo[S.ev+1]);
+    buildDictionary(a, b);
+    S.R = buildRight(a, b);
+    S.L = buildLeft();
+    buildFilters(); buildKeys();
+    buildCloud(V.L, S.L.pts); buildCloud(V.R, S.R.pts);
+    resizeView(V.L); resizeView(V.R);
+    paint(); fitView();
+    const un = S.L.n ? S.L.frag.reduce((t,f) => t + (f < 0 ? 1 : 0), 0) : 0;
+    banner('note', S.tru ? '' :
+      'Load the truth companion to fill the left pane.\n' +
+      'Make one with:  pysupera-truth-subset step.h5 hits.h5 truth_small.h5');
+    log(`event ${S.ev}: ${S.L.n.toLocaleString()} truth deposits, ` +
+        `${S.R.n.toLocaleString()} pysupera points, ${un.toLocaleString()} undetected`);
+    statusEl.innerHTML =
+      `<b>event ${S.ev}</b>\n<span class="k">truth deposits</span> <span class="v">${S.L.n.toLocaleString()}</span>` +
+      (S.L.n ? `  <span class="k">(${(100*un/S.L.n).toFixed(0)}% undetected)</span>` : '') +
+      `\n<span class="k">pysupera points</span> <span class="v">${S.R.n.toLocaleString()}</span>`;
+    document.getElementById('hint').textContent = 'hover a point in either pane · drag rotate · right-drag or arrows pan · c fit';
+  }catch(err){ log('ERROR: ' + err.message); statusEl.textContent = 'error: ' + err.message; }
+}
+</script>

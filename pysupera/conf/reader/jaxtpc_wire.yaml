@@ -1,0 +1,34 @@
+# JAXTPC wire-readout input.
+#
+#   run_pysupera reader=jaxtpc_wire \
+#       io.input_path=edepsim.h5 io.output_path=out.h5 \
+#       reader.jaxtpc_seg_path=batch/step/run/name_step_0000_00.h5 \
+#       reader.jaxtpc_inst_path=batch/hits/run/name_hits_0000_00.h5
+#
+# Particle metadata (PDG, track IDs, interaction type) still comes from the
+# EDepSim file at io.input_path.  What changes is the point cloud: only the
+# energy-deposit segments that produced a signal above threshold in the
+# JAXTPC readout are kept.
+#
+# A wire hit records one spatial coordinate and a drift tick, so three planes
+# are needed to place a point and there is no 3-D image to convert.  Pixel
+# readout has one; see reader=jaxtpc_pixel for reader.point_source=hits.
+#
+# Nothing here is wire-specific beyond the comments -- visibility is a
+# property of a group, not of the readout that recorded it, so the same
+# reader handles both geometries.  The two files exist to say which
+# arrangement you have, and to keep the options that only apply to one of
+# them out of the other.
+
+defaults:
+  - edepsim_h5
+  - _self_
+
+# Path to the JAXTPC seg/step HDF5 file (per-volume 3-D truth deposits:
+# positions, de, dx, t0_us, charge, ...).
+jaxtpc_seg_path: ???
+
+# Path to the JAXTPC inst/hits HDF5 file (per-readout-plane correspondence:
+# deposit_to_group, group_to_track, and the per-plane group_ids that record
+# which groups were above the readout threshold).
+jaxtpc_inst_path: ???

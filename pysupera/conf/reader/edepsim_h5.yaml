@@ -1,24 +1,21 @@
-# Reader configuration for EDepSim HDF5 files.
+# Reader configuration for plain EDepSim HDF5 input.
 #
-# This config group is selected via:
+# This is the base every reader config in this group builds on.  Selected
+# with:
+#
 #   defaults:
 #     - reader: edepsim_h5
 #
-# or overridden on the command line:
-#   reader.particle_key=particle/geant4_custom
+# or on the command line:
 #
-# JAXTPC visibility filtering (optional)
-# --------------------------------------
-# When jaxtpc_seg_path and jaxtpc_inst_path are both non-null, the reader
-# automatically switches to visibility-filtered mode: only energy-deposit
-# segments that produced a signal above threshold in the JAXTPC readout
-# simulation are included in each particle's point cloud.  The EDepSim file
-# still provides all particle-level metadata (PDG, track IDs, etc.).
+#   run_pysupera reader=edepsim_h5 reader.particle_key=particle/geant4_custom
 #
-#   reader.jaxtpc_seg_path=sim_seg_0000.h5
-#   reader.jaxtpc_inst_path=sim_inst_0000.h5
+# On its own it reads EDepSim directly: each particle's point cloud is every
+# Geant4 energy-deposit step in the file, with no detector simulation in
+# between.  For JAXTPC input pick one of the siblings instead:
 #
-# Leave both as null (~) to use full EDepSim steps without any masking.
+#   reader=jaxtpc_wire    wire readout   (U/V/Y planes, three 2-D projections)
+#   reader=jaxtpc_pixel   pixel readout  (one Pixel plane, natively 3-D)
 
 # Identifies which reader class build_reader() should instantiate.
 # Do not change unless you are adding a new reader format.
@@ -46,19 +43,6 @@ step_key: pstep/lar_vol
 # Expected fields: start, end  (integer arrays of length N_particles).
 # Not used in JAXTPC mode.
 ass_key: ass/particle_pstep_lar_vol
-
-# ---------------------------------------------------------------------------
-# JAXTPC visibility mask (optional — leave null to disable)
-# ---------------------------------------------------------------------------
-
-# Path to the JAXTPC seg HDF5 file (per-volume 3-D truth deposits:
-# positions_mm, de, dx, t0_us, charge, …).
-jaxtpc_seg_path: ~
-
-# Path to the JAXTPC inst HDF5 file (per-readout-plane correspondence data:
-# segment_to_group, group_to_track, and per-plane group_ids that record
-# which groups were above the readout threshold).
-jaxtpc_inst_path: ~
 
 # ---------------------------------------------------------------------------
 # Physics / classification parameters

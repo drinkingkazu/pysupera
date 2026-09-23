@@ -25,7 +25,7 @@ context (notebooks, pytest, library code).
 
 from __future__ import annotations
 
-from omegaconf import DictConfig
+from omegaconf import DictConfig, OmegaConf
 
 
 # ---------------------------------------------------------------------------
@@ -127,6 +127,11 @@ def configure(cfg: DictConfig) -> None:
     """
     import pysupera.data as _data
     _data._DEFAULT_MIN_PC_SIZE = int(cfg.particle.min_pc_size)
+    # min_pc_size counts occupied cells, so classification has to measure in
+    # the same cells defragmentation later splits on.  With no voxel grid
+    # there is nothing to count but rows, and the threshold then means
+    # whatever the input sampling pitch makes it mean.
+    _data._DEFAULT_VOXEL_SIZE = _classify_voxel_size(cfg)
 
 
 def build_preprocessor(cfg: DictConfig, verbose: bool = False):
@@ -432,6 +437,27 @@ def build_conditions(cfg: DictConfig) -> list:
     return conditions
 
 
+def _classify_voxel_size(cfg):
+    "The cell size semantic classification measures a cloud's extent in."
+    # Passed explicitly at every call site rather than left to the module
+    # default configure() sets: a reader built without calling configure
+    # would otherwise silently classify in rows.
+    vx = cfg.particle.get("voxelize", {}) or {}
+    if not vx.get("enabled", False):
+        return None
+    v = vx.get("voxel_size", None)
+    if v is None:
+        return None
+    # A per-axis voxel size has no single cell count; fall back to rows.
+    return None if hasattr(v, "__iter__") else float(v)
+
+
+def _opt_float(node, key):
+    """A config value as float, or None when unset -- Hydra writes null as None."""
+    v = node.get(key, None)
+    return None if v is None else float(v)
+
+
 def build_reader(cfg: DictConfig):
     """
     Instantiate an :class:`~pysupera.readers.EventReaderBase` described by
@@ -448,6 +474,12 @@ def build_reader(cfg: DictConfig):
     particle's point cloud to energy-deposit segments that were visible in the
     JAXTPC readout simulation.  All particle-level metadata still comes from
     the EDepSim file at *cfg.io.input_path*.
+
+    ``cfg.reader.point_source`` then chooses what a point *is*: ``deposits``
+    (default) keeps truth geometry and lets the readout select, while
+    ``hits`` replaces the cloud with the detected pixel image.  See
+    ``pysupera.readers.pixel_hits`` for the ``hit_x_from`` and ``hit_energy``
+    conventions.
 
     With JAXTPC masking disabled (default)::
 
@@ -493,6 +525,26 @@ def build_reader(cfg: DictConfig):
         seg_path  = cfg.reader.get("jaxtpc_seg_path",  None)
         inst_path = cfg.reader.get("jaxtpc_inst_path", None)
 
+        # A reader config that declares these as mandatory (???) means the
+        # run is a JAXTPC run.  OmegaConf's .get() hands back None for an
+        # unfilled mandatory value rather than raising, so without this the
+        # run would quietly fall through to plain EDepSim -- you would ask
+        # for reader=jaxtpc_pixel and get truth steps, with nothing said.
+        # Note: `k in cfg.reader` is False for a MISSING value, so the
+        # membership test cannot be used to spot one -- is_missing can, and
+        # returns False for a key the config genuinely does not declare.
+        _missing = [k for k in ("jaxtpc_seg_path", "jaxtpc_inst_path")
+                    if OmegaConf.is_missing(cfg.reader, k)]
+        if _missing:
+            raise ValueError(
+                "This reader config is for JAXTPC input and needs "
+                + " and ".join(f"reader.{k}" for k in _missing)
+                + ".  Pass them on the command line, e.g.\n"
+                "    reader.jaxtpc_seg_path=batch/step/run/name_step_0000_00.h5\n"
+                "    reader.jaxtpc_inst_path=batch/hits/run/name_hits_0000_00.h5\n"
+                "Use reader=edepsim_h5 to read the EDepSim steps directly "
+                "instead.")
+
         jaxtpc_active = bool(seg_path) and bool(inst_path)
 
         if jaxtpc_active:
@@ -509,6 +561,30 @@ def build_reader(cfg: DictConfig):
                 electron_energy_threshold = float(cfg.reader.get(
                                                 "electron_energy_threshold", 0.05)),
                 min_pc_size               = int(cfg.particle.get("min_pc_size", -1)),
+                voxel_size                = _classify_voxel_size(cfg),
+                point_source              = str(cfg.reader.get("point_source",
+                                                "deposits")),
+                hit_x_from                = str(cfg.reader.get("hit_x_from",
+                                                "nominal")),
+                hit_energy                = str(cfg.reader.get("hit_energy",
+                                                "charge")),
+                hit_reference_tick        = float(cfg.reader.get(
+                                                "hit_reference_tick", 0.0) or 0.0),
+                hit_charge_threshold      = float(cfg.reader.get(
+                                                "hit_charge_threshold", 0.0) or 0.0),
+                sensor_path               = (
+                    str(cfg.reader.get("jaxtpc_sensor_path"))
+                    if cfg.reader.get("jaxtpc_sensor_path", None) else None),
+                pixel_pitch_mm            = _opt_float(cfg.reader,
+                                                "pixel_pitch_mm"),
+                pixel_drift_direction     = cfg.reader.get(
+                                                "pixel_drift_direction", None),
+                drift_velocity_mm_us      = _opt_float(cfg.reader,
+                                                "drift_velocity_mm_us"),
+                readout_time_step_us      = _opt_float(cfg.reader,
+                                                "readout_time_step_us"),
+                pixel_geometry_from_fit   = bool(cfg.reader.get(
+                                                "pixel_geometry_from_fit", False)),
             )
 
         # Default: full EDepSim reader (no JAXTPC masking).
@@ -526,6 +602,7 @@ def build_reader(cfg: DictConfig):
             electron_energy_threshold = float(cfg.reader.get(
                                              "electron_energy_threshold", 0.05)),
             min_pc_size               = int(cfg.particle.get("min_pc_size", -1)),
+            voxel_size                = _classify_voxel_size(cfg),
         )
 
     raise ValueError(

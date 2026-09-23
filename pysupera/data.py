@@ -7,6 +7,12 @@ import numpy as np
 # ---------------------------------------------------------------------------
 _DEFAULT_MIN_PC_SIZE: int = -1
 
+#: Cell size that :func:`~pysupera.utils.SetSemanticType` measures a cloud's
+#: extent in.  ``None`` counts rows, which only compares like with like when
+#: two inputs are sampled at the same pitch -- Geant4 deposits arrive every
+#: 0.3 mm and sensor hits on a 4.32 mm grid, so they do not.
+_DEFAULT_VOXEL_SIZE = None
+
 # ---------------------------------------------------------------------------
 # Sentinel values for unset optional Particle attributes
 # ---------------------------------------------------------------------------
@@ -136,6 +142,7 @@ class Particle:
         interaction_type,
         point_cloud,
         min_pc_size=None,
+        voxel_size=None,
         # ------------------------------------------------------------------
         # Optional physical attributes — default to None / FLOAT_UNSET.
         # See class docstring for sentinel-value conventions.
@@ -223,10 +230,13 @@ class Particle:
 
         if min_pc_size is None:
             min_pc_size = _DEFAULT_MIN_PC_SIZE
+        if voxel_size is None:
+            voxel_size = _DEFAULT_VOXEL_SIZE
 
         self.sem_type   = SetSemanticType(
             interaction_type, pdg, parent_pdg, point_cloud,
             point_cloud_size=min_pc_size,
+            voxel_size=voxel_size,
         )
         self.point_cloud = point_cloud
 
@@ -300,6 +310,7 @@ class Particle:
         interaction_types,
         point_clouds,
         min_pc_size=None,
+        voxel_size=None,
         geant4_ids=None,
     ):
         """
@@ -398,6 +409,7 @@ class Particle:
                 interaction_type=interaction_types[i],
                 point_cloud=point_clouds[i],
                 min_pc_size=min_pc_size,
+                voxel_size=voxel_size,
             )
             for i in range(n)
         ]
@@ -415,6 +427,7 @@ class Particle:
         point_cloud_flat,
         point_cloud_offsets,
         min_pc_size=None,
+        voxel_size=None,
         geant4_ids=None,
     ):
         """
@@ -548,6 +561,7 @@ class Particle:
                 interaction_type=interaction_types[i],
                 point_cloud=flat[offsets[i, 0] : offsets[i, 1]],
                 min_pc_size=min_pc_size,
+                voxel_size=voxel_size,
             )
             for i in range(n)
         ]

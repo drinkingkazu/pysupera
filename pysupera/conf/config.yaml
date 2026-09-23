@@ -1,19 +1,29 @@
 defaults:
   - io: default
-  # Reader config group.  Currently only "edepsim_h5" is available.
-  # JAXTPC visibility filtering is not a separate reader — it is activated
-  # by setting two optional flags on the same edepsim_h5 config:
+  # Reader config group -- which kind of input this run reads.
   #
-  #   reader.jaxtpc_seg_path=sim_seg_0000.h5
-  #   reader.jaxtpc_inst_path=sim_inst_0000.h5
+  #   edepsim_h5    plain EDepSim: every Geant4 energy-deposit step, no
+  #                 detector simulation in between.
+  #   jaxtpc_wire   JAXTPC wire readout (U/V/Y planes).  Particle metadata
+  #                 still comes from the EDepSim file at io.input_path; the
+  #                 point cloud keeps only deposits the readout detected.
+  #   jaxtpc_pixel  JAXTPC pixel readout (one Pixel plane).  As above, and
+  #                 additionally supports reader.point_source=hits, which
+  #                 replaces the cloud with the detected pixel image.
   #
-  # When both are non-null, only segments visible in the JAXTPC readout are
-  # included in each particle's point cloud.  Particle metadata (PDG, track
-  # IDs, interaction type) always comes from the EDepSim file (io.input_path).
+  # Override on the command line with reader=jaxtpc_pixel.  Each variant
+  # inherits edepsim_h5 and adds only what its own arrangement needs.
   - reader: edepsim_h5
   - checker: cpu_single
   - conditions: default
   - _self_
+  # Optional bundle of detector-specific values that cut across config
+  # groups -- reader geometry, min_pc_size, the thresholds that only make
+  # sense together.  Listed after _self_ so it overrides the defaults
+  # below; a command-line flag still overrides it.
+  #
+  #   run_pysupera preset=cubic_pixel_hits ...
+  - preset: null
 
 # ---------------------------------------------------------------------------
 # Top-level workflow parameters
@@ -185,9 +195,46 @@ write_event_clouds: true
 # Particle construction parameters
 # ---------------------------------------------------------------------------
 particle:
-  # Minimum point-cloud size for SetSemanticType classification.
-  # Particles with fewer points than this are treated as having an
-  # unknown semantic type.  -1 disables the check (all sizes accepted).
+  # Size below which a particle is classified as a low-energy scatter,
+  # measured in OCCUPIED VOXELS (particle.voxelize.voxel_size) rather than
+  # in rows.  -1 disables the check entirely.
+  #
+  # Why voxels: row count depends on how finely the input happens to be
+  # sampled.  Geant4 deposits arrive every 0.3 mm and pixel sensor hits on a
+  # 4.32 mm grid, so the same particle is 1 row in one and 40 in the other,
+  # and a threshold in rows silently re-tunes itself when point_source
+  # changes.  Voxels measure how much space the object fills, which is the
+  # thing actually being asked about, and defragmentation already splits on
+  # the same count.
+  #
+  # How to choose it: a chunk of ionisation is worth calling a trajectory
+  # only when its direction can be read off it, which needs it to be longer
+  # than it is wide.  So the threshold is the cell count of a blob one
+  # track-width across, (width / voxel_size) ** 3.
+  #
+  #   truth deposits   track width  4.9 mm -> (4.9/3)^3 =  5   <- this default
+  #   pixel sensor hits            12.8 mm -> (12.8/3)^3 = 77, best fit 85
+  #
+  # For sensor hits the width depends on how hard the hits are cut, so this
+  # and reader.hit_charge_threshold are a matched pair -- mixing them is
+  # worse than either:
+  #
+  #   hit_charge_threshold   track width   min_pc_size   agrees with truth@5
+  #   ----------------------------------------------------------------------
+  #       0 e-                  13.1 mm         85              99.0%
+  #     500 e-                   6.5 mm         13              95.5%
+  #     500 e-                   6.5 mm         85 (mixed)      85.2%
+  #
+  # The uncut pairing keeps every electron and 4.18M points per event; the
+  # 500 e- pairing keeps 73.5% of the charge and 190k points, and runs 4x
+  # faster.  preset=cubic_pixel_hits selects the second.
+  #
+  # Measured over ten events of a 4.32 mm-pitch pixel detector on a 3 mm
+  # grid: the best-agreeing cut per event ranged 81-90, and at a fixed 85
+  # the sensor-hit labelling matches the truth-deposit labelling on 99.0% of
+  # particles.  So with reader.point_source=hits, set:
+  #
+  #   particle.min_pc_size=85
   min_pc_size: 5
 
   # Pre-processing: voxelize point clouds onto a regular 3-D grid.

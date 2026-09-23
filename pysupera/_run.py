@@ -71,9 +71,40 @@ def main(cfg: DictConfig) -> None:
     voxelizer       = build_voxelizer(cfg)         # None when voxelize.enabled: false
     preprocessor    = build_preprocessor(cfg)      # None when defragment: false
     _check_group_owner = bool(cfg.get('check_group_ownership', True))
+    # A group straddling a defragmentation split is exceptional for truth
+    # deposits and routine for detected hits, so hit mode settles it by
+    # majority instead of by whichever particle was seen first.
+    _hit_points = str(cfg.reader.get('point_source', 'deposits')) == 'hits'
+    # min_pc_size is a voxel count, and its default was chosen for a cloud of
+    # Geant4 deposits.  A pixel sensor image puts the same particle in some
+    # 14 voxels instead of 1, so the truth-tuned value labels almost nothing
+    # low-energy.  Cheap to say, expensive to discover in a plot.
+    if _hit_points and 0 < int(cfg.particle.get('min_pc_size', -1)) <= 5:
+        print(f"[run] WARNING: particle.min_pc_size="
+              f"{int(cfg.particle.min_pc_size)} with point_source=hits.  That "
+              f"is a voxel count tuned for truth deposits, where a particle "
+              f"fills one or two cells; a pixel image fills many more, so "
+              f"almost nothing will be classified kLEScatter.  The value "
+              f"depends on reader.hit_charge_threshold, because cutting the "
+              f"halo thins the tracks: 85 at a threshold of 0, 13 at 500.  "
+              f"preset=cubic_pixel_hits sets a matched pair.")
+    _owner_resolve = 'majority' if _hit_points else 'first'
+    _owner_report: dict = {}
+    _straddle_total = 0
+    _pixel_geom_report = None
 
     def _n_groups_of(_store):
-        """Total groups in the event just read, from the deposit map."""
+        """
+        Total groups in the event just read.
+
+        The reader counts them from group_to_track, which is the space the
+        volume offsets are built in.  Falling back to the highest group any
+        point references only agrees when the last volume's last group was
+        hit, and silently truncates the owner table when it was not.
+        """
+        _n = getattr(_store, 'last_n_groups', None)
+        if _n:
+            return int(_n)
         _m = getattr(_store, 'last_deposit_to_group', None)
         return 0 if _m is None or not len(_m) else int(_m.max()) + 1
 
@@ -121,6 +152,8 @@ def main(cfg: DictConfig) -> None:
     }
     # JAXTPC visibility counts; stays empty unless the reader supplies them.
     mask_stats: dict = defaultdict(list)
+    # Detected-hit counts; only populated when reader.point_source=hits.
+    hit_stats: dict = defaultdict(list)
     n_events = 0
 
     _max_events = int(cfg.get("max_events", -1))
@@ -144,6 +177,21 @@ def main(cfg: DictConfig) -> None:
         )
 
     with build_reader(cfg) as store:
+        # Which readout the inst file describes.  Nothing downstream branches
+        # on it -- visibility is a property of a group, not of the geometry --
+        # but a pixel run silently reported as wire is the kind of thing that
+        # is only noticed three plots later.
+        _readout = getattr(store, 'readout_type', None)
+        if _readout:
+            print(f"[run]   readout       : {_readout}")
+        _psrc = getattr(store, 'point_source', None)
+        if _psrc:
+            print(f"[run]   point source  : {_psrc}"
+                  + (f"  (x from {cfg.reader.get('hit_x_from', 'nominal')}, "
+                     f"energy {cfg.reader.get('hit_energy', 'charge')}, "
+                     f"charge >= {cfg.reader.get('hit_charge_threshold', 0)} e-)"
+                     if _psrc == 'hits' else ""))
+
         _n_available = len(store)
         _n_to_process = _n_available if _max_events < 0 else min(_max_events, _n_available)
         print(f"[run] {_n_available} events in input file, processing {_n_to_process}")
@@ -161,6 +209,14 @@ def main(cfg: DictConfig) -> None:
                                  compression=cfg.io.compression,
                                  compression_opts=cfg.io.compression_opts)
               if _write_voxmap else _NullCtx()) as vox_writer:
+
+            # What produced this file, so a reader does not have to infer it.
+            writer.set_meta({
+                'point_source': cfg.reader.get('point_source', 'deposits'),
+                'hit_x_from':   cfg.reader.get('hit_x_from', None) if _hit_points else None,
+                'hit_energy':   cfg.reader.get('hit_energy', None) if _hit_points else None,
+                'readout_type': _readout,
+            })
 
             from tqdm import tqdm
             _bar = tqdm(
@@ -180,6 +236,13 @@ def main(cfg: DictConfig) -> None:
                 # ── JAXTPC visibility counts ────────────────────────────────
                 # Already computed by the reader from data it had in hand, so
                 # collecting them costs nothing; only the printing is gated.
+                if _pixel_geom_report is None:
+                    _pixel_geom_report = getattr(
+                        store, 'pixel_geometry_report', None)
+                _hs = getattr(store, 'last_hit_stats', None)
+                if _hs:
+                    for _k, _v in _hs.items():
+                        hit_stats[_k].append(_v)
                 _ms = getattr(store, 'last_mask_stats', None)
                 if _ms:
                     for _k, _v in _ms.items():
@@ -401,6 +464,40 @@ def main(cfg: DictConfig) -> None:
                         f"{'...' if len(_uncovered) > 10 else ''}"
                     )
 
+                # ── true_x_shift, carried onto the voxels ──────────────────
+                # The reader gives one shift per input hit; the rows about to
+                # be written are voxels, so each takes the shift of a hit
+                # that made it.  Which one barely matters: the shift is
+                # constant per (interaction, volume), and measured over an
+                # event only 0.09% of voxels mix two values at all, by at
+                # most 0.05 mm -- the sub-microsecond t0 jitter inside one
+                # interaction.  The 200 mm case, a track crossing the
+                # cathode, never shares a voxel, because the nominal x is
+                # exactly what slides its two halves apart.
+                _shift_in = getattr(store, 'last_true_x_shift', None)
+                if _shift_in is not None:
+                    for _p in particles:
+                        _n = len(_p.point_cloud)
+                        if not _n:
+                            _p.true_x_shift = np.zeros(0, dtype=np.float32)
+                            continue
+                        _vm = getattr(_p, 'voxmap', None)
+                        _v = None
+                        if _vm is not None:
+                            _off, _ids = _vm
+                            _off = np.asarray(_off)
+                            if _ids is not None and len(_off) == _n + 1:
+                                _v = _shift_in[np.asarray(_ids,
+                                                          dtype=np.int64)[_off[:-1]]]
+                        if _v is None:
+                            # No voxel map: the cloud is still the hits, so
+                            # the reader's per-hit slice lines up as it is.
+                            _d = getattr(_p, 'deposit_id', None)
+                            _v = (_shift_in[np.asarray(_d, dtype=np.int64)]
+                                  if _d is not None and len(_d) == _n
+                                  else np.zeros(_n, dtype=np.float32))
+                        _p.true_x_shift = np.asarray(_v, dtype=np.float32)
+
                 # ── Write ───────────────────────────────────────────────────
                 _t = time.perf_counter()
                 _layout = build_layout(particles, _frag_groups, _inst_groups,
@@ -419,7 +516,10 @@ def main(cfg: DictConfig) -> None:
                 else:
                     _owner = build_group_owners(
                         particles, _d2g, _n_groups_of(store),
-                        check=_check_group_owner)
+                        check=_check_group_owner,
+                        resolve=_owner_resolve, report=_owner_report)
+                    _straddle_total += int(
+                        _owner_report.get('n_straddled', 0) or 0)
                     # Record the fragment, not the particle: only a fraction
                     # of particles get a row, so a particle id would often
                     # name something the reader cannot resolve.  Every
@@ -519,6 +619,106 @@ def main(cfg: DictConfig) -> None:
                 # the EDepSim particle list, so they reach no point cloud.
                 print(f"  {'Visible but unmatched':<{_W}} "
                       f"{_unm:>10,} ({100.0 * _unm / max(1, _tot):.2f}%)")
+
+        # ── Pixel geometry, and what the data made of it ──────────────────
+        # Printed in full because it is configuration, and configuration that
+        # silently disagrees with the data is the failure this check exists
+        # to prevent.  'stated' means applied as given and verified against
+        # the truth deposits; 'fitted' means measured from them, which makes
+        # the same comparison circular.
+        if _pixel_geom_report:
+            print(f"\n[run] Pixel geometry  ({len(_pixel_geom_report)} volume(s))")
+            for _v, _g in enumerate(_pixel_geom_report):
+                _m = _g.get('measured') or {}
+                _src = _g.get('source', 'stated')
+                print(f"  volume {_v}  [{_src}]  "
+                      f"pitch {_g['pitch_mm']:.4f} mm   "
+                      f"v {_g['drift_velocity_mm_us']:.4f} mm/us   "
+                      f"dt {_g['time_step_us']:.4f} us   "
+                      f"drift {_g['drift_direction']:+d}   "
+                      f"anode {_g['x_anode_mm']:+.1f} mm   "
+                      f"ref tick {_g.get('reference_tick', 0):g}")
+                if _m:
+                    print(f"             data says  "
+                          f"pitch {_m['pitch_mm']:.4f} mm   "
+                          f"v {_m['drift_velocity_mm_us']:.4f} mm/us   "
+                          f"dt {_m['time_step_us']:.4f} us   "
+                          f"drift {_m['drift_direction']:+d}")
+                _r = _g.get('residual_mm') or {}
+                if _r:
+                    print(f"             residual   "
+                          f"x {_r['x']:.2f}   y {_r['y']:.2f}   z {_r['z']:.2f} mm"
+                          f"   over {_g.get('n_groups', 0):,} groups")
+                _off = _g.get('reference_tick_offset_mm')
+                if _off:
+                    print(f"             reference tick sits {_off:+.1f} mm "
+                          f"from the data (not an error: it is a choice)")
+
+        # ── Detected hits (hit mode only) ─────────────────────────────────
+        if hit_stats.get('n_hits'):
+            print(f"\n[run] JAXTPC detected hits  ({n_events} event(s))")
+            print(f"  {'Metric':<{_W}} {'min':>10} {'mean':>10} {'max':>10}")
+            print(f"  {_SEP}")
+            for label, key in (
+                ("Pixel hits in the file", 'n_decoded'),
+                ("Pixel hits kept",        'n_hits'),
+                ("Attached to a particle", 'n_attached'),
+                ("Groups in the event",    'n_groups'),
+                ("Deposits in the seg file", 'n_deposits'),
+            ):
+                if not hit_stats.get(key):
+                    continue
+                lo, mu, hi = _agg(hit_stats[key])
+                print(f"  {label:<{_W}} {int(lo):>10,} {mu:>10.1f} {int(hi):>10,}")
+            _unm = sum(hit_stats.get('n_unmatched', [0]))
+            _hit = sum(hit_stats['n_hits'])
+            print(f"  {_SEP}")
+
+            # A deposit whose drift time plus interaction time lands past the
+            # last tick is never recorded at all.  The loss scales with t0,
+            # so it biases a comparison against deposit mode rather than just
+            # shrinking it -- which is why it is reported and not inferred.
+            _cut = sum(hit_stats.get('n_below_threshold', [0]))
+            _dec = sum(hit_stats.get('n_decoded', [0]))
+            if _cut:
+                print(f"  {'Below the charge threshold':<{_W}} "
+                      f"{_cut:>10,} ({100.0 * _cut / max(1, _dec):.1f}%)")
+            _dep = sum(hit_stats.get('n_deposits', [0]))
+            _aft = sum(hit_stats.get('n_after_window', [0]))
+            _bef = sum(hit_stats.get('n_before_window', [0]))
+            if _dep and (_aft or _bef):
+                print(f"  {'Deposits past the readout window':<{_W}} "
+                      f"{_aft:>10,} ({100.0 * _aft / _dep:.1f}%)")
+                if _bef:
+                    print(f"  {'Deposits before it opened':<{_W}} "
+                          f"{_bef:>10,} ({100.0 * _bef / _dep:.1f}%)")
+
+            # A reconstructed x beyond its own volume's faces.  Counted, never
+            # clipped: with a nominal t0 the drift coordinate is an inference,
+            # and clipping it would invent a wall the reconstruction lacks.
+            _out = sum(hit_stats.get('n_outside_volume', [0]))
+            if _out:
+                print(f"  {'Points outside their volume':<{_W}} "
+                      f"{_out:>10,} ({100.0 * _out / max(1, _hit):.2f}%)"
+                      f"  -- kept, not clipped")
+            if _unm:
+                # A hit whose group names a track the EDepSim file does not
+                # list; it reaches no point cloud.
+                print(f"  {'Unmatched to any particle':<{_W}} "
+                      f"{_unm:>10,} ({100.0 * _unm / max(1, _hit):.2f}%)")
+            if _straddle_total:
+                # A group whose hits ended up in two fragments.  Impossible
+                # for truth deposits; normal here, because the readout gaps
+                # are what defragmentation cuts at.  Resolved by majority.
+                _gt = sum(hit_stats.get('n_groups', [0])) or 1
+                print(f"  {'Groups split across fragments':<{_W}} "
+                      f"{_straddle_total:>10,} ({100.0 * _straddle_total / _gt:.2f}%)"
+                      f"  -- resolved by majority")
+            _cap = sum(hit_stats.get('n_capped_groups', [0]))
+            if _cap:
+                # group_sizes is uint8, so a group of more than 255 entries
+                # cannot be stored and JAXTPC truncates its CSR.
+                print(f"  {'Groups at the uint8 size cap':<{_W}} {_cap:>10,}")
 
         # ── Time profile ──────────────────────────────────────────────────
         total = sum(profile.values())

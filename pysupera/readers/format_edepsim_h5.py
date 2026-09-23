@@ -608,6 +608,7 @@ class EDepSimHDF5Reader(EventReaderBase):
         ass_key: str      = _DEFAULT_ASS_KEY,
         electron_energy_threshold: float = _DEFAULT_ELECTRON_ENERGY_THRESHOLD,
         min_pc_size: int | None = None,
+        voxel_size: float | None = None,
     ) -> None:
         import h5py
         self._path        = path
@@ -617,6 +618,9 @@ class EDepSimHDF5Reader(EventReaderBase):
         self._ass_key     = ass_key
         self._e_thresh    = electron_energy_threshold
         self._min_pc_size = min_pc_size
+        # Cell size classification measures a cloud's extent in; see
+        # pysupera.utils.count_extent for why rows will not do.
+        self._voxel_size  = voxel_size
         self._file        = h5py.File(path, "r")
         self._n_events    = len(self._file[self._part_key])
 
@@ -683,6 +687,7 @@ class EDepSimHDF5Reader(EventReaderBase):
             point_cloud_flat     = _steps_to_plain_array(steps),
             point_cloud_offsets  = offsets,
             min_pc_size          = self._min_pc_size,
+            voxel_size           = self._voxel_size,
             geant4_ids           = _g4,
         )
 

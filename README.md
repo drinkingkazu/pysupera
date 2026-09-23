@@ -22,6 +22,7 @@ A Python library for grouping simulated LArTPC particles into physics partitions
    - [Browser viewers (`vis_force.html`, `vis_hits.html`)](#browser-viewers-vis_forcehtml-vis_hitshtml)
 5. [Workflow](#workflow)
    - [Input: the `Particle` object](#input-the-particle-object)
+   - [Choosing a reader](#choosing-a-reader)
    - [Step 0 — Configuration](#step-0--configuration)
    - [Step 1 — Preprocessing](#step-1--preprocessing)
    - [Step 2 — Applying Conditions](#step-2--applying-conditions)
@@ -34,6 +35,9 @@ A Python library for grouping simulated LArTPC particles into physics partitions
    - [Particle columns](#particle-columns)
    - [Interaction columns](#interaction-columns)
    - [ID conventions](#id-conventions)
+   - [Wire and pixel readout](#wire-and-pixel-readout)
+   - [Truth deposits or detected hits](#truth-deposits-or-detected-hits)
+   - [Recovering the true x](#recovering-the-true-x--pointstrue_x_shift)
    - [Hit provenance (JAXTPC mode)](#hit-provenance-jaxtpc-mode)
      - [Seeing it](#seeing-it)
    - [Expert and debugging output](#expert-and-debugging-output)
@@ -199,18 +203,18 @@ The **PARTICLE FILTER** and **show legend** checkbox take effect immediately wit
 
 ---
 
-### Browser viewers (`vis_force.html`, `vis_hits.html`)
+### Browser viewers
 
-Two standalone HTML files that read an output file directly in the browser —
-no server, no install, nothing to launch. Open the file and pick your HDF5.
-They answer different questions:
+Four standalone HTML files that read an output file directly in the browser
+— no server, no install, nothing to launch. Open the file and pick your
+HDF5. They answer different questions:
 
-| | `vis_force.html` | `vis_hits.html` |
-|---|---|---|
-| **question** | what is in this event, and how is it grouped? | which readout hits belong to which object? |
-| **inputs** | the pysupera output | the output **and** the JAXTPC hits file |
-| **views** | one 3-D cloud, plus an instance-genealogy graph | 3-D cloud beside the six 2-D readout planes |
-| **needs** | any 3.x output | JAXTPC mode, so `groups/` exists |
+| | `vis_force.html` | `vis_hits.html` | `vis_drift.html` | `vis_truth.html` |
+|---|---|---|---|---|
+| **question** | what is in this event, and how is it grouped? | which readout hits belong to which object? | what did the drift-time ambiguity do to this event? | how do the labels look on truth points versus sensor points? |
+| **inputs** | the pysupera output | the output **and** the JAXTPC hits file | the output | the output **and** a truth companion |
+| **views** | one 3-D cloud, plus an instance-genealogy graph | truth cloud beside the readout — six 2-D plane images for wire, a second 3-D cloud for pixel | two 3-D clouds: true x beside inferred x | two 3-D clouds: Geant4 deposits beside the pysupera points |
+| **needs** | any 3.x output | JAXTPC mode, so `groups/` exists | `points/true_x_shift`, so a pixel hit-mode run | `groups/`, plus `pysupera-truth-subset` output |
 
 Both read HDF5 through **h5wasm, which decodes gzip only**, so the inputs have
 to be repacked first — see [Compression](#compression).
@@ -230,17 +234,30 @@ Shortcuts: `c` centre · `a` axes · `s` screenshot · `space` play/pause ·
 
 #### `vis_hits.html` — linking 3-D to the readout
 
-3-D voxels on the left, the 2-D planes built from hits on the right, and the
-same colour meaning the same object in both. **Hover a 3-D voxel and its hits
-light up across all six plane images; hover a 2-D pixel and its voxels light
-up in 3-D.** The link is a single owner id, so the two views cannot disagree.
+Truth voxels on the left, the readout on the right, and the same colour
+meaning the same object in both. **Hover on either side and the matching hits
+light up on the other.** The link is a single owner id, so the two views
+cannot disagree.
+
+What the right-hand pane is depends on the readout, which the viewer takes
+from the hits file's `config/readout_type` (falling back to wire, as JAXTPC
+does):
+
+| readout | right-hand pane |
+|---|---|
+| **wire** | six 2-D images, one per plane per volume — wire against drift tick. A wire hit carries one spatial coordinate, so an image is the only honest way to draw it |
+| **pixel** | a second 3-D cloud, axes `x = drift tick`, `y = pixel py`, `z = pixel pz`. A pixel hit is already 3-D; flattening it to an image would throw away an axis the detector actually measured |
+
+The pixel pane is deliberately left in readout coordinates rather than
+converted to mm: the left pane already answers "where in the detector", and
+this one answers "where on the anode".
 
 | control | |
 |---|---|
 | **colour by** | instance, fragment or interaction — the last two derived, not read |
 | **others** | opacity of everything not under the cursor. The cloud uses RGBA vertex colours with depth-write off, so unselected points are genuinely transparent and never hide the selection behind them |
 | **hide LE** | drops low-energy points from both views. Filtering happens at build time, so the picker cannot select something hidden |
-| **point info** | x/y/z, time, dE, dX, dE/dX, LE and owner in 3-D; wire, time, peak charge, group, LE and owner in 2-D |
+| **point info** | x/y/z, time, dE, dX, dE/dX, LE and owner for a truth voxel; peak charge, group, LE and owner for a hit, plus wire and time (wire) or py/pz and time (pixel) |
 | **c** | fit the view |
 
 Preparing its two inputs:
@@ -252,9 +269,16 @@ pysupera-hits-subset sim_wire_hits_0000.h5 hits_small.h5 -n 10
 
 `-c gzip` is not optional: omitting it keeps each dataset's existing filter,
 leaving a file the browser cannot read. The second command exists because the
-hits file is mostly per-tick arrays the viewer never opens — keeping only
-`center_wires`, `center_times`, `peak_charges` and `group_ids` takes a
-3-event sample from 1279.7 MiB to 2.73 MiB.
+hits file is mostly per-tick CSR arrays the viewer never opens — keeping only
+`group_ids`, `peak_charges` and the hit centres took a 3-event wire sample
+from 1279.7 MiB to 2.73 MiB, and a 3-event pixel sample from 43.6 MiB to
+0.65 MiB.
+
+`pysupera-hits-subset` handles either readout without being told which:
+it finds planes structurally (any subgroup with `group_ids`) and keeps
+whichever centres they store — `center_wires`/`center_times` for wire,
+`center_py`/`center_pz`/`center_times` for pixel. It copies `config`'s
+attributes across too, so the subset still says which readout it is.
 
 `vis_hits.html` refuses to draw rather than show something false: a red
 banner appears for a filter it cannot decode, a missing `groups/` table, or
@@ -262,6 +286,104 @@ an event where every voxel resolves to one owner. Files written before the
 group table, or before `groups/is_le`, still load — it says what is missing
 and shows what it can. The mapping it displays is described under
 [Hit provenance](#hit-provenance-jaxtpc-mode).
+
+#### `vis_drift.html` — what the t0 ambiguity did
+
+Two 3-D panes over the same points: **true x** on the left
+(`x + points/true_x_shift`), **inferred x** on the right (as stored, with t0
+assumed at the beam time). Cameras are synchronised and both panes are framed
+on the union of the two clouds, so a displacement reads as a displacement
+rather than being normalised away by two separate fits.
+
+**Hover a point in either pane and its whole object lights up in both**,
+everything else fading to an adjustable opacity. The `highlight` selector
+chooses what "its object" means — instance, fragment or interaction —
+independently of the colour, so you can colour by semantic type while
+following one instance.
+
+| colour by | encoding |
+|---|---|
+| energy | one-hue sequential ramp; **diverging** blue↔red about a grey zero when the column is signed, which it is in hit mode — the readout response is bipolar and 13% of voxels are negative. Sign-preserving log (symlog) by default: the column spans twelve decades, and linear puts three quarters of the points within 1.5% of the midpoint. Range clipped to the 2nd–98th percentile |
+| instance semantic type | the six categorical slots in fixed order |
+| fragment / instance / interaction id | a stable hash — thousands of values, so no legend is possible; identity comes from the hover |
+| particle type (PDG) | fixed hues for the six commonest species, everything else folded into "other" |
+
+Hover shows energy, Geant4 track id, fragment / instance / interaction id,
+semantic type, PDG, parent instance and parent PDG, plus both x values and
+the shift between them. Only about two thirds of points fall inside a stored
+particle row, so the Geant4 track id falls back to the fragment's
+representative and says when it has.
+
+The semantic-type strip filters classes in and out. That is not only a
+convenience: six categorical hues cannot clear the all-pairs colour-vision
+floor — no six in one lightness band can — so identity is never left to
+colour alone. A legend is always up, the hover names the class in words, and
+any pair can be isolated with the filter.
+
+Prepare its input the same way as the others, with `pysupera-repack out.h5
+out_gz.h5 -c gzip`. A file without `points/true_x_shift`, or one where every
+shift is zero, loads fine and says so — both panes are then the same cloud.
+
+#### `vis_truth.html` — the same labels on truth and on sensor points
+
+Left pane: the Geant4 energy deposits, each painted with the label of
+whatever pysupera object claimed it. Right pane: the cloud the algorithms
+actually ran on. Hover either side and the object lights up in both.
+
+The bridge is the **group**. A deposit knows its group (`deposit_to_group`,
+in the JAXTPC hits file) and the output's `groups/` table says which fragment
+owns each group — so the label travels backwards down the same chain the
+reconstruction came up. Measured on one event, a fragment's truth deposits
+sit a median 2.2 mm from that same fragment's hits.
+
+Deposits whose group was never detected have no owner and are shown as such
+rather than dropped — 34% of event 0, which is the charge the readout window
+never recorded. There's a `hide undetected` toggle.
+
+Its two inputs:
+
+```bash
+pysupera-repack out.h5 out_gz.h5 -c gzip
+pysupera-truth-subset step.h5 hits.h5 truth_small.h5 -n 3
+```
+
+The second exists because the JAXTPC step and hits files are Blosc, which the
+browser cannot decode, and because the viewer needs only the deposit
+positions, `de`, `charge` and `deposit_to_group` — 65 MB of JAXTPC becomes
+about 1 MB per event.
+
+A useful self-check: run pysupera with `reader.point_source=deposits` and the
+two panes should coincide, because the right pane's cloud then *is* the
+voxelized truth deposits.
+
+#### Display thresholds
+
+`vis_drift.html` and `vis_truth.html` both have a **show ≥** slider — two of
+them in `vis_truth.html`, one per pane, since the panes hold different
+quantities. The detector simulation imposes no threshold of its own, so
+without one every pixel carrying any induced-field influence is on screen.
+
+The slider position is a percentile, but what it displays is the absolute
+value it lands on, together with what survives:
+
+| sensor cut | points kept | charge kept |
+|---|---|---|
+| none | 100% | 100% |
+| ≥ 27.7 | 50% | **99.6%** |
+| ≥ 354 | 20% | 96.5% |
+| ≥ 1960 | 10% | 87.7% |
+
+Half the points cost 0.4% of the charge. The truth pane behaves quite
+differently — dropping its faintest 60% of deposits costs 61% of the dE —
+because truth deposits have no diffusion halo.
+
+#### What the energy column holds
+
+Nothing in the point columns says whether the energy column is true dE or
+measured charge, so the run writes it down as root attributes
+(`point_source`, `hit_energy`, `hit_x_from`, `readout_type`) and the viewers
+label the column from them. Guessing from the presence of negative values
+works on a busy event and fails on a quiet one.
 
 ---
 
@@ -333,6 +455,38 @@ if not np.isnan(p.kinetic_energy_start):  # float32 scalar check
 | `kUnknown` | Unclassified |
 
 ---
+
+### Choosing a reader
+
+Which kind of input a run reads is a Hydra config group, one file per
+arrangement, selected with `reader=`:
+
+| `reader=` | input | point cloud |
+|---|---|---|
+| `edepsim_h5` (default) | EDepSim only | every Geant4 energy-deposit step |
+| `jaxtpc_wire` | EDepSim + JAXTPC wire batch | deposits the readout detected |
+| `jaxtpc_pixel` | EDepSim + JAXTPC pixel batch | the same, or the detected pixel image via `reader.point_source=hits` |
+
+The two JAXTPC configs inherit `edepsim_h5`, so the dataset keys are written
+once, and each adds only what its own arrangement needs — `jaxtpc_wire` has
+no `point_source` or pixel-geometry options at all, because a wire plane has
+no 3-D image to convert.
+
+Particle metadata (PDG, track IDs, interaction type) always comes from the
+EDepSim file at `io.input_path`, whichever reader is selected. The JAXTPC
+configs mark their two input paths as required, so selecting one without
+them stops the run rather than quietly falling back to reading EDepSim:
+
+```
+This reader config is for JAXTPC input and needs reader.jaxtpc_seg_path and
+reader.jaxtpc_inst_path.  Pass them on the command line, e.g.
+    reader.jaxtpc_seg_path=batch/step/run/name_step_0000_00.h5
+    reader.jaxtpc_inst_path=batch/hits/run/name_hits_0000_00.h5
+Use reader=edepsim_h5 to read the EDepSim steps directly instead.
+```
+
+The full set of config groups is `io`, `reader`, `checker` and `conditions`;
+see [Step 0](#step-0--configuration).
 
 ### Step 0 — Configuration
 
@@ -686,6 +840,319 @@ Both merge stages operate within a single particle, so `dE` and `dX` both sum
 over a particle-voxel and **dE/dX is column 4 / column 5**, exactly. Guard
 against `dX == 0`: EDepSim writes zero-length steps, a few percent of voxels.
 
+### Wire and pixel readout
+
+JAXTPC simulates the two LArTPC readout geometries, and pysupera reads both
+through the same code path:
+
+| | wire | pixel |
+|---|---|---|
+| plane subgroups per volume | `U`, `V`, `Y` | `Pixel` |
+| what one hit records | a wire and a drift tick | two pixel indices and a drift tick |
+| hit centres in the hits file | `center_wires`, `center_times` | `center_py`, `center_pz`, `center_times` |
+| the image it forms | three 2-D projections | one natively 3-D image |
+
+**Nothing in the reader branches on this, and that is the point.** Visibility
+is a question about a *group* — JAXTPC's cluster of energy deposits — and a
+group is above threshold or it is not, regardless of how the readout that saw
+it was arranged. The filter reads `group_ids` and never looks at a hit
+centre, so a pixel batch needs no flag and no separate reader:
+
+```bash
+run_pysupera reader=jaxtpc_pixel \
+    io.input_path=edepsim.h5 io.output_path=out.h5 \
+    reader.jaxtpc_seg_path=batch/step/run/name_step_0000_00.h5 \
+    reader.jaxtpc_inst_path=batch/hits/run/name_hits_0000_00.h5
+```
+
+`reader=` selects the kind of input — see
+[Choosing a reader](#choosing-a-reader).
+
+The run banner prints which one it found (`[run]   readout : pixel`), read
+from the hits file's `config/readout_type`. A file without that attribute
+predates it and is wire — the same assumption JAXTPC's own loader makes.
+Plane subgroups are discovered structurally rather than by name, so a
+geometry neither project has named yet still resolves.
+
+What *does* differ is anything that draws hits: see
+[`vis_hits.html`](#vis_hitshtml--linking-3-d-to-the-readout) for the two
+readout panes, and `pysupera-hits-subset` for the centres each keeps.
+
+```python
+from pysupera.readers import read_readout_type
+import h5py
+with h5py.File("hits.h5") as f:
+    print(read_readout_type(f))          # 'wire' or 'pixel'
+```
+
+### Truth deposits or detected hits
+
+`reader.point_source` decides what a *point* is. The rest of the pipeline —
+defragmentation, proximity, conditions, partitioning — is identical either
+way; only the cloud changes.
+
+| | `deposits` (default) | `hits` |
+|---|---|---|
+| a point is | a Geant4 energy deposit the readout detected | a fired pixel |
+| geometry | truth geometry; the readout only selects | the detected image |
+| carries | thresholding | pixelation, diffusion, threshold, drift-time ambiguity |
+| points/event | 50k–143k | 1.4M–4.2M |
+| cost/event | ~1.6 s | ~7 s |
+| readout | wire or pixel | pixel only — a wire plane has no 3-D image |
+
+Each hit still has exactly one Geant4 particle: a CSR entry belongs to one
+group, and `group_to_track` gives each group one track. No nearest-neighbour
+matching is involved.
+
+```bash
+run_pysupera preset=cubic_pixel_hits \
+    io.input_path=edepsim.h5 io.output_path=out_hits.h5 \
+    reader.jaxtpc_seg_path=batch/step/run/name_step_0000_00.h5 \
+    reader.jaxtpc_inst_path=batch/hits/run/name_hits_0000_00.h5 \
+    reader.jaxtpc_sensor_path=batch/sensor/run/name_sensor_0000_00.h5
+```
+
+`preset=cubic_pixel_hits` is a bundle of the values that are only right
+together and that cut across config groups — the pixel geometry, the charge
+threshold, `particle.min_pc_size`, `distance_threshold` and
+`check_group_ownership`. Only the file paths stay on the command line, and
+any flag still overrides it.
+
+#### The charge threshold and `min_pc_size` are a matched pair
+
+JAXTPC applies no threshold worth the name — 1 electron — so without one
+every pixel carrying any induced-field influence becomes a point.
+`reader.hit_charge_threshold` cuts on the magnitude of the induced charge in
+electrons, matching JAXTPC's own encoder (the response is bipolar and ~16%
+of hits are negative signal).
+
+Cutting the halo also **thins the tracks**, which lowers the extent
+threshold, so the two move together:
+
+| `hit_charge_threshold` | track width | `min_pc_size` | agrees with truth@5 |
+|---|---|---|---|
+| 0 e⁻ | 13.1 mm | 85 | 99.0% |
+| **500 e⁻** *(preset)* | **6.5 mm** | **13** | **95.5%** |
+| 500 e⁻ | 6.5 mm | 85 *(mixed)* | 85.2% |
+
+Mixing them is worse than either. The uncut pairing keeps every electron and
+4.18M points per event; the preset's keeps 73.5% of the charge and 190k
+points, and runs 4× faster.
+
+#### The drift coordinate — `reader.hit_x_from`
+
+`y` and `z` are pure geometry and invert exactly, to half a pixel. `x` is
+drift time, and a tick counts from the start of the readout window — so it
+measures `t_drift + t0`, and `t0` is precisely what a real detector has to
+determine separately. Writing `T` for the time a hit's tick stands for,
+
+```
+T = (tick − reference_tick) · time_step
+```
+
+| | `nominal` (default) | `true_t0` |
+|---|---|---|
+| x | `x_anode ∓ T · v` | `x_anode ∓ (T − t0) · v` |
+| assumes | the interaction happened at the beam time | perfect knowledge of `t0` |
+| median distance to the truth cloud | 268 mm | **5.8 mm** (≈ one pixel) |
+| isolates | nothing — the full effect | pixelation, diffusion, threshold |
+
+`nominal` is what a detector can actually do. Its x is offset from the true x
+by exactly `drift_direction · v · t0` — the interaction's own Geant4 time
+turned into a displacement. Measured on the 10-event batch this was developed
+against: `t0` is constant within an interaction (median spread 0.000 μs, max
+0.531 μs → 0.85 mm) and differs *across* the interactions of one event by up
+to 1094 μs → **175 cm**. So `nominal` is a rigid translation per interaction:
+each keeps its own shape to sub-mm while whole interactions slide past one
+another. `true_t0` puts the real `t0` back and reproduces truth `x` to
+~0.3 mm, keeping every other detector effect.
+
+#### Recovering the true x — `points/true_x_shift`
+
+A wire-mode output stores truth geometry, so `x` is the true x. A pixel
+hit-mode output under `nominal` does not: every point is displaced along the
+drift axis by its interaction's own `t0`. The true position is kept anyway,
+as a displacement rather than a second coordinate:
+
+```python
+with read_events_v3("out_hits.h5") as store:
+    view  = store[0]
+    shift = store.true_x_shift(0)          # None for files written before this
+    true_x = view.points[:, 0] + shift
+```
+
+Zero throughout under `true_t0` and in deposit mode, so the relation holds
+for every file and a consumer never has to ask which convention produced it.
+
+It costs almost nothing because it is `drift_direction · t0 · v`, which takes
+one value per *(interaction, volume)* pair — 28 in a test event, not 4.2M.
+Measured on one event: 1.31 MB raw, **0.007 MB on disk under LZ4, 0.14% of
+the output**; 7 ms to compute over 4.18M hits; +16.7 MB transient memory.
+
+Stored per point rather than per particle because of a small but heavy
+exception. The shift is exactly constant within a particle for 99.97% of
+them — but the two that are not are cathode-crossing tracks with hits in
+both volumes, where `drift_direction` flips, and they carry **15% of all
+points** with internal spreads up to 204 mm.
+
+The stored rows are voxels, so a voxel could in principle mix two shifts;
+each takes the value of a hit that made it. Measured, 0.09% of voxels mix
+anything at all and the worst disagreement inside one is **0.05 mm** — the
+sub-microsecond `t0` jitter within an interaction. The 200 mm case never
+shares a voxel, because the nominal x is precisely what slides those two
+halves apart.
+
+#### The reference tick — `reader.hit_reference_tick`
+
+The tick at which a deposit sitting on the anode at Geant4 `t = 0` is
+recorded: the anchor the whole drift coordinate hangs from. It is kept
+separate from the anode because **a fit cannot tell the two apart** — the
+fitted intercept is `x_anode + drift_direction · mm_per_tick ·
+reference_tick`. So the anode is taken from the volume's stated extent
+(`config/volume_ranges`, which is geometry and not in doubt) and the
+reference tick is read off as what remains. On a run whose window opens at
+Geant4 t=0 it comes out at zero, which is the cross-check; on a run with a
+pre-window it comes out at the pre-window.
+
+Setting it explicitly overrides the derivation. The calibration residual
+still tests the *geometry* — pitch, velocity, drift direction, all
+measurements — but deliberately does **not** test the stated tick: that is a
+choice about where t=0 sits, and asking "what if the trigger were 100 ticks
+later" must not be reported as a broken detector. How far the choice sits
+from the data is reported as `reference_tick_offset_mm` instead.
+
+#### What the readout window hides
+
+The reference tick also decides whether points can leave the detector. On
+this batch `num_time_steps = 2701` and one tick is 0.8 mm, so the recordable
+ticks 0…2700 span exactly 2160 mm — one full drift — and map precisely onto
+`[anode, cathode]`. A nominal x therefore **cannot** fall outside the volume
+(measured: 0.04% do, by a few mm at the edges).
+
+Instead the t0 displacement pushes charge off the *end of the window*, where
+it is never recorded at all. And that turns out to be almost the whole story
+of what "visible" means in this data:
+
+| event / volume | deposits | masked | past the window | of the masked, past the window |
+|---|---|---|---|---|
+| 0 / 0 | 83,997 | 26.6% | 25.8% | **97.0%** |
+| 0 / 1 | 132,430 | 38.2% | 37.6% | **98.1%** |
+| 1 / 0 | 173,903 | 86.4% | 86.2% | **99.7%** |
+| 1 / 1 | 99,822 | 73.5% | 73.0% | **99.4%** |
+
+So a deposit is invisible here because the readout had closed, not because it
+was below threshold. Both point sources lose the same charge for the same
+reason, which is what makes them comparable — but it also means this batch
+says very little about *threshold* effects. Move the reference tick, or
+lengthen the window past one full drift, and the displacement becomes visible
+as out-of-volume points instead. Both are counted in the run report and
+neither is clipped: a nominal x is an inference, and clipping it would invent
+a wall the reconstruction does not have.
+
+#### The energy column — `reader.hit_energy`
+
+`charge` (default) is what the readout measured. The response is bipolar, so
+about 16% of hits carry negative charge; that is signal, not error.
+`true_de` instead shares each group's true deposited energy over its hits in
+proportion to `|charge|` — comparable with deposit mode's column, at the cost
+of putting a truth quantity into a detected cloud. **`dx` is 0 in both
+cases**: a hit is a pixel and a tick, and has no path length, so anything
+reading dE/dx sees zero.
+
+#### Geometry — configured, then audited
+
+The pixel geometry is **stated in configuration and checked against the
+data**, never measured from it. The order matters: a constant derived from
+the same truth it is later compared against cannot fail for a geometry that
+is wrong but linear — the fit simply absorbs the error, and a detector
+effect this mode exists to measure is calibrated away instead of measured.
+
+| | source |
+|---|---|
+| anode face | `config/volume_ranges` in the hits file — read for you |
+| drift velocity, sampling period | the JAXTPC **sensor** file, via `reader.jaxtpc_sensor_path` |
+| pixel pitch, drift direction | `reader.pixel_pitch_mm`, `reader.pixel_drift_direction` — no output file records these |
+| reference tick | `reader.hit_reference_tick`, default 0 |
+
+The reader applies them as given, converts each group's hit centre, and
+measures the distance to the deposits behind it. A disagreement raises,
+naming the offending number *and* what the data says it should be:
+
+```
+[run] Pixel geometry  (2 volume(s))
+  volume 0  [stated]  pitch 4.3200 mm  v 1.6000 mm/us  dt 0.5000 us  drift -1  anode -2160.0 mm  ref tick 0
+             data says  pitch 4.3200 mm  v 1.5999 mm/us  dt 0.5000 us  drift -1
+             residual   x 0.33   y 1.07   z 1.06 mm   over 14,165 groups
+```
+
+Run hit mode without the constants once and the error lists what the data is
+consistent with, so the config can be written from it and verified on the
+next run. `reader.pixel_geometry_from_fit=true` measures them instead — off
+by default and deliberately awkward, because it makes the check circular.
+
+The reference tick is the one constant **not** audited: it is a choice about
+where t=0 sits, not a measurement, so asking "what if the trigger were 100
+ticks later" must not be reported as a broken detector. Its distance from
+the data is reported as `reference_tick_offset_mm` instead.
+
+`reader.pixel_geometry_report` returns all of this per volume after the
+first read.
+
+#### `min_pc_size` is a voxel count, and needs re-deriving per readout
+
+`min_pc_size` decides whether a particle is a low-energy scatter. It counts
+**occupied voxels**, not rows — row count is a property of the input
+sampling rather than of the particle, and Geant4 deposits arrive every
+0.3 mm where pixel sensor hits arrive on a 4.32 mm grid. The same particle
+is 1 row in one and 40 in the other, so a threshold in rows silently
+re-tunes itself when `point_source` changes.
+
+The value follows from a physical rule: a chunk of ionisation is worth
+calling a trajectory only when its direction can be read off it, which needs
+it to be longer than it is wide. So the threshold is the cell count of a
+blob one track-width across, `(width / voxel_size)³`.
+
+| input | track width | implied threshold |
+|---|---|---|
+| truth deposits | 4.9 mm | (4.9/3)³ ≈ **5** — the default |
+| pixel sensor hits | 12.8 mm | (12.8/3)³ ≈ 77, best fit **85** |
+
+A track is 3.2× thicker in the pixel image, which is diffusion plus the
+field response over about three pixel pitches. Measured over ten events, the
+best-agreeing cut per event ranged 81–90, and at a fixed 85 the sensor-hit
+labelling matches the truth-deposit labelling on **99.0%** of particles
+(worst event 98.5%) — not merely the same fraction, the same particles. So
+with `reader.point_source=hits`, set `particle.min_pc_size=85`; a run that
+forgets warns.
+
+Note this also changed truth-deposit labelling, from 85.8% to 95.3% LE,
+because particles spread over a handful of rows inside one or two voxels are
+now correctly measured as non-directional.
+
+#### Two things that change in hit mode
+
+**`distance_threshold` must clear the pixel diagonal.** At a 4.32 mm pitch,
+a threshold of 5.2 mm is barely one pixel, so a single missing pixel severs a
+track and defragmentation ends up measuring the grid rather than the physics.
+Event 0, one event:
+
+| `distance_threshold` | deposits: particles w/ points → partitions | hits: particles w/ points → partitions |
+|---|---|---|
+| 5.2 mm | 6,900 → 2,519 | 13,308 → 7,181 |
+| 6.2 mm (> diagonal 6.11) | 6,900 → 2,495 | 8,845 → 3,924 |
+| 8.0 mm | 6,900 → 2,426 | 8,128 → 3,197 |
+| 10.0 mm | 6,900 → 2,349 | 7,372 → 2,555 |
+
+Deposit mode never splits at all — 0.3 mm deposit spacing keeps a track
+connected at any of these thresholds.
+
+**A group can straddle a fragment split.** The `groups/` table rests on the
+invariant that it cannot, which holds for deposits (0 of 354,959) and does
+*not* hold for hits: the readout leaves gaps the deposit cloud does not have,
+defragmentation cuts there, and 1.84% of groups end up on both sides.
+`check_group_ownership=false` is therefore required in hit mode, and the run
+resolves each straddled group by majority and reports how many there were.
+
 ### Hit provenance (JAXTPC mode)
 
 Which readout hits belong to which reconstructed object. A hit is the
@@ -697,9 +1164,14 @@ with read_events_v3("out.h5") as store:
     frag_owner, is_le, vol_offsets = store.group_owners(ev)
 
 groups = np.flatnonzero(frag_owner == my_fragment_id)
-gid    = inst_file[f"event_{ev:03d}/volume_0/U/group_ids"][:] + vol_offsets[0]
+plane  = "Pixel"      # or "U" / "V" / "Y" for wire readout
+gid    = inst_file[f"event_{ev:03d}/volume_0/{plane}/group_ids"][:] + vol_offsets[0]
 hits   = np.flatnonzero(np.isin(gid, groups))
 ```
+
+The join is the same either way — a hit names its group, and `groups/` names
+the group's owner — so only the plane name changes between readouts. See
+[Wire and pixel readout](#wire-and-pixel-readout).
 
 Both arrays are indexed by event-global group number, `-1` where nothing
 claims the group; `vol_offsets` shifts a plane's local group number into that

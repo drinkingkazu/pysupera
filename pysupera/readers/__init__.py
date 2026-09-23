@@ -22,11 +22,23 @@ Available readers
       dE, dx, t0, charge, …).
     * **JAXTPC inst HDF5** — per-readout-plane correspondence data used to
       determine which segments were visible above the signal threshold.
+      Both JAXTPC readout geometries are read by the same code path:
+      **wire** (``U``/``V``/``Y`` planes, three 2-D projections) and
+      **pixel** (a single ``Pixel`` plane, natively 3-D).  Use
+      :func:`read_readout_type` to tell them apart.
 
     Each particle's point cloud contains **only** the energy-deposit segments
     that survived the JAXTPC readout threshold ("visible" segments).
     Hydra config group: ``reader: edepsim_h5`` with optional
     ``reader.jaxtpc_seg_path`` / ``reader.jaxtpc_inst_path`` flags.
+
+    ``point_source`` chooses what a point is.  ``'deposits'`` (default) is
+    the above: truth geometry, with the readout deciding only which deposits
+    survive.  ``'hits'`` replaces the cloud with the *detected image* --
+    every fired pixel, converted from ``(py, pz, tick)`` back to
+    ``(x, y, z)`` -- so the partitioner sees pixelation, diffusion,
+    threshold and the drift-time ambiguity.  Pixel readout only; see
+    :mod:`pysupera.readers.pixel_hits`.
 
 All readers implement the :class:`EventReaderBase` interface which supports:
 
@@ -67,10 +79,22 @@ JAXTPC (visibility-filtered)::
 
 from .base import EventReaderBase
 from .format_edepsim_h5 import EDepSimHDF5Reader
-from .format_jaxtpc import JaxtpcHDF5Reader
+from .format_jaxtpc import (
+    JaxtpcHDF5Reader,
+    READOUT_PLANE_NAMES,
+    read_readout_type,
+)
+from .pixel_hits import (
+    PixelGeometryError,
+    VolumePixelGeometry,
+)
 
 __all__ = [
     "EventReaderBase",
     "EDepSimHDF5Reader",
     "JaxtpcHDF5Reader",
+    "READOUT_PLANE_NAMES",
+    "read_readout_type",
+    "PixelGeometryError",
+    "VolumePixelGeometry",
 ]

@@ -15,6 +15,7 @@ Layout
     events/offsets   (n_events+1,) int64   particle rows per event
     points/offsets   (n_events+1,) int64   point rows per event
     points/flat      (N, 6) float32        x, y, z, time, dE, dX
+    points/true_x_shift (N,) float32       true_x = flat[:, 0] + this
     particles/<col>  (M,)                  see _INT32 / _INT8 / _INT64
     inter/offsets    (n_events+1,) int64   interaction rows per event
     inter/<col>      (K,)                  see _INTER
@@ -143,6 +144,15 @@ class EventWriterV3:
             "flat", shape=(0, _PT_NDIM), maxshape=(None, _PT_NDIM),
             dtype=np.float32, chunks=(_chunk_rows(_PT_NDIM), _PT_NDIM),
             **self._ckw)
+        # true_x = flat[:, 0] + true_x_shift.  Only pixel hit mode with a
+        # nominal t0 puts anything but zero here, and it takes as many
+        # distinct values as there are (interaction, volume) pairs -- 28 in a
+        # test event -- so it costs about 1.5% of the file under LZ4.  A
+        # separate dataset rather than a seventh column so that every reader
+        # of the (N, 6) layout keeps working untouched.
+        f["points"].create_dataset(
+            "true_x_shift", shape=(0,), maxshape=(None,),
+            dtype=np.float32, chunks=(_chunk_rows(1),), **self._ckw)
         g = f.create_group("inter")
         g.create_dataset("offsets", data=np.zeros(1, dtype=np.int64),
                          maxshape=(None,), chunks=(rows,))
@@ -224,6 +234,19 @@ class EventWriterV3:
         vidx.resize(vidx.shape[0] + 1, axis=0)
         vidx[-1] = self._n_voloff
 
+    def set_meta(self, meta: dict) -> None:
+        """
+        Record how this file was produced, as root attributes.
+
+        Only a handful of short strings, but they remove a guess: nothing in
+        the point columns says whether the energy column holds true dE or
+        measured charge, and a viewer that has to infer it from the presence
+        of negative values gets it wrong on a quiet event.
+        """
+        for k, v in meta.items():
+            if v is not None:
+                self._f.attrs[str(k)] = str(v)
+
     def append_event(self, layout):
         """Append one event described by an :class:`~pysupera.layout.EventLayout`."""
         cols = layout.columns
@@ -244,6 +267,20 @@ class EventWriterV3:
                     block[cursor:cursor + k, :take] = pc[:, :take]
                 cursor += k
             pts[self._n_points:self._n_points + n_pts] = block
+
+        shift = self._f["points"].get("true_x_shift")
+        if shift is not None:
+            shift.resize(self._n_points + n_pts, axis=0)
+            if n_pts:
+                sblock = np.zeros(n_pts, dtype=np.float32)
+                cursor = 0
+                for p in layout.order:
+                    k = len(p.point_cloud)
+                    v = getattr(p, "true_x_shift", None)
+                    if k and v is not None and len(v) == k:
+                        sblock[cursor:cursor + k] = v
+                    cursor += k
+                shift[self._n_points:self._n_points + n_pts] = sblock
 
         # ---- particle columns ---------------------------------------------
         base = self._n_points
@@ -452,6 +489,21 @@ class EventStoreV3:
                     v = np.where(v >= 0, v - a, -1).astype(v.dtype)
                 inter[c] = v
         return EventView(cols, self._f["points/flat"][pa:pb], ev, inter)
+
+    def true_x_shift(self, ev):
+        """
+        Per point, what to add to ``x`` to recover the true drift position.
+
+        ``true_x = view.points[:, 0] + store.true_x_shift(ev)``.  Zero
+        everywhere except a pixel hit-mode run read with a nominal t0, and
+        absent from files written before the column existed.
+        """
+        ds = self._f["points"].get("true_x_shift")
+        if ds is None:
+            return None
+        po = self._f["points/offsets"]
+        a, b = int(po[ev]), int(po[ev + 1])
+        return ds[a:b]
 
     def _read_legacy_particles(self, a, b):
         """
