@@ -343,3 +343,265 @@ class TestInteractions:
         got = v.interaction_of(0)
         assert got["vertex_id"] == v.interactions["vertex_id"][
             int(v["interaction_id"][0])]
+
+
+class TestRangesHoldOnlyOwnRows:
+    """
+    A group's range is computed from where its members sit, so it is only
+    right while they sit together.  These pin the two ways that failed.
+    """
+
+    @staticmethod
+    def le(p):
+        from pysupera.utils import SemanticType
+        p.sem_type = SemanticType.kLEScatter
+        return p
+
+    def test_empty_fragment_of_an_unwritten_instance_claims_nothing(self):
+        """
+        Fragment 10659 in a real event: a photon and its Compton electrons,
+        all without points (their interaction happened after the readout
+        window), merged by PhotonDecay.  No instance of theirs is written,
+        so each member sorted under its own id -- around a particle that did
+        have points -- and the range from first to last member claimed them.
+        """
+        empty = np.zeros((0, 6), dtype=np.float32)
+        a1 = self.le(make_particle(1, PT_TRACK, pc=empty, interaction_id=0))
+        b2 = self.le(make_particle(2, PT_TRACK, n_pts=5, interaction_id=0))
+        a3 = self.le(make_particle(3, PT_TRACK, pc=empty, interaction_id=0))
+        a1.member_ids, b2.member_ids = [1, 3], [2]
+        frags = snapshot_groups([a1, b2])
+        lay = build_layout([a1, b2, a3], frags, [])
+        cols = {int(i): k for k, i in enumerate(lay.columns["id"])}
+        # the empty fragment gets no row, and no range anywhere claims more
+        # than the 5 rows that exist
+        assert 1 not in cols
+        k = cols[2]
+        c = lay.columns
+        assert (c["frag_pc_le_start"][k], c["frag_pc_le_end"][k]) == (0, 5)
+
+    def test_a_cross_interaction_absorption_is_stored_with_the_absorber(self):
+        """
+        AbsorbLEScatter can take an LE particle from interaction 0 into a
+        track from interaction 1.  The absorber is the representative: the
+        points become its fragment's, instance's and interaction's, stored
+        in one block.  The absorbed particle keeps its own identity -- its
+        row stays with interaction 0 and carries interaction 0.
+        """
+        from pysupera.io_v3 import check_ranges
+        b = make_particle(1, PT_TRACK, n_pts=3, interaction_id=1)
+        a = self.le(make_particle(2, PT_TRACK, n_pts=2, interaction_id=0))
+        c = make_particle(3, PT_TRACK, n_pts=4, interaction_id=0,
+                          parent_id=2, ancestor_id=2)   # keeps a's row stored
+        b.member_ids, c.member_ids = [1, 2], [3]
+        frags = snapshot_groups([b, c])
+        insts = snapshot_groups([b, c])
+        lay = build_layout([b, a, c], frags, insts)
+        col, row = lay.columns, {int(i): k for k, i in
+                                 enumerate(lay.columns["id"])}
+        rb = row[1]
+        # a's points are b's: inside b's instance (LE side) and fragment
+        assert col["inst_pc_le_end"][rb] - col["inst_pc_le_start"][rb] == 2
+        assert col["frag_pc_le_end"][rb] - col["frag_pc_le_start"][rb] == 2
+        # the absorbed particle's row keeps interaction 0, beside c's
+        assert 2 in row
+        inter = lay.interactions
+        k0 = int(np.flatnonzero(inter["vertex_id"] == 0)[0])
+        k1 = int(np.flatnonzero(inter["vertex_id"] == 1)[0])
+        assert col["interaction_id"][row[2]] == k0
+        assert inter["part_start"][k0] <= row[2] < inter["part_end"][k0]
+        assert inter["part_start"][k0] <= row[3] < inter["part_end"][k0]
+        # and the points count toward interaction 1: 3 of b's and 2 of a's
+        assert inter["pc_end"][k1] - inter["pc_start"][k1] == 5
+        assert inter["pc_end"][k0] - inter["pc_start"][k0] == 4
+
+    def test_a_group_whose_members_sort_apart_is_refused(self):
+        """
+        The invariant behind every range: a group's members sit together.
+        A fragment whose members were put in two different instances breaks
+        it, and the layout must refuse rather than write a range that
+        swallows another particle's rows.
+        """
+        from pysupera.layout import LayoutError
+        p1 = make_particle(1, PT_TRACK, n_pts=3, interaction_id=0)
+        p2 = make_particle(2, PT_TRACK, n_pts=3, interaction_id=0)
+        p3 = make_particle(3, PT_TRACK, n_pts=3, interaction_id=0)
+        # fragment {1, 3}, but 1 and 3 in different instances, with 2 in
+        # 1's: the instance order puts 2 between the fragment's members
+        p1.member_ids, p2.member_ids = [1, 3], [2]
+        frags = snapshot_groups([p1, p2])
+        p1.member_ids, p3.member_ids = [1, 2], [3]
+        insts = snapshot_groups([p1, p3])
+        with pytest.raises(LayoutError, match="not contiguous"):
+            build_layout([p1, p2, p3], frags, insts)
+
+
+class TestCheckRanges:
+
+    def test_a_clean_file_passes(self, tmp_path):
+        from pysupera.io_v3 import check_ranges
+        assert check_ranges(write(tmp_path, events=[chain_event()] * 2)) == []
+
+    def test_an_overlapping_fragment_slice_is_reported(self, tmp_path):
+        from pysupera.io_v3 import check_ranges
+        path = write(tmp_path)
+        with read_events_v3(path) as s:
+            v = s[0]
+            frags = np.flatnonzero(v.is_fragment & (v["frag_pc_end"] > v["frag_pc_start"]))
+        assert len(frags) >= 2
+        # stretch one fragment's range over its neighbour, as the bug did
+        with h5py.File(path, "a") as f:
+            a, b = frags[:2]
+            lo = min(f["particles/frag_pc_start"][a], f["particles/frag_pc_start"][b])
+            hi = max(f["particles/frag_pc_end"][a], f["particles/frag_pc_end"][b])
+            f["particles/frag_pc_start"][a] = lo
+            f["particles/frag_pc_end"][a] = hi
+        found = check_ranges(path)
+        assert found and found[0][:3] == (0, "points", "frag")
+
+
+class TestGroupOfPoints:
+
+    def test_every_point_gets_its_fragment_and_instance(self, tmp_path):
+        path = write(tmp_path)
+        with read_events_v3(path) as s:
+            v = s[0]
+            frag = v.group_of_points("frag")
+            inst = v.group_of_points("inst")
+            assert len(frag) == len(v.points) == len(inst)
+            # chain_event: fragment {1, 2} (5 points), fragment {3} (4),
+            # one instance headed by 1 holding all 9
+            assert sorted(np.unique(frag, return_counts=True)[1].tolist()) == [4, 5]
+            assert set(frag.tolist()) == {1, 3}
+            assert (inst == 1).all()
+
+class TestPointsStorage:
+    """How points/flat is stored: invisible to a reader, apart from precision."""
+
+    def test_round_mantissa_bounds_the_relative_error(self):
+        from pysupera.io_v3 import round_mantissa
+        rng = np.random.default_rng(1)
+        a = (rng.standard_normal(100_000) * 10.0 ** rng.uniform(-3, 5, 100_000)
+             ).astype(np.float32)
+        r = round_mantissa(a, 7)
+        assert r.dtype == np.float32
+        assert np.max(np.abs(r - a) / np.abs(a)) <= 2.0 ** -8 + 1e-7
+        special = np.array([0.0, np.inf, -np.inf, np.nan], dtype=np.float32)
+        out = round_mantissa(special, 7)
+        assert out[0] == 0 and np.isinf(out[1]) and np.isinf(out[2]) and np.isnan(out[3])
+
+    def test_column_chunks_and_rounding_are_plain_hdf5(self, tmp_path):
+        """A bare h5py read sees an ordinary (N, 6) float32 array."""
+        import hdf5plugin  # noqa: F401 -- the filter plugin, as for LZ4
+        parts, frags, insts = chain_event()
+        for p in parts:
+            if len(p.point_cloud):
+                pc = np.zeros((len(p.point_cloud), 6), dtype=np.float32)
+                pc[:, :3] = p.point_cloud[:, :3]
+                pc[:, 4] = 1234.5678
+                p.point_cloud = pc
+        path = str(tmp_path / "cols.h5")
+        with open_writer_v3(path, points=dict(chunks="columns", bitshuffle=True,
+                                              energy_mantissa_bits=7)) as w:
+            w.append_event(build_layout(parts, frags, insts))
+        with h5py.File(path) as f:
+            d = f["points/flat"]
+            assert d.shape[1] == 6 and d.dtype == np.float32
+            assert d.chunks[1] == 1 and "32008" in d._filters
+            q = d[:, 4]
+        assert np.all(np.abs(q - 1234.5678) / 1234.5678 <= 2.0 ** -8)
+
+    def test_repack_keeps_the_bitshuffle_filter(self, tmp_path):
+        from pysupera.io import repack
+        path = str(tmp_path / "cols.h5")
+        with open_writer_v3(path, points=dict(chunks="columns", bitshuffle=True)) as w:
+            parts, frags, insts = chain_event()
+            w.append_event(build_layout(parts, frags, insts))
+        repack(path)
+        with h5py.File(path) as f:
+            assert "32008" in f["points/flat"]._filters
+            assert f["points/flat"].chunks[1] == 1
+
+
+
+class TestColumnsAndHitLabels:
+    """points/columns names points/flat; hit_labels aligns with the hits CSR."""
+
+    def test_point_columns_are_named_in_the_file(self, tmp_path):
+        from pysupera.io_v3 import DEFAULT_POINT_COLUMNS
+        cols = ("x", "y", "z", "t", "dE", "dX", "theta", "phi", "p")
+        for columns, want in ((None, DEFAULT_POINT_COLUMNS), (cols, cols)):
+            path = str(tmp_path / f"c{len(want)}.h5")
+            with open_writer_v3(path, columns=columns) as w:
+                parts, frags, insts = chain_event()
+                w.append_event(build_layout(parts, frags, insts))
+            with h5py.File(path) as f:
+                assert f["points/flat"].shape[1] == len(want)
+                names = tuple(c.decode() if isinstance(c, bytes) else c
+                              for c in f["points/columns"][()])
+                assert names == want
+            with read_events_v3(path) as st:
+                assert st.point_columns == want
+
+    @staticmethod
+    def labels(n0, n1, sensor=False):
+        out = []
+        for v, n in ((0, n0), (1, n1)):
+            d = {"volume": v, "plane": 0, "source": "Pixel",
+                 "fragment_id": np.arange(n, dtype=np.int32) - 1,
+                 "instance_id": np.full(n, 7, dtype=np.int32),
+                 "is_le": np.arange(n) % 2 == 0}
+            if sensor:
+                d["on_sensor"] = d["fragment_id"] >= 0
+            out.append(d)
+        return out
+
+    def test_hit_labels_round_trip_per_event(self, tmp_path):
+        path = str(tmp_path / "lab.h5")
+        with open_writer_v3(path) as w:
+            for n0, n1 in ((3, 2), (1, 4)):
+                parts, frags, insts = chain_event()
+                w.append_event(build_layout(parts, frags, insts))
+                w.append_hit_labels(self.labels(n0, n1, sensor=True))
+        with h5py.File(path) as f:
+            g = f["hit_labels/volume1/plane0"]
+            assert g.attrs["source"] == "Pixel"
+            np.testing.assert_array_equal(g["offsets"][:], [0, 2, 6])
+            assert g["is_le"].dtype == bool
+        with read_events_v3(path) as st:
+            ev1 = st.hit_labels(1)
+            assert set(ev1) == {(0, 0), (1, 0)}
+            np.testing.assert_array_equal(ev1[(1, 0)]["fragment_id"], [-1, 0, 1, 2])
+            np.testing.assert_array_equal(ev1[(1, 0)]["on_sensor"],
+                                          [False, True, True, True])
+
+    def test_a_plane_appearing_late_is_refused(self, tmp_path):
+        path = str(tmp_path / "lab.h5")
+        with open_writer_v3(path) as w:
+            parts, frags, insts = chain_event()
+            w.append_event(build_layout(parts, frags, insts))
+            w.append_hit_labels(self.labels(1, 1)[:1])
+            with pytest.raises(ValueError, match="first appear"):
+                w.append_hit_labels(self.labels(1, 1))
+
+    def test_a_fragment_row_names_its_instance(self, tmp_path):
+        parts, frags, insts = chain_event()
+        lay = build_layout(parts, frags, insts)
+        c = lay.columns
+        row = {int(i): k for k, i in enumerate(c["id"])}
+        # chain_event: fragments {1, 2} and {3} both inside instance 1
+        assert c["frag_inst_id"][row[1]] == 1 and c["frag_inst_id"][row[3]] == 1
+
+    def test_keep_gives_a_row_to_a_pointless_fragment(self):
+        """
+        A fragment a hit is labelled with must get a row even with no points.
+        Particle 0 of chain_event has none; drop it from every ancestry by
+        making it its own primary and it only gets a row through keep.
+        """
+        parts, frags, insts = chain_event()
+        for p in parts:
+            if int(p.id) == 1:
+                p.parent_id = 1
+        ids = lambda lay: {int(i) for i in lay.columns["id"]}
+        assert 0 not in ids(build_layout(parts, frags, insts))
+        assert 0 in ids(build_layout(parts, frags, insts, keep={0}))

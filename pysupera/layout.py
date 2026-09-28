@@ -20,9 +20,14 @@ Two invariants it establishes
 -----------------------------
 *Nesting.*  Points are ordered by ``(interaction, instance, fragment,
 particle)``.  Because instances partition into fragments and fragments into
-particles -- verified against real events -- every level's points are then a
-single contiguous slice, so one ``(start, end)`` pair per level suffices and no
-per-point group labels are needed.
+particles, every level's points are then a single contiguous slice, so one
+``(start, end)`` pair per level suffices and no per-point group labels are
+needed.  That is checked on every event rather than assumed: each range must
+hold exactly its members' own rows, or the layout raises
+:class:`LayoutError`.  It once failed silently -- an empty fragment of an
+unwritten instance, whose members sorted apart, claimed the rows of the
+particles between them -- and it would again for a group whose members span
+two interactions.
 
 *Walkable genealogy.*  Only a fraction of Geant4 particles are stored, so a
 stored particle's true parent may be absent.  ``parent_id`` is therefore
@@ -106,7 +111,109 @@ def _group_of(groups):
     return out
 
 
-def build_layout(particles, frag_groups, inst_groups, vertices=None):
+def _offsets(order, attr):
+    """Fencepost over the per-particle arrays named *attr*, in *order*."""
+    n = np.fromiter((len(getattr(p, attr, None) if getattr(p, attr, None)
+                         is not None else ()) for p in order),
+                    dtype=np.int64, count=len(order))
+    out = np.zeros(len(order) + 1, dtype=np.int64)
+    np.cumsum(n, out=out[1:])
+    return out
+
+
+class LayoutError(ValueError):
+    """A group range that would not describe exactly its own members' rows."""
+
+
+def _group_ranges(offsets, pos, frag_groups, inst_groups, is_le):
+    """
+    Every group's slice of one cloud, given its per-particle *offsets*.
+
+    A group's members *with rows* are contiguous under the storage order, so
+    min(start) / max(end) over them describes the block exactly.  Members
+    without rows are left out: they still occupy a position, and one of an
+    unwritten instance's fragments sorts under its own id, so counting it
+    would stretch the range over whatever particles sit in between -- rows
+    the group does not own.  A group with no rows at all gets (-1, -1).
+    Returns ``(frag_rng, inst_rng, frag_nle, frag_le, inst_split)``.
+    """
+    def _span(members):
+        """Range covering *members*' rows, or (-1, -1) when they have none."""
+        idx = [pos[m] for m in members
+               if m in pos and offsets[pos[m] + 1] > offsets[pos[m]]]
+        if not idx:
+            return (-1, -1)
+        lo, hi = min(idx), max(idx)
+        return (int(offsets[lo]), int(offsets[hi + 1]))
+
+    def whole(groups):
+        rng = {}
+        for g in groups:
+            r = _span(g.member_ids)
+            rng[g.rep_id] = (0, 0) if r == (-1, -1) else r
+        return rng
+
+    frag_rng = whole(frag_groups)
+    inst_rng = whole(inst_groups)
+
+    # Each side of a group is a single run under this ordering, so two pairs
+    # describe a fragment completely -- never three.
+    frag_nle = {g.rep_id: _span([m for m in g.member_ids if not is_le[m]])
+                for g in frag_groups}
+    frag_le  = {g.rep_id: _span([m for m in g.member_ids if is_le[m]])
+                for g in frag_groups}
+    # Where the LE block starts inside an instance; == its end when the
+    # instance has no LE rows at all.
+    inst_split = {}
+    for g in inst_groups:
+        le_span = _span([m for m in g.member_ids if is_le[m]])
+        inst_split[g.rep_id] = (inst_rng[g.rep_id][1] if le_span[0] < 0
+                                else le_span[0])
+    _check_ranges(offsets, pos, frag_groups, inst_groups, is_le,
+                  frag_nle, frag_le, inst_rng, inst_split)
+    return frag_rng, inst_rng, frag_nle, frag_le, inst_split
+
+
+def _check_ranges(offsets, pos, frag_groups, inst_groups, is_le,
+                  frag_nle, frag_le, inst_rng, inst_split):
+    """
+    Raise unless every range holds exactly its own members' rows.
+
+    Contiguity is what makes a (start, end) pair enough, and it rests on the
+    storage order keeping each group together -- an assumption, not a law:
+    a group whose members sort apart (members of two interactions, say)
+    would get a range spanning other particles' rows.  Comparing each width
+    with the members' own counts catches every such case, and costs one
+    pass over data already in hand.
+    """
+    def own(members, le):
+        return sum(int(offsets[pos[m] + 1] - offsets[pos[m]])
+                   for m in members if m in pos and is_le[m] is le)
+
+    def width(r):
+        return r[1] - r[0] if r[0] >= 0 else 0
+
+    for g in frag_groups:
+        for le, r in ((False, frag_nle[g.rep_id]), (True, frag_le[g.rep_id])):
+            if width(r) != own(g.member_ids, le):
+                raise LayoutError(
+                    f"fragment {g.rep_id}: {'LE' if le else 'non-LE'} range "
+                    f"{r} holds {width(r)} rows but its members own "
+                    f"{own(g.member_ids, le)} -- they are not contiguous in "
+                    f"the storage order.")
+    for g in inst_groups:
+        (s, e), sp = inst_rng[g.rep_id], inst_split[g.rep_id]
+        got = ((sp - s, e - sp) if e > s else (0, 0))
+        want = (own(g.member_ids, False), own(g.member_ids, True))
+        if got != want:
+            raise LayoutError(
+                f"instance {g.rep_id}: ranges hold {got} (non-LE, LE) rows "
+                f"but its members own {want} -- they are not contiguous in "
+                f"the storage order.")
+
+
+def build_layout(particles, frag_groups, inst_groups, vertices=None,
+                 keep=()):
     """
     Decide storage order, row selection and group ranges for one event.
 
@@ -127,6 +234,9 @@ def build_layout(particles, frag_groups, inst_groups, vertices=None):
         stored particle references are dropped and the survivors renumbered,
         so ``interaction_id`` is a direct row index into the interactions
         table rather than a value that has to be searched for.
+    keep : iterable of int
+        Particle ids that must get a row whatever their points -- the
+        fragments and instances something else refers to (hit_labels).
 
     Returns
     -------
@@ -146,9 +256,21 @@ def build_layout(particles, frag_groups, inst_groups, vertices=None):
     # The cost is that a fragment's points become two runs rather than one.
     is_le = {int(p.id): (p.sem_type is _LE_SEM) for p in particles}
 
+    # Points belong to the interaction of the group that owns them, not of
+    # the particle that deposited them.  The two differ only when a
+    # proximity merge (AbsorbLEScatter, CombineLEScatters) took a particle
+    # from one interaction into a representative from another: its points
+    # are then the representative's, and are stored with them.  The
+    # particle itself keeps its own interaction -- see the row order below.
+    def group_interaction(pid):
+        rep = inst_of[pid] if pid in inst_of else frag_of.get(pid, pid)
+        return int(by_id[rep if rep in by_id else pid]._interaction_id)
+
+    point_inter = {int(p.id): group_interaction(int(p.id)) for p in particles}
+
     def sort_key(p):
         pid = int(p.id)
-        return (int(p._interaction_id),
+        return (point_inter[pid],
                 inst_of.get(pid, pid),
                 is_le[pid],
                 frag_of.get(pid, pid),
@@ -157,46 +279,10 @@ def build_layout(particles, frag_groups, inst_groups, vertices=None):
     order = sorted(particles, key=sort_key)
     pos = {int(p.id): k for k, p in enumerate(order)}
 
-    n_pts = np.fromiter((len(p.point_cloud) for p in order),
-                        dtype=np.int64, count=len(order))
-    pc_offsets = np.zeros(len(order) + 1, dtype=np.int64)
-    np.cumsum(n_pts, out=pc_offsets[1:])
+    pc_offsets = _offsets(order, "point_cloud")
+    frag_rng, inst_rng, frag_nle, frag_le, inst_split = _group_ranges(
+        pc_offsets, pos, frag_groups, inst_groups, is_le)
 
-
-    # ---- group point ranges ----------------------------------------------
-    # Contiguous by construction, so min(start) / max(end) over the members
-    # describes the block exactly.
-    def _span(members):
-        """Point range covering *members*, or (-1, -1) when there are none."""
-        idx = [pos[m] for m in members if m in pos]
-        if not idx:
-            return (-1, -1)
-        lo, hi = min(idx), max(idx)
-        return (int(pc_offsets[lo]), int(pc_offsets[hi + 1]))
-
-    def group_ranges(groups):
-        rng = {}
-        for g in groups:
-            r = _span(g.member_ids)
-            rng[g.rep_id] = (0, 0) if r == (-1, -1) else r
-        return rng
-
-    frag_rng = group_ranges(frag_groups)
-    inst_rng = group_ranges(inst_groups)
-
-    # Each side of a group is a single run under this ordering, so two pairs
-    # describe a fragment completely -- never three.
-    frag_nle = {g.rep_id: _span([m for m in g.member_ids if not is_le[m]])
-                for g in frag_groups}
-    frag_le  = {g.rep_id: _span([m for m in g.member_ids if is_le[m]])
-                for g in frag_groups}
-    # Where the LE block starts inside an instance; == inst_pc_end when the
-    # instance has no LE points at all.
-    inst_split = {}
-    for g in inst_groups:
-        le_span = _span([m for m in g.member_ids if is_le[m]])
-        inst_split[g.rep_id] = (inst_rng[g.rep_id][1] if le_span[0] < 0
-                                else le_span[0])
     frag_count = {g.rep_id: len(g.member_ids) for g in frag_groups}
     inst_count = {g.rep_id: len(g.member_ids) for g in inst_groups}
 
@@ -220,8 +306,14 @@ def build_layout(particles, frag_groups, inst_groups, vertices=None):
                 break
             cur = nxt
 
-    keep = (visible | kept_inst_ids | ancestry) & set(by_id)
-    rows = sorted(pos[i] for i in keep)
+    keep = (visible | kept_inst_ids | ancestry
+            | {int(i) for i in keep}) & set(by_id)
+    # Rows go by each particle's *own* interaction, so an interaction's rows
+    # stay contiguous (part_start/part_end) even when some of its particles'
+    # points were absorbed into another interaction's group.  Within an
+    # interaction, point order.
+    rows = sorted((pos[i] for i in keep),
+                  key=lambda k: (int(order[k]._interaction_id), k))
     row_ids = [int(order[k].id) for k in rows]
     row_set = set(row_ids)
 
@@ -296,6 +388,11 @@ def build_layout(particles, frag_groups, inst_groups, vertices=None):
         "inst_pc_le_end":   col(lambda i: inst_rng.get(i, (-1, -1))[1]),
         "inst_merge_count": col(lambda i: inst_count.get(i, -1)),
     }
+    # The instance a fragment belongs to, stated rather than left to be
+    # inferred from where its points sit: hit_labels names fragments and
+    # instances, and a reader should not need the point ranges to join them.
+    columns["frag_inst_id"] = col(
+        lambda i: inst_of.get(i, -1) if i in frag_ids else -1)
     # ancestor_id follows the *redirected* parents, so the chain a reader walks and
     # the root it is told to expect agree.  Memoised along each chain: O(n).
     row_index = {pid: k for k, pid in enumerate(row_ids)}
@@ -354,7 +451,8 @@ def build_layout(particles, frag_groups, inst_groups, vertices=None):
     # ---- interactions ------------------------------------------------------
     # Keep only interactions some stored particle belongs to, renumber them,
     # and rewrite interaction_id to the new row index.  Points are ordered by
-    # interaction first, so each one's particles and points are contiguous.
+    # their group's interaction first and rows by their own, so each
+    # interaction's points and rows are both contiguous.
     live = sorted({int(v) for v in columns["interaction_id"] if v >= 0})
     remap = {old: new for new, old in enumerate(live)}
     columns["interaction_id"] = np.fromiter(
@@ -364,15 +462,20 @@ def build_layout(particles, frag_groups, inst_groups, vertices=None):
     interactions: dict = {}
     if live:
         int_of_order = np.fromiter(
-            (int(p._interaction_id) for p in order),
+            (point_inter[int(p.id)] for p in order),
             dtype=np.int64, count=len(order))
         part_start, part_end = [], []
         pc_start, pc_end = [], []
         for old in live:
             idx = np.flatnonzero(int_of_order == old)
-            lo, hi = int(idx[0]), int(idx[-1])
-            pc_start.append(int(pc_offsets[lo]))
-            pc_end.append(int(pc_offsets[hi + 1]))
+            if len(idx):
+                lo, hi = int(idx[0]), int(idx[-1])
+                pc_start.append(int(pc_offsets[lo]))
+                pc_end.append(int(pc_offsets[hi + 1]))
+            else:
+                # Every point of this interaction went to another's group;
+                # its particles are still stored, its points are elsewhere.
+                pc_start.append(-1); pc_end.append(-1)
             rws = [k for k, r in enumerate(rows)
                    if int(order[r]._interaction_id) == old]
             part_start.append(rws[0] if rws else -1)

@@ -14,8 +14,19 @@ Layout
     n_events         scalar int64
     events/offsets   (n_events+1,) int64   particle rows per event
     points/offsets   (n_events+1,) int64   point rows per event
-    points/flat      (N, 6) float32        x, y, z, time, dE, dX
-    points/true_x_shift (N,) float32       true_x = flat[:, 0] + this
+    points/flat      (N, C) float32        one row per voxel (or deposit)
+    points/columns   (C,) str              the column names; JAXTPC input:
+                                           x, y, z [mm], t [us], dE [MeV],
+                                           dX [cm], theta, phi [rad], p [MeV/c]
+    hit_labels/volume{V}/plane{P}/         JAXTPC input: one entry per hit of
+                                           that plane, in the hits file's CSR
+                                           order (attrs: source, volume, plane)
+        fragment_id   (H,) int32           -1 where the hit is not traced
+        instance_id   (H,) int32           -1 where the hit is not traced
+        is_le         (H,) bool            the hit's particle is kLEScatter
+        on_sensor     (H,) bool            pixel only: the hit's pixel is in
+                                           the sensor image
+        offsets       (n_events+1,) int64  hits per event
     particles/<col>  (M,)                  see _INT32 / _INT8 / _INT64
     inter/offsets    (n_events+1,) int64   interaction rows per event
     inter/<col>      (K,)                  see _INTER
@@ -31,6 +42,12 @@ into ``points/flat``, so a whole-file reader can slice them with no arithmetic.
 within a view *everything* is event-local and consistent -- ``v["pc_start"]``
 indexes ``v.points`` directly.  Mixing the two bases is the easiest mistake
 this format allows, so the view does not expose the mixture.
+
+With JAXTPC input (3.3.0) points/flat holds the true energy deposits behind
+the hits, voxelized: a segment belongs to whichever particle owns its JAXTPC
+group.  The hits themselves stay in the JAXTPC hits file; hit_labels says, per
+hit, which fragment and instance it belongs to (``frag_inst_id`` on a fragment
+row names its instance).
 
 ``frag_id == id`` marks a fragment representative and ``inst_id == id`` an
 instance representative; ``-1`` means the particle heads no group there.
@@ -48,9 +65,17 @@ import numpy as np
 
 from .io import _compress_kwargs, _chunk_rows, _CHUNK_TARGET_BYTES_META
 
-FORMAT_VERSION_V3 = "3.1.0"
+FORMAT_VERSION_V3 = "3.3.0"
 
-_PT_NDIM = 6                      # x, y, z, time, dE, dX
+#: points/flat's columns when nothing else is given: a deposit, as the plain
+#: EDepSim reader produces it.  JAXTPC input adds direction and momentum.
+DEFAULT_POINT_COLUMNS = ('x', 'y', 'z', 'time', 'dE', 'dX')
+
+#: Rows per chunk when points/flat is chunked by column: 64 KiB of float32.
+_COLUMN_CHUNK_ROWS = 16384
+
+#: Entries per chunk of a hit_labels array.
+_LABEL_CHUNK_ROWS = 65536
 
 _INT32 = ("id", "geant4_trackid", "parent_id", "ancestor_id",
           "pdg", "parent_pdg",
@@ -60,7 +85,9 @@ _INT32 = ("id", "geant4_trackid", "parent_id", "ancestor_id",
           "geant4_parent_trackid", "geant4_parent_pdg",
           "interaction_id", "interaction_type",
           "frag_id", "frag_merge_count", "frag_parent_id",
-          "inst_id", "inst_merge_count", "inst_parent_id")
+          "inst_id", "inst_merge_count", "inst_parent_id",
+          # The instance a fragment row belongs to (3.3.0); -1 on other rows.
+          "frag_inst_id")
 _INT8 = ("sem_type", "frag_sem_type", "inst_sem_type")
 # Both levels describe two runs the same way: a non-LE range and an LE range.
 # At instance level the two are adjacent, so inst_pc_end == inst_pc_le_start;
@@ -119,7 +146,8 @@ _INTER_PART_COLS = ("part_start", "part_end")
 class EventWriterV3:
     """Incremental writer.  One :meth:`append_event` call per event."""
 
-    def __init__(self, path, compression="lz4", compression_opts=None):
+    def __init__(self, path, compression="lz4", compression_opts=None,
+                 points=None, columns=None):
         import h5py
         self._path = path
         self._ckw = _compress_kwargs(compression, compression_opts)
@@ -128,6 +156,21 @@ class EventWriterV3:
         self._n_rows = 0
         self._n_points = 0
         self._n_inter = 0
+        #: points/flat's columns, named in the file as points/columns.
+        self._pt_columns = tuple(columns or DEFAULT_POINT_COLUMNS)
+        self._pt_ndim = len(self._pt_columns)
+        #: hit_labels planes, fixed by the first event that writes them.
+        self._labels = None
+        #: How points/flat is stored: ``chunks`` ('columns' or 'rows'),
+        #: ``bitshuffle`` (bool), ``energy_mantissa_bits`` (int or None).
+        p = dict(points or {})
+        self._pt_chunks = str(p.get("chunks", "rows"))
+        if self._pt_chunks not in ("rows", "columns"):
+            raise ValueError(f"points chunks must be 'rows' or 'columns', "
+                             f"got {self._pt_chunks!r}")
+        self._pt_bitshuffle = bool(p.get("bitshuffle", False))
+        eb = p.get("energy_mantissa_bits", None)
+        self._pt_energy_bits = None if eb is None else int(eb)
         self._create()
 
     def _create(self):
@@ -140,19 +183,21 @@ class EventWriterV3:
             g = f.create_group(grp)
             g.create_dataset("offsets", data=np.zeros(1, dtype=np.int64),
                              maxshape=(None,), chunks=(rows,))
+        if self._pt_chunks == "columns":
+            pt_chunks = (_COLUMN_CHUNK_ROWS, 1)
+        else:
+            pt_chunks = (_chunk_rows(self._pt_ndim), self._pt_ndim)
+        if self._pt_bitshuffle:
+            import hdf5plugin
+            pt_filter = dict(hdf5plugin.Bitshuffle(cname="lz4"))
+        else:
+            pt_filter = self._ckw
+        self._pt_filter = pt_filter
         f["points"].create_dataset(
-            "flat", shape=(0, _PT_NDIM), maxshape=(None, _PT_NDIM),
-            dtype=np.float32, chunks=(_chunk_rows(_PT_NDIM), _PT_NDIM),
-            **self._ckw)
-        # true_x = flat[:, 0] + true_x_shift.  Only pixel hit mode with a
-        # nominal t0 puts anything but zero here, and it takes as many
-        # distinct values as there are (interaction, volume) pairs -- 28 in a
-        # test event -- so it costs about 1.5% of the file under LZ4.  A
-        # separate dataset rather than a seventh column so that every reader
-        # of the (N, 6) layout keeps working untouched.
-        f["points"].create_dataset(
-            "true_x_shift", shape=(0,), maxshape=(None,),
-            dtype=np.float32, chunks=(_chunk_rows(1),), **self._ckw)
+            "flat", shape=(0, self._pt_ndim), maxshape=(None, self._pt_ndim),
+            dtype=np.float32, chunks=pt_chunks, **pt_filter)
+        f["points"].create_dataset("columns", data=np.array(
+            self._pt_columns, dtype=h5py.string_dtype()))
         g = f.create_group("inter")
         g.create_dataset("offsets", data=np.zeros(1, dtype=np.int64),
                          maxshape=(None,), chunks=(rows,))
@@ -234,6 +279,52 @@ class EventWriterV3:
         vidx.resize(vidx.shape[0] + 1, axis=0)
         vidx[-1] = self._n_voloff
 
+    def append_hit_labels(self, labels):
+        """
+        Append one event's per-hit labels (see :mod:`pysupera.hit_labels`).
+
+        *labels* is one dict per (volume, plane).  The planes are fixed by the
+        first event; a later event must not bring a new one (a plane it lacks
+        gets zero entries, so every plane's offsets stay aligned).
+        """
+        f = self._f
+        by_key = {(d["volume"], d["plane"]): d for d in labels}
+        if self._labels is None:
+            self._labels = {}
+            root = f.require_group("hit_labels")
+            for (v, p), d in sorted(by_key.items()):
+                g = root.create_group(f"volume{v}/plane{p}")
+                g.attrs["source"] = d["source"]
+                g.attrs["volume"] = int(v)
+                g.attrs["plane"] = int(p)
+                g.create_dataset("offsets", data=np.zeros(1, dtype=np.int64),
+                                 maxshape=(None,))
+                cols = [("fragment_id", np.int32), ("instance_id", np.int32),
+                        ("is_le", bool)]
+                if "on_sensor" in d:
+                    cols.append(("on_sensor", bool))
+                for name, dt in cols:
+                    g.create_dataset(name, shape=(0,), maxshape=(None,),
+                                     dtype=dt, chunks=(_LABEL_CHUNK_ROWS,),
+                                     **self._pt_filter)
+                self._labels[(v, p)] = (g, [c for c, _ in cols])
+        extra = set(by_key) - set(self._labels)
+        if extra:
+            raise ValueError(f"hit_labels: planes {sorted(extra)} first "
+                             f"appear after the first event")
+        for key, (g, cols) in self._labels.items():
+            d = by_key.get(key)
+            n = 0 if d is None else len(d["fragment_id"])
+            base = int(g["offsets"][-1])
+            for c in cols:
+                ds = g[c]
+                ds.resize(base + n, axis=0)
+                if n:
+                    ds[base:base + n] = d[c]
+            off = g["offsets"]
+            off.resize(off.shape[0] + 1, axis=0)
+            off[-1] = base + n
+
     def set_meta(self, meta: dict) -> None:
         """
         Record how this file was produced, as root attributes.
@@ -257,30 +348,18 @@ class EventWriterV3:
         pts = self._f["points/flat"]
         pts.resize(self._n_points + n_pts, axis=0)
         if n_pts:
-            block = np.zeros((n_pts, _PT_NDIM), dtype=np.float32)
+            block = np.zeros((n_pts, self._pt_ndim), dtype=np.float32)
             cursor = 0
             for p in layout.order:
                 pc = np.asarray(p.point_cloud, dtype=np.float32)
                 k = len(pc)
                 if k:
-                    take = min(pc.shape[1], _PT_NDIM)
+                    take = min(pc.shape[1], self._pt_ndim)
                     block[cursor:cursor + k, :take] = pc[:, :take]
                 cursor += k
+            if self._pt_energy_bits is not None:
+                block[:, 4] = round_mantissa(block[:, 4], self._pt_energy_bits)
             pts[self._n_points:self._n_points + n_pts] = block
-
-        shift = self._f["points"].get("true_x_shift")
-        if shift is not None:
-            shift.resize(self._n_points + n_pts, axis=0)
-            if n_pts:
-                sblock = np.zeros(n_pts, dtype=np.float32)
-                cursor = 0
-                for p in layout.order:
-                    k = len(p.point_cloud)
-                    v = getattr(p, "true_x_shift", None)
-                    if k and v is not None and len(v) == k:
-                        sblock[cursor:cursor + k] = v
-                    cursor += k
-                shift[self._n_points:self._n_points + n_pts] = sblock
 
         # ---- particle columns ---------------------------------------------
         base = self._n_points
@@ -388,19 +467,20 @@ class EventView:
         fragment level the two sides are stored as separate ranges because
         other fragments' points lie between them.
         """
+        arr, tag = self.points, "pc"
         c = self.columns
         if level == "inst":
-            s, e = int(c["inst_pc_start"][row]), int(c["inst_pc_end"][row])
-            ls, le_ = (int(c["inst_pc_le_start"][row]),
-                       int(c["inst_pc_le_end"][row]))
+            s, e = int(c[f"inst_{tag}_start"][row]), int(c[f"inst_{tag}_end"][row])
+            ls, le_ = (int(c[f"inst_{tag}_le_start"][row]),
+                       int(c[f"inst_{tag}_le_end"][row]))
             if le is True:
-                return self.points[:0] if ls < 0 else self.points[ls:le_]
+                return arr[:0] if ls < 0 else arr[ls:le_]
             if le is False:
-                return self.points[:0] if s < 0 else self.points[s:e]
+                return arr[:0] if s < 0 else arr[s:e]
             # Both: the runs are adjacent at instance level, so one slice.
             lo = s if s >= 0 else ls
             hi = le_ if le_ >= 0 else e
-            return self.points[:0] if lo < 0 else self.points[lo:hi]
+            return arr[:0] if lo < 0 else arr[lo:hi]
         if level == "frag":
             if le is None:
                 # The two sides are not adjacent, so "all" needs both.
@@ -409,11 +489,41 @@ class EventView:
                 if not len(a): return b
                 if not len(b): return a
                 return np.concatenate([a, b])
-            pre = "frag_pc_le" if le else "frag_pc"
+            pre = f"frag_{tag}_le" if le else f"frag_{tag}"
             s, e = int(c[f"{pre}_start"][row]), int(c[f"{pre}_end"][row])
-            return self.points[:0] if s < 0 else self.points[s:e]
-        s, e = int(c["pc_start"][row]), int(c["pc_end"][row])
-        return self.points[:0] if s < 0 else self.points[s:e]
+            return arr[:0] if s < 0 else arr[s:e]
+        s, e = int(c[f"{tag}_start"][row]), int(c[f"{tag}_end"][row])
+        return arr[:0] if s < 0 else arr[s:e]
+
+    def group_of_points(self, level="frag"):
+        """
+        One group id per point: the representative ``id`` of the fragment
+        (``level='frag'``) or instance (``'inst'``) whose range holds it,
+        -1 for a point no stored group claims.
+
+        Read from the group ranges on representative rows only -- never
+        from ``pc_start``/``pc_end``, which say which *particle* deposited a
+        point, a different question.  Every point is in at most one range per
+        level, so the answer is unique; see :func:`check_ranges`.
+        """
+        n, tag = len(self.points), "pc"
+        c = self.columns
+        if level == "frag":
+            rows = np.flatnonzero(self.is_fragment)
+            pairs = [(f"frag_{tag}_start", f"frag_{tag}_end"),
+                     (f"frag_{tag}_le_start", f"frag_{tag}_le_end")]
+        elif level == "inst":
+            rows = np.flatnonzero(self.is_instance)
+            pairs = [(f"inst_{tag}_start", f"inst_{tag}_le_end")]
+        else:
+            raise ValueError(f"level must be 'frag' or 'inst', got {level!r}")
+        out = np.full(n, -1, dtype=np.int32)
+        for r in rows:
+            for a, b in pairs:
+                s, e = int(c[a][r]), int(c[b][r])
+                if s >= 0 and e > s:
+                    out[s:e] = c["id"][r]
+        return out
 
     def __repr__(self):
         return (f"EventView(event={self.event}, rows={len(self)}, "
@@ -441,6 +551,11 @@ class EventStoreV3:
         self._po = self._f["points/offsets"][:]
         self._io = (self._f["inter/offsets"][:]
                     if "inter/offsets" in self._f else None)
+        c = self._f["points"].get("columns")
+        #: points/flat's column names (older files: the six deposit columns)
+        self.point_columns = (tuple(x.decode() if isinstance(x, bytes) else str(x)
+                                    for x in c[()]) if c is not None
+                              else DEFAULT_POINT_COLUMNS)
 
     def __len__(self):
         return int(self._f["n_events"][()])
@@ -504,6 +619,27 @@ class EventStoreV3:
         po = self._f["points/offsets"]
         a, b = int(po[ev]), int(po[ev + 1])
         return ds[a:b]
+
+    def hit_labels(self, ev):
+        """
+        Event *ev*'s per-hit labels: ``{(volume, plane): {name: array}}``,
+        each array aligned with that plane's hits in the JAXTPC hits file,
+        plus ``'source'`` (the plane's name there).  Empty for files without
+        them.  Plain HDF5 too: ``hit_labels/volume{V}/plane{P}/``.
+        """
+        root = self._f.get("hit_labels")
+        out = {}
+        if root is None:
+            return out
+        for vname in root:
+            for pname in root[vname]:
+                g = root[vname][pname]
+                off = g["offsets"]
+                a, b = int(off[ev]), int(off[ev + 1])
+                d = {k: g[k][a:b] for k in g if k != "offsets"}
+                d["source"] = g.attrs.get("source", pname)
+                out[(int(g.attrs["volume"]), int(g.attrs["plane"]))] = d
+        return out
 
     def _read_legacy_particles(self, a, b):
         """
@@ -574,11 +710,84 @@ class EventStoreV3:
         self.close()
 
 
-def open_writer_v3(path, compression="lz4", compression_opts=None):
-    """Open an :class:`EventWriterV3`."""
-    return EventWriterV3(path, compression, compression_opts)
+def open_writer_v3(path, compression="lz4", compression_opts=None,
+                   points=None, columns=None):
+    """
+    Open an :class:`EventWriterV3`: *points* sets how points/flat is stored
+    and *columns* names its columns.
+    """
+    return EventWriterV3(path, compression, compression_opts, points, columns)
+
+
+def round_mantissa(a, bits):
+    """
+    Round float32 values to *bits* mantissa bits, to nearest.
+
+    The relative error is at most ``2**-(bits + 1)`` at every magnitude, and
+    the zeroed low bits compress to almost nothing under bitshuffle.  Zero,
+    infinities and NaN are left as they are.
+    """
+    a = np.ascontiguousarray(a, dtype=np.float32)
+    drop = 23 - int(bits)
+    if drop <= 0:
+        return a
+    u = a.view(np.uint32).astype(np.uint64)
+    half = np.uint64(1) << np.uint64(drop - 1)
+    keep = ~((np.uint64(1) << np.uint64(drop)) - np.uint64(1))
+    r = (((u + half) & keep) & np.uint64(0xFFFFFFFF)).astype(np.uint32).view(np.float32)
+    special = ~np.isfinite(a)
+    if special.any():
+        r = np.where(special, a, r)
+    return r
 
 
 def read_events_v3(path):
     """Open an :class:`EventStoreV3`."""
     return EventStoreV3(path)
+
+
+def check_ranges(path, max_report=20):
+    """
+    Look for group ranges that claim rows they do not own, in a written file.
+
+    Member rows are not stored, so a range cannot be compared with its
+    members' counts after the fact; what the file does show is the symptom.
+    Fragment slices -- each side separately -- and instance slices must each
+    tile without overlapping, since a row belongs to one fragment and one
+    instance.  Files written before the layout checked this at write time
+    (an empty fragment of an unwritten instance could claim the rows of the
+    particles its members sorted around) show up here.
+
+    Returns a list of ``(event, cloud, level, a, b)`` for the first
+    *max_report* overlapping pairs, where ``a`` and ``b`` are the two rows'
+    ``(id, start, end)``; empty when the file is clean.
+    """
+    problems = []
+    with read_events_v3(path) as st:
+        for ev in range(len(st)):
+            v = st[ev]
+            c = v.columns
+            clouds = [("points", "pc")]
+            for cloud, tag in clouds:
+                levels = {
+                    "frag": (v.is_fragment,
+                             [(f"frag_{tag}_start", f"frag_{tag}_end"),
+                              (f"frag_{tag}_le_start", f"frag_{tag}_le_end")]),
+                    "inst": (v.is_instance,
+                             [(f"inst_{tag}_start", f"inst_{tag}_le_end")]),
+                }
+                for level, (mask, pairs) in levels.items():
+                    spans = []
+                    for r in np.flatnonzero(mask):
+                        for a, b in pairs:
+                            s, e = int(c[a][r]), int(c[b][r])
+                            if s >= 0 and e > s:
+                                spans.append((s, e, int(c["id"][r])))
+                    spans.sort()
+                    for (s0, e0, i0), (s1, e1, i1) in zip(spans, spans[1:]):
+                        if s1 < e0:
+                            problems.append((ev, cloud, level,
+                                             (i0, s0, e0), (i1, s1, e1)))
+                            if len(problems) >= max_report:
+                                return problems
+    return problems

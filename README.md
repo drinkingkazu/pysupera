@@ -19,7 +19,7 @@ A Python library for grouping simulated LArTPC particles into physics partitions
 4. [Quick Start](#quick-start)
    - [Python API](#python-api)
    - [Interactive Event Viewer (`pysupera-app`)](#interactive-event-viewer-pysupera-app)
-   - [Browser viewers (`vis_force.html`, `vis_hits.html`)](#browser-viewers-vis_forcehtml-vis_hitshtml)
+   - [Browser viewers](#browser-viewers)
 5. [Workflow](#workflow)
    - [Input: the `Particle` object](#input-the-particle-object)
    - [Choosing a reader](#choosing-a-reader)
@@ -37,7 +37,6 @@ A Python library for grouping simulated LArTPC particles into physics partitions
    - [ID conventions](#id-conventions)
    - [Wire and pixel readout](#wire-and-pixel-readout)
    - [Truth deposits or detected hits](#truth-deposits-or-detected-hits)
-   - [Recovering the true x](#recovering-the-true-x--pointstrue_x_shift)
    - [Hit provenance (JAXTPC mode)](#hit-provenance-jaxtpc-mode)
      - [Seeing it](#seeing-it)
    - [Expert and debugging output](#expert-and-debugging-output)
@@ -205,184 +204,113 @@ The **PARTICLE FILTER** and **show legend** checkbox take effect immediately wit
 
 ### Browser viewers
 
-Four standalone HTML files that read an output file directly in the browser
-— no server, no install, nothing to launch. Open the file and pick your
-HDF5. They answer different questions:
+Three standalone HTML files, one per run mode, that read HDF5 directly in the
+browser — no server, no install. Open the file and pick your inputs, or pass
+them as URL parameters when the files are served over HTTP.
 
-| | `vis_force.html` | `vis_hits.html` | `vis_drift.html` | `vis_truth.html` |
-|---|---|---|---|---|
-| **question** | what is in this event, and how is it grouped? | which readout hits belong to which object? | what did the drift-time ambiguity do to this event? | how do the labels look on truth points versus sensor points? |
-| **inputs** | the pysupera output | the output **and** the JAXTPC hits file | the output | the output **and** a truth companion |
-| **views** | one 3-D cloud, plus an instance-genealogy graph | truth cloud beside the readout — six 2-D plane images for wire, a second 3-D cloud for pixel | two 3-D clouds: true x beside inferred x | two 3-D clouds: Geant4 deposits beside the pysupera points |
-| **needs** | any 3.x output | JAXTPC mode, so `groups/` exists | `points/true_x_shift`, so a pixel hit-mode run | `groups/`, plus `pysupera-truth-subset` output |
+| run mode | viewer | inputs | URL parameters |
+|---|---|---|---|
+| EDepSim only | `vis_force.html` | the output | `?file=out_gz.h5` |
+| JAXTPC wire | `vis_hits.html` | the output **and** a hits subset | `?out=out_gz.h5&hits=hits_small.h5` |
+| JAXTPC pixel | `vis_drift.html` | the output **and** a hits subset | `?out=out_gz.h5&hits=hits_small.h5` |
 
-Both read HDF5 through **h5wasm, which decodes gzip only**, so the inputs have
-to be repacked first — see [Compression](#compression).
+The viewers read HDF5 through **h5wasm, which decodes gzip only**, so both
+inputs have to be prepared first:
 
-#### `vis_force.html` — exploring one event
+```bash
+pysupera-repack out.h5 out_gz.h5 -c gzip                  # the pysupera output
+pysupera-hits-subset sim_hits_0000.h5 hits_small.h5 -n 3  # JAXTPC modes only
+```
 
-Colour the cloud by energy, time, interaction id, ancestor track id, fragment
-id, instance id or PDG code, with a selectable colormap and optional log
-scale. LE and non-LE points toggle independently, energy and time thresholds
-slide, and a bounding box clips the view. An animation plays the event by
-time, and an interaction panel and a force-directed instance-genealogy graph
-open alongside.
+`-c gzip` is not optional: without it each dataset keeps its existing filter
+(bitshuffle+LZ4 for `points/flat`), which the browser cannot read.
+`pysupera-hits-subset` copies the first *n* events of a JAXTPC hits file as
+gzip and decodes every CSR entry into one row per hit — `hit_tick`,
+`hit_charge` and either `hit_wire` (wire) or `hit_py`/`hit_pz` (pixel) — in
+the same order as the file's CSR, so row *k* lines up with entry *k* of the
+output's `hit_labels`. It finds planes structurally and copies `config`, so
+it needs no flag to tell wire from pixel. `--centres-only` keeps just the
+group centres, for a much smaller file when the per-hit rows are not needed.
+
+#### `vis_force.html` — EDepSim only
+
+One 3-D cloud of `points/flat`. Colour by energy, time, interaction id,
+ancestor track id, fragment id, instance id or PDG code, with a selectable
+colormap and optional log scale. LE and non-LE points toggle independently,
+energy and time thresholds slide, and a bounding box clips the view. An
+animation plays the event by time, and an interaction panel and a
+force-directed instance-genealogy graph open alongside.
 
 Shortcuts: `c` centre · `a` axes · `s` screenshot · `space` play/pause ·
 `r` reset animation · `o` auto-rotate · `i` interaction panel · `g` graph ·
 `d` debug log · `?` help.
 
-#### `vis_hits.html` — linking 3-D to the readout
+#### `vis_hits.html` — JAXTPC wire
 
-Truth voxels on the left, the readout on the right, and the same colour
-meaning the same object in both. **Hover on either side and the matching hits
-light up on the other.** The link is a single owner id, so the two views
-cannot disagree.
+Left: the 3-D cloud of `points/flat` (3 mm truth voxels). Right: one 2-D
+image per `hit_labels/volume{V}/plane{P}` group, stacked in rows — six for a
+two-volume, three-plane detector — each wire against drift tick, one pixel per
+hit. The same colour means the same object everywhere.
 
-What the right-hand pane is depends on the readout, which the viewer takes
-from the hits file's `config/readout_type` (falling back to wire, as JAXTPC
-does):
-
-| readout | right-hand pane |
-|---|---|
-| **wire** | six 2-D images, one per plane per volume — wire against drift tick. A wire hit carries one spatial coordinate, so an image is the only honest way to draw it |
-| **pixel** | a second 3-D cloud, axes `x = drift tick`, `y = pixel py`, `z = pixel pz`. A pixel hit is already 3-D; flattening it to an image would throw away an axis the detector actually measured |
-
-The pixel pane is deliberately left in readout coordinates rather than
-converted to mm: the left pane already answers "where in the detector", and
-this one answers "where on the anode".
+**Hover anywhere and the object under the cursor lights up in every view**:
+a voxel highlights its hits on all six planes, and a hit highlights its voxels
+in 3-D and its hits on the other planes. The link is the label itself — the
+voxel's range in `points/flat` and the hit's `instance_id` / `fragment_id` in
+`hit_labels` — so the views cannot disagree.
 
 | control | |
 |---|---|
-| **colour by** | instance, fragment or interaction — the last two derived, not read |
-| **others** | opacity of everything not under the cursor. The cloud uses RGBA vertex colours with depth-write off, so unselected points are genuinely transparent and never hide the selection behind them |
-| **hide LE** | drops low-energy points from both views. Filtering happens at build time, so the picker cannot select something hidden |
-| **point info** | x/y/z, time, dE, dX, dE/dX, LE and owner for a truth voxel; peak charge, group, LE and owner for a hit, plus wire and time (wire) or py/pz and time (pixel) |
-| **c** | fit the view |
+| **highlight** | instance, fragment or interaction — what "the object under the cursor" means |
+| **others** | opacity of everything not selected |
+| **hide LE** | drops low-energy voxels and hits from every view, so the picker cannot select them |
+| **point info** | position, t, dE, dX, θ, φ, \|p\| and labels for a voxel; volume, plane, wire, tick, charge and labels for a hit |
+| **c** | fit the 3-D view |
 
-Preparing its two inputs:
+Plane headers give the hit count, wire and tick range and how many hits are
+highlighted. A red banner appears instead of a wrong picture for a pixel file,
+an output without `hit_labels`, a subset without per-hit rows, or labels and
+hits of different lengths.
 
-```bash
-pysupera-repack out.h5 out_gz.h5 -c gzip              # the pysupera output
-pysupera-hits-subset sim_wire_hits_0000.h5 hits_small.h5 -n 10
+#### `vis_drift.html` — JAXTPC pixel
+
+Two 3-D panes: the **truth** — `points/flat`, at the true x — on the left, and
+the **hits** — every hit of the subset, at the x inferred from its drift tick
+assuming t0 at the beam time — on the right. Hit positions come from the
+pixel geometry the run records in the output's `pixel_geometry` attribute:
+
+```
+x = x_anode − drift_direction · (tick − reference_tick) · mm_per_tick
+y = y_min + (py + ½) · pitch        z = z_min + (pz + ½) · pitch
 ```
 
-`-c gzip` is not optional: omitting it keeps each dataset's existing filter,
-leaving a file the browser cannot read. The second command exists because the
-hits file is mostly per-tick CSR arrays the viewer never opens — keeping only
-`group_ids`, `peak_charges` and the hit centres took a 3-event wire sample
-from 1279.7 MiB to 2.73 MiB, and a 3-event pixel sample from 43.6 MiB to
-0.65 MiB.
-
-`pysupera-hits-subset` handles either readout without being told which:
-it finds planes structurally (any subgroup with `group_ids`) and keeps
-whichever centres they store — `center_wires`/`center_times` for wire,
-`center_py`/`center_pz`/`center_times` for pixel. It copies `config`'s
-attributes across too, so the subset still says which readout it is.
-
-`vis_hits.html` refuses to draw rather than show something false: a red
-banner appears for a filter it cannot decode, a missing `groups/` table, or
-an event where every voxel resolves to one owner. Files written before the
-group table, or before `groups/is_le`, still load — it says what is missing
-and shows what it can. The mapping it displays is described under
-[Hit provenance](#hit-provenance-jaxtpc-mode).
-
-#### `vis_drift.html` — what the t0 ambiguity did
-
-Two 3-D panes over the same points: **true x** on the left
-(`x + points/true_x_shift`), **inferred x** on the right (as stored, with t0
-assumed at the beam time). Cameras are synchronised and both panes are framed
-on the union of the two clouds, so a displacement reads as a displacement
-rather than being normalised away by two separate fits.
+so a non-zero t0 shows as a shift along x between the panes. Cameras are
+synchronised (rotate, zoom or pan with the arrow keys in either pane) and both
+are framed on the union of the two clouds, so a displacement reads as one.
 
 **Hover a point in either pane and its whole object lights up in both**,
 everything else fading to an adjustable opacity. The `highlight` selector
 chooses what "its object" means — instance, fragment or interaction —
-independently of the colour, so you can colour by semantic type while
-following one instance.
+independently of the colour.
 
 | colour by | encoding |
 |---|---|
-| energy | one-hue sequential ramp; **diverging** blue↔red about a grey zero when the column is signed, which it is in hit mode — the readout response is bipolar and 13% of voxels are negative. Sign-preserving log (symlog) by default: the column spans twelve decades, and linear puts three quarters of the points within 1.5% of the midpoint. Range clipped to the 2nd–98th percentile |
-| instance semantic type | the six categorical slots in fixed order |
-| fragment / instance / interaction id | a stable hash — thousands of values, so no legend is possible; identity comes from the hover |
-| particle type (PDG) | fixed hues for the six commonest species, everything else folded into "other" |
+| energy | dE [MeV] on the left, hit charge [ADC] on the right, each with its own ramp; optional log |
+| semantic type | the six categorical slots in fixed order; LE points as LE scatter |
+| fragment / instance / interaction id | a stable hash, the same in both panes |
+| particle type (PDG) | the instance's PDG, fixed hues for the six commonest species |
 
-Hover shows energy, Geant4 track id, fragment / instance / interaction id,
-semantic type, PDG, parent instance and parent PDG, plus both x values and
-the shift between them. Only about two thirds of points fall inside a stored
-particle row, so the Geant4 track id falls back to the fragment's
-representative and says when it has.
-
-The semantic-type strip filters classes in and out. That is not only a
-convenience: six categorical hues cannot clear the all-pairs colour-vision
-floor — no six in one lightness band can — so identity is never left to
-colour alone. A legend is always up, the hover names the class in words, and
-any pair can be isolated with the filter.
-
-Prepare its input the same way as the others, with `pysupera-repack out.h5
-out_gz.h5 -c gzip`. A file without `points/true_x_shift`, or one where every
-shift is zero, loads fine and says so — both panes are then the same cloud.
-
-#### `vis_truth.html` — the same labels on truth and on sensor points
-
-Left pane: the Geant4 energy deposits, each painted with the label of
-whatever pysupera object claimed it. Right pane: the cloud the algorithms
-actually ran on. Hover either side and the object lights up in both.
-
-The bridge is the **group**. A deposit knows its group (`deposit_to_group`,
-in the JAXTPC hits file) and the output's `groups/` table says which fragment
-owns each group — so the label travels backwards down the same chain the
-reconstruction came up. Measured on one event, a fragment's truth deposits
-sit a median 2.2 mm from that same fragment's hits.
-
-Deposits whose group was never detected have no owner and are shown as such
-rather than dropped — 34% of event 0, which is the charge the readout window
-never recorded. There's a `hide undetected` toggle.
-
-Its two inputs:
-
-```bash
-pysupera-repack out.h5 out_gz.h5 -c gzip
-pysupera-truth-subset step.h5 hits.h5 truth_small.h5 -n 3
-```
-
-The second exists because the JAXTPC step and hits files are Blosc, which the
-browser cannot decode, and because the viewer needs only the deposit
-positions, `de`, `charge` and `deposit_to_group` — 65 MB of JAXTPC becomes
-about 1 MB per event.
-
-A useful self-check: run pysupera with `reader.point_source=deposits` and the
-two panes should coincide, because the right pane's cloud then *is* the
-voxelized truth deposits.
-
-#### Display thresholds
-
-`vis_drift.html` and `vis_truth.html` both have a **show ≥** slider — two of
-them in `vis_truth.html`, one per pane, since the panes hold different
-quantities. The detector simulation imposes no threshold of its own, so
-without one every pixel carrying any induced-field influence is on screen.
-
-The slider position is a percentile, but what it displays is the absolute
-value it lands on, together with what survives:
-
-| sensor cut | points kept | charge kept |
-|---|---|---|
-| none | 100% | 100% |
-| ≥ 27.7 | 50% | **99.6%** |
-| ≥ 354 | 20% | 96.5% |
-| ≥ 1960 | 10% | 87.7% |
-
-Half the points cost 0.4% of the charge. The truth pane behaves quite
-differently — dropping its faintest 60% of deposits costs 61% of the dE —
-because truth deposits have no diffusion halo.
+The semantic-type strip filters classes in and out of both panes, and a
+**show ≥** slider per pane hides the faintest points by percentile, showing
+the absolute value it lands on. By default only on-sensor hits are drawn —
+the ones the model sees; **off-sensor hits** adds the rest, which carry no
+label (`-1`) and are drawn grey.
 
 #### What the energy column holds
 
 Nothing in the point columns says whether the energy column is true dE or
 measured charge, so the run writes it down as root attributes
 (`point_source`, `hit_energy`, `hit_x_from`, `readout_type`) and the viewers
-label the column from them. Guessing from the presence of negative values
+could label the column from them. Guessing from the presence of negative values
 works on a busy event and fails on a quiet one.
 
 ---
@@ -465,7 +393,17 @@ arrangement, selected with `reader=`:
 |---|---|---|
 | `edepsim_h5` (default) | EDepSim only | every Geant4 energy-deposit step |
 | `jaxtpc_wire` | EDepSim + JAXTPC wire batch | deposits the readout detected |
-| `jaxtpc_pixel` | EDepSim + JAXTPC pixel batch | the same, or the detected pixel image via `reader.point_source=hits` |
+| `jaxtpc_pixel` | EDepSim + JAXTPC pixel batch (+ sensor file) | the detected image: hits on sensor pixels, the energy the sensors recorded |
+
+A pixel batch is only read as its hits. For either readout the output holds
+the true deposits behind the hits in `points/flat` and a label per hit in
+`hit_labels/` — see [What the output stores](#what-the-output-stores-jaxtpc-input).
+
+`reader=jaxtpc_pixel` also brings the settings hits need outside the reader
+group — `particle.min_pc_size`, `distance_threshold`,
+`check_group_ownership`, `particle.voxelize.store` — from
+`conf/readout/jaxtpc_pixel.yaml`, loaded after `config.yaml`'s own values; a
+command-line flag still wins. `reader.point_source=deposits` is refused.
 
 The two JAXTPC configs inherit `edepsim_h5`, so the dataset keys are written
 once, and each adds only what its own arrangement needs — `jaxtpc_wire` has
@@ -640,9 +578,14 @@ with read_events("output.h5") as store:
 ## Output File Format
 
 `run_pysupera` writes a single HDF5 file. This section describes format
-**3.1.0**, recorded in the scalar dataset `format_version`. No HDF5 attributes
-are used anywhere — everything is a dataset.
+**3.3.0**, recorded in the scalar dataset `format_version`.
 
+3.3.0 reshaped JAXTPC output. `points/flat` now holds the true energy
+deposits behind the hits (see [What the output stores](#what-the-output-stores-jaxtpc-input)),
+with direction and momentum, and names its columns in `points/columns`; the
+hits stay in the JAXTPC hits file, labelled per hit in `hit_labels/`.
+`truth/`, `points/hit_index` and `points/true_x_shift` are gone, and fragment
+rows name their instance (`frag_inst_id`).
 3.1.0 renamed columns for a consistent `<level>_` prefix, gave instances the
 same two-range point layout as fragments, and added the true Geant4 parent.
 Readers accept 3.0.0 files transparently.  3.0.0 replaced the three parallel
@@ -652,18 +595,40 @@ stores each point **once**. On a two-event file that is 6.4 MiB → 1.7 MiB.
 ### Layout
 
 ```
-format_version   scalar str   "3.1.0"
+format_version   scalar str   "3.3.0"
 n_events         scalar int64
 events/offsets   (n_events+1,) int64   particle rows per event
 points/offsets   (n_events+1,) int64   point rows per event
 inter/offsets    (n_events+1,) int64   interaction rows per event
-points/flat      (N, 6) float32        x, y, z, time, dE, dX
+points/flat      (N, C) float32        one row per voxel (or deposit)
+points/columns   (C,) str              its column names
 particles/<col>  (M,)
 inter/<col>      (K,)
+groups/          JAXTPC group -> owning fragment            } JAXTPC
+hit_labels/volume{V}/plane{P}/  per hit of that plane       } input
 ```
 
 Everything is concatenated across events with CSR fenceposts: event *i*
 occupies rows `offsets[i] : offsets[i+1]`.
+
+Every dataset is plain HDF5 — no pysupera code is needed to read it. The
+compression filters (LZ4, and bitshuffle+LZ4 for `points/flat` and
+`hit_labels/`) are recorded in the file and applied by HDF5 on read; they
+need the filter plugin, so `import hdf5plugin` before `h5py.File(...)` (or
+set `HDF5_PLUGIN_PATH` for `h5dump` / HDFView).
+
+```python
+import hdf5plugin, h5py
+with h5py.File("out.h5") as f:
+    pts  = f["points/flat"][:]                         # (N, C) float32
+    cols = [c.decode() for c in f["points/columns"]]   # what each column is
+```
+
+How `points/flat` is stored is set by `io.points`: chunks one column wide
+(each quantity compresses on its own) and bitshuffle+LZ4. The energy column
+can be rounded to `io.points.energy_mantissa_bits` float32 mantissa bits
+(null, the default, keeps it exact); the values stay ordinary float32, and
+the root attribute of the same name records the choice.
 
 ### Point ordering, and why it matters
 
@@ -689,6 +654,22 @@ The ordering is chosen for the query panoptic-segmentation training issues most
 often — "the non-LE voxels of instance X" — which is a plain slice rather than
 a mask over the instance's points.
 
+The interaction a point sorts under is its **group's**: that of the instance
+(or, for an unwritten instance, the fragment) representative owning it. The
+two differ only when a proximity merge — `AbsorbLEScatter` or
+`CombineLEScatters` — takes a particle from one interaction into a
+representative from another. The absorber is then the representative: the
+points become its fragment's, instance's and interaction's, stored in one
+block, while the absorbed particle keeps its own identity — its row sits with,
+and carries, its original interaction. So the particle rows are ordered by
+their own interaction, and an interaction's `part_*` and `pc_*` ranges are
+each contiguous.
+
+Every range is checked when it is written: each must hold exactly its members'
+own points, or `build_layout` raises `LayoutError`. `pysupera.io_v3.check_ranges`
+looks for the symptom in an existing file — fragment or instance slices that
+overlap — which is how files written before that check can be screened.
+
 ### Reading points
 
 ```python
@@ -701,6 +682,14 @@ with read_events_v3("out.h5") as store:
         le     = v.points_of(r, "inst", le=True)   # one slice
         both   = v.points_of(r, "inst")            # one slice
         vtx    = v.interaction_of(r)
+```
+
+For a label per point, use the group ranges — never `pc_start`/`pc_end`,
+which say which *particle* deposited a point:
+
+```python
+frag = v.group_of_points("frag")              # fragment id per point, -1 if none
+inst = v.group_of_points("inst")              # instance id per point
 ```
 
 Equivalently, by hand:
@@ -751,6 +740,7 @@ have rows, and no point is unreachable from some stored row.
 | `frag_pc_le_start/end` | int64 | the fragment's LE points |
 | `frag_merge_count` | int32 | Geant4 particles merged into the fragment |
 | `frag_parent_id` | int32 | nearest ancestor fragment; `== id` if none |
+| `frag_inst_id` | int32 | on a fragment row, the instance it belongs to; -1 elsewhere or when that instance is not written |
 | `inst_id` | int32 | representative's `id`; `== id` marks an instance |
 | `inst_sem_type` | int8 | the instance's classification |
 | `inst_pc_start/end` | int64 | the instance's non-LE points |
@@ -856,16 +846,7 @@ through the same code path:
 is a question about a *group* — JAXTPC's cluster of energy deposits — and a
 group is above threshold or it is not, regardless of how the readout that saw
 it was arranged. The filter reads `group_ids` and never looks at a hit
-centre, so a pixel batch needs no flag and no separate reader:
-
-```bash
-run_pysupera reader=jaxtpc_pixel \
-    io.input_path=edepsim.h5 io.output_path=out.h5 \
-    reader.jaxtpc_seg_path=batch/step/run/name_step_0000_00.h5 \
-    reader.jaxtpc_inst_path=batch/hits/run/name_hits_0000_00.h5
-```
-
-`reader=` selects the kind of input — see
+centre. `reader=` selects the kind of input — see
 [Choosing a reader](#choosing-a-reader).
 
 The run banner prints which one it found (`[run]   readout : pixel`), read
@@ -875,8 +856,8 @@ Plane subgroups are discovered structurally rather than by name, so a
 geometry neither project has named yet still resolves.
 
 What *does* differ is anything that draws hits: see
-[`vis_hits.html`](#vis_hitshtml--linking-3-d-to-the-readout) for the two
-readout panes, and `pysupera-hits-subset` for the centres each keeps.
+[`vis_hits.html`](#vis_hitshtml--jaxtpc-wire) and
+[`vis_drift.html`](#vis_drifthtml--jaxtpc-pixel) for the two readouts, and `pysupera-hits-subset` for the centres each keeps.
 
 ```python
 from pysupera.readers import read_readout_type
@@ -885,59 +866,138 @@ with h5py.File("hits.h5") as f:
     print(read_readout_type(f))          # 'wire' or 'pixel'
 ```
 
-### Truth deposits or detected hits
+### Wire deposits and pixel hits
 
-`reader.point_source` decides what a *point* is. The rest of the pipeline —
-defragmentation, proximity, conditions, partitioning — is identical either
-way; only the cloud changes.
+What the partitioning runs on follows the readout: a wire batch is read as
+the truth deposits its hits select, a pixel batch as its detected hits. The
+rest of the pipeline — defragmentation, proximity, conditions, partitioning
+— is identical; only its input differs. What is *written* is the same for
+both — see [What the output stores](#what-the-output-stores-jaxtpc-input).
 
-| | `deposits` (default) | `hits` |
+| | wire (`reader=jaxtpc_wire`) | pixel (`reader=jaxtpc_pixel`) |
 |---|---|---|
-| a point is | a Geant4 energy deposit the readout detected | a fired pixel |
+| partitioned on | the Geant4 deposits the readout detected | the detected hits: shares of sensor pixels |
 | geometry | truth geometry; the readout only selects | the detected image |
 | carries | thresholding | pixelation, diffusion, threshold, drift-time ambiguity |
-| points/event | 50k–143k | 1.4M–4.2M |
-| cost/event | ~1.6 s | ~7 s |
-| readout | wire or pixel | pixel only — a wire plane has no 3-D image |
+| why | a wire plane has no 3-D image to convert | the pixel readout is a 3-D image |
 
 Each hit still has exactly one Geant4 particle: a CSR entry belongs to one
 group, and `group_to_track` gives each group one track. No nearest-neighbour
 matching is involved.
 
 ```bash
-run_pysupera preset=cubic_pixel_hits \
+run_pysupera reader=jaxtpc_pixel \
     io.input_path=edepsim.h5 io.output_path=out_hits.h5 \
     reader.jaxtpc_seg_path=batch/step/run/name_step_0000_00.h5 \
     reader.jaxtpc_inst_path=batch/hits/run/name_hits_0000_00.h5 \
     reader.jaxtpc_sensor_path=batch/sensor/run/name_sensor_0000_00.h5
 ```
 
-`preset=cubic_pixel_hits` is a bundle of the values that are only right
-together and that cut across config groups — the pixel geometry, the charge
-threshold, `particle.min_pc_size`, `distance_threshold` and
-`check_group_ownership`. Only the file paths stay on the command line, and
-any flag still overrides it.
+Only the file paths go on the command line: the pixel geometry is defaulted
+in the reader config, and the settings that cut across config groups come
+with the reader (see [Choosing a reader](#choosing-a-reader)). Any flag
+still overrides them. `preset=cubic_pixel_hits` is kept as an alias for
+`reader=jaxtpc_pixel`, so existing command lines work.
 
-#### The charge threshold and `min_pc_size` are a matched pair
+#### Which pixels: the sensor image
 
-JAXTPC applies no threshold worth the name — 1 electron — so without one
-every pixel carrying any induced-field influence becomes a point.
-`reader.hit_charge_threshold` cuts on the magnitude of the induced charge in
-electrons, matching JAXTPC's own encoder (the response is bipolar and ~16%
-of hits are negative signal).
+The hits file is the sensor image split by group — summed over groups, a
+pixel's hit charge is its sensor ADC. But JAXTPC thresholds the *sum*
+(`threshold_adc`, 7 ADC here) and keeps every group's share regardless, so
+about half the pixels in the hits file are ones the sensor never recorded.
+Hit mode therefore keeps a hit only on a pixel the sensor file holds, which
+makes the labelled cloud cover the model's input image exactly: every
+sensor pixel gets a label and no other pixel does. The run summary reports
+both sides (`Off the sensor image`, and `Sensor pixels left unlabelled` if
+any are). This is why `reader.jaxtpc_sensor_path` is required with
+`point_source=hits`, and why it must come from the same JAXTPC run as the
+hits file — the reader checks.
 
-Cutting the halo also **thins the tracks**, which lowers the extent
-threshold, so the two move together:
+Several groups can share a pixel, so a sensor pixel carries on average about
+eight hits, one per group share; the mask removes only 14% of the hit
+entries, since the pixels it drops are the faint ones with few shares. Those
+are the hits `hit_labels/` marks `on_sensor = false` and labels -1.
 
-| `hit_charge_threshold` | track width | `min_pc_size` | agrees with truth@5 |
-|---|---|---|---|
-| 0 e⁻ | 13.1 mm | 85 | 99.0% |
-| **500 e⁻** *(preset)* | **6.5 mm** | **13** | **95.5%** |
-| 500 e⁻ | 6.5 mm | 85 *(mixed)* | 85.2% |
+`reader.hit_charge_threshold` (ADC, per share) defaults to 0. It is applied
+after the mask, so any positive value leaves on-sensor hits unlabelled —
+which the writer refuses.
 
-Mixing them is worse than either. The uncut pairing keeps every electron and
-4.18M points per event; the preset's keeps 73.5% of the charge and 190k
-points, and runs 4× faster.
+A hits file written by a JAXTPC with a uint8 `group_sizes` is refused: a
+group of more than 255 entries wrapped, and every later group on its plane
+decodes at the wrong pixels. Regenerate such a batch.
+
+`particle.min_pc_size` for hit mode is **63** in the preset. It was fitted on
+the sensor-masked hits of a 10-event batch: each EDepSim particle's LE-ness
+from its hits, against the same particle's from truth deposits at the
+default 5.
+
+| `min_pc_size` (hits) | 13 | 40 | 60 | **63** | 85 | 150 |
+|---|---|---|---|---|---|---|
+| agrees with truth@5 | 86.6% | 95.2% | 99.2% | **99.26%** | 98.7% | 97.5% |
+
+The per-event best ranged 58–70. The fit is at reader level, where each
+particle is classified once; defragmentation also uses the value, to decide
+which split-off pieces become LE, and that use was not tuned separately.
+
+### What the output stores (JAXTPC input)
+
+Wire and pixel output have the same shape: the true energy deposits behind
+the hits, organised by pysupera particle, and a label for every hit.
+
+**`points/flat` — the true deposits.** Every Geant4 segment whose JAXTPC
+group left hits, given to the particle owning that group — exactly, through
+its deposits, for wire; by the majority of its hits for pixel. The values come
+from the EDepSim step each segment was made from, at full precision:
+
+| column | unit | per 3 mm voxel (`particle.voxelize.store=voxels`, default) |
+|---|---|---|
+| x, y, z | mm | cell centre |
+| t | µs | earliest step |
+| dE | MeV | summed |
+| dX | cm | summed |
+| theta, phi | rad | earliest step — direction, theta from the z axis |
+| p | MeV/c | earliest step — momentum magnitude |
+
+`particle.voxelize.store=points` writes every segment instead. The grid is
+`particle.voxelize.voxel_size` / `origin`, the one that also drives proximity
+and the extent classification. All the particle ranges (`pc_*`, `frag_pc_*`,
+`inst_pc_*`, LE split) index these rows, so a fragment's or instance's true
+deposits are one slice. Segments whose group left no hits — with pixel, no
+hit on the sensor image — are not stored; most of that is charge that arrived
+after the readout window closed.
+
+**`hit_labels/` — one label per hit, aligned with the JAXTPC hits file.**
+For every plane of every volume, entry *k* labels CSR entry *k* of that plane
+in the hits file (`volume_V/<source>`), so a loader reads hits and labels
+with the same index:
+
+```
+hit_labels/volume{V}/plane{P}/        attrs: source ("U", "V", "Y" or "Pixel")
+    fragment_id   int32   the fragment row the hit belongs to; -1 untraced
+    instance_id   int32   the instance row; -1 untraced
+    is_le         bool    the hit's particle is kLEScatter
+    on_sensor     bool    pixel only: its pixel is in the sensor image
+    offsets       int64   per-event fenceposts
+```
+
+`P` is JAXTPC's plane index (U, V, Y = 0, 1, 2; a pixel readout has one).
+For wire every hit is labelled by its group's owner. For pixel each hit is
+labelled by the particle it was partitioned into, and exactly the hits off
+the sensor image are -1 — checked when the file is written. A fragment row's
+`frag_inst_id` names its instance, so hit → fragment → instance needs no
+point ranges; every fragment and instance a hit names has a row.
+
+```python
+with read_events_v3("out.h5") as store:
+    labels = store.hit_labels(0)     # {(volume, plane): {name: array}}
+    frag = labels[(0, 1)]["fragment_id"]   # volume 0, plane V
+```
+
+| per 10 events | pixel | wire |
+|---|---|---|
+| `points/flat` (3 mm voxels) | 1.9 MB | 2.9 MB |
+| `hit_labels/` | 10.5 MB (28.9M hits) | 2.2 MB (16.8M hits) |
+| whole file | ~14 MB | ~7 MB |
 
 #### The drift coordinate — `reader.hit_x_from`
 
@@ -966,41 +1026,6 @@ to 1094 μs → **175 cm**. So `nominal` is a rigid translation per interaction:
 each keeps its own shape to sub-mm while whole interactions slide past one
 another. `true_t0` puts the real `t0` back and reproduces truth `x` to
 ~0.3 mm, keeping every other detector effect.
-
-#### Recovering the true x — `points/true_x_shift`
-
-A wire-mode output stores truth geometry, so `x` is the true x. A pixel
-hit-mode output under `nominal` does not: every point is displaced along the
-drift axis by its interaction's own `t0`. The true position is kept anyway,
-as a displacement rather than a second coordinate:
-
-```python
-with read_events_v3("out_hits.h5") as store:
-    view  = store[0]
-    shift = store.true_x_shift(0)          # None for files written before this
-    true_x = view.points[:, 0] + shift
-```
-
-Zero throughout under `true_t0` and in deposit mode, so the relation holds
-for every file and a consumer never has to ask which convention produced it.
-
-It costs almost nothing because it is `drift_direction · t0 · v`, which takes
-one value per *(interaction, volume)* pair — 28 in a test event, not 4.2M.
-Measured on one event: 1.31 MB raw, **0.007 MB on disk under LZ4, 0.14% of
-the output**; 7 ms to compute over 4.18M hits; +16.7 MB transient memory.
-
-Stored per point rather than per particle because of a small but heavy
-exception. The shift is exactly constant within a particle for 99.97% of
-them — but the two that are not are cathode-crossing tracks with hits in
-both volumes, where `drift_direction` flips, and they carry **15% of all
-points** with internal spreads up to 204 mm.
-
-The stored rows are voxels, so a voxel could in principle mix two shifts;
-each takes the value of a hit that made it. Measured, 0.09% of voxels mix
-anything at all and the worst disagreement inside one is **0.05 mm** — the
-sub-microsecond `t0` jitter within an interaction. The 200 mm case never
-shares a voxel, because the nominal x is precisely what slides those two
-halves apart.
 
 #### The reference tick — `reader.hit_reference_tick`
 
@@ -1121,9 +1146,10 @@ A track is 3.2× thicker in the pixel image, which is diffusion plus the
 field response over about three pixel pitches. Measured over ten events, the
 best-agreeing cut per event ranged 81–90, and at a fixed 85 the sensor-hit
 labelling matches the truth-deposit labelling on **99.0%** of particles
-(worst event 98.5%) — not merely the same fraction, the same particles. So
-with `reader.point_source=hits`, set `particle.min_pc_size=85`; a run that
-forgets warns.
+(worst event 98.5%) — not merely the same fraction, the same particles. That was measured before the uint8
+`group_sizes` fix and the sensor mask; on the masked hits the best value is
+63 (99.26%), which `reader=jaxtpc_pixel` sets — see
+[Which pixels: the sensor image](#which-pixels-the-sensor-image).
 
 Note this also changed truth-deposit labelling, from 85.8% to 95.3% LE,
 because particles spread over a handful of rows inside one or two voxels are
@@ -1238,7 +1264,7 @@ about 21% of the output under LZ4, less under gzip.
 
 `vis_hits.html` shows this mapping directly — 3-D voxels beside the 2-D
 readout planes, hover either side to light up the other. See
-[Browser viewers](#browser-viewers-vis_forcehtml-vis_hitshtml) for its
+[Browser viewers](#browser-viewers) for its
 controls and for preparing its two inputs.
 
 #### Exact per-voxel provenance — `particle.voxelize.store_mapping=true`

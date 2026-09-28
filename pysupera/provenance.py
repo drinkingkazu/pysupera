@@ -273,3 +273,95 @@ def groups_of_particles(group_owner, particle_ids):
     if not len(want):
         return np.zeros(0, dtype=np.int64)
     return np.flatnonzero(np.isin(group_owner, want))
+
+
+def voxelize_truth(pc, voxel_size, origin):
+    """
+    Bin one particle's truth segments on a regular grid.
+
+    Rows are :data:`~pysupera.readers.format_jaxtpc.TRUTH_COLUMNS`: x, y, z,
+    t, dE, dX, theta, phi, p.  Per cell: the cell centre; t the earliest;
+    dE and dX summed; theta, phi and p from that same earliest step -- the
+    particle's direction and momentum as it entered the cell, where an average
+    would shrink |p| and blur the direction wherever the track turns.
+    """
+    if not len(pc):
+        return pc
+    vs = np.broadcast_to(np.asarray(voxel_size, dtype=np.float64), (3,))
+    org = (pc[:, :3].min(axis=0).astype(np.float64) if origin is None
+           else np.asarray(origin, dtype=np.float64))
+    cell = np.floor((pc[:, :3] - org) / vs).astype(np.int64)
+    uniq, inv = np.unique(cell, axis=0, return_inverse=True)
+    inv = inv.reshape(-1)
+    # each cell's earliest step: sort by (cell, t), take each cell's first
+    order = np.lexsort((pc[:, 3], inv))
+    first = order[np.r_[True, inv[order][1:] != inv[order][:-1]]]
+    out = np.zeros((len(uniq), pc.shape[1]), dtype=pc.dtype)
+    out[:, :3] = (uniq + 0.5) * vs + org
+    out[:, 3] = pc[first, 3]
+    out[:, 4] = np.bincount(inv, weights=pc[:, 4], minlength=len(uniq))
+    out[:, 5] = np.bincount(inv, weights=pc[:, 5], minlength=len(uniq))
+    if pc.shape[1] > 6:
+        out[:, 6:] = pc[first, 6:]
+    return out
+
+
+def attach_truth_clouds(particles, owner, flat, group, voxel_size=None,
+                        origin=None):
+    """
+    Give every particle the true segments behind the hits it owns.
+
+    A segment goes wherever its group went: the owner in *owner* is the
+    particle holding the group's hits (by majority where a group's hits
+    straddle a split), so the truth cloud describes exactly the particles
+    the hit cloud does, and inherits their fragment, instance and LE side.
+    Segments of groups nothing owns -- every hit masked, or never recorded
+    -- are left out; the model sees no pixel of them.
+
+    Parameters
+    ----------
+    particles : list of Particle
+        Each gets ``truth_cloud``, ``(k, 6)`` float32, possibly empty.
+    owner : ndarray of int32
+        :func:`build_group_owners` output: owning particle id per group.
+    flat, group : ndarray
+        Every segment of the event as a TRUTH_COLUMNS row, and its
+        event-global group.
+    voxel_size : float, sequence of 3, or None
+        Voxelize each particle's segments on this grid with
+        :func:`voxelize_truth`.  None keeps the segments as they are.
+    origin : sequence of 3 or None
+        Grid corner, as for ``particle.voxelize.origin``.
+
+    Returns
+    -------
+    dict
+        ``n_segments`` in the event, ``n_owned`` of them attached, ``n_rows``
+        stored after voxelization.
+    """
+    group = np.asarray(group, dtype=np.int64)
+    ok = (group >= 0) & (group < len(owner))
+    seg_owner = np.full(len(group), NO_OWNER, dtype=np.int64)
+    seg_owner[ok] = owner[group[ok]]
+    sel = np.flatnonzero(seg_owner != NO_OWNER)
+    by_owner = seg_owner[sel]
+    order = np.argsort(by_owner, kind="stable")
+    sel, by_owner = sel[order], by_owner[order]
+    ids, starts = np.unique(by_owner, return_index=True)
+    ends = np.r_[starts[1:], len(by_owner)]
+    span = {int(i): (int(a), int(b)) for i, a, b in zip(ids, starts, ends)}
+
+    vs = None if voxel_size is None else np.broadcast_to(
+        np.asarray(voxel_size, dtype=np.float64), (3,))
+    org = None if origin is None else np.asarray(origin, dtype=np.float64)
+
+    n_rows = 0
+    for p in particles:
+        a, b = span.get(int(p.id), (0, 0))
+        pc = np.asarray(flat[sel[a:b]], dtype=np.float32)
+        if vs is not None and len(pc):
+            pc = voxelize_truth(pc, vs, org).astype(np.float32, copy=False)
+        p.truth_cloud = pc
+        n_rows += len(pc)
+    return {"n_segments": int(len(group)), "n_owned": int(len(sel)),
+            "n_rows": int(n_rows)}

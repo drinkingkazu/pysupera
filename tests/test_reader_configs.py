@@ -55,6 +55,11 @@ def test_jaxtpc_configs_demand_their_input_paths(name):
         assert OmegaConf.is_missing(cfg.reader, key)
 
 
+def test_the_hit_reader_also_demands_the_sensor_file():
+    """Its pixels are the ones that become points."""
+    assert OmegaConf.is_missing(_cfg("jaxtpc_pixel").reader, "jaxtpc_sensor_path")
+
+
 @pytest.mark.parametrize("name", ("jaxtpc_wire", "jaxtpc_pixel"))
 def test_a_jaxtpc_config_without_paths_is_refused(name):
     """
@@ -83,13 +88,15 @@ def test_only_the_pixel_config_carries_the_hit_options():
     for key in ("point_source", "hit_x_from", "hit_energy",
                 "hit_reference_tick", "pixel_pitch_mm",
                 "pixel_drift_direction", "jaxtpc_sensor_path"):
-        assert key in pixel, f"pixel config lost {key}"
+        # `in` is False for a mandatory (???) value, which the sensor path is
+        assert key in pixel or OmegaConf.is_missing(pixel, key), \
+            f"pixel config lost {key}"
         assert key not in wire, f"wire config should not offer {key}"
 
 
 def test_pixel_defaults_are_the_documented_ones():
     r = _cfg("jaxtpc_pixel").reader
-    assert r.point_source == "deposits"      # truth geometry unless asked
+    assert r.point_source == "hits"          # what the sensors recorded
     assert r.hit_x_from == "nominal"         # the detector's own inference
     assert r.hit_energy == "charge"
     assert r.hit_reference_tick == 0
@@ -108,6 +115,41 @@ def test_pixel_geometry_defaults_to_the_reference_detector():
     assert r.pixel_pitch_mm == 4.32                      # 0.432 cm
     assert list(r.pixel_drift_direction) == [-1, 1]      # shared cathode
     assert r.pixel_geometry_from_fit is False            # stated, then checked
+
+
+# ---------------------------------------------------------------------------
+# Settings that come with a reader (conf/readout/)
+# ---------------------------------------------------------------------------
+
+def test_the_pixel_reader_brings_the_hit_mode_settings():
+    """Hits need values outside the reader group; choosing the reader is enough."""
+    cfg = _cfg("jaxtpc_pixel")
+    assert cfg.particle.min_pc_size == 63
+    assert cfg.particle.voxelize.store == "voxels"          # 3 mm truth voxels
+    assert cfg.distance_threshold > 4.32 * 2 ** 0.5
+    assert cfg.check_group_ownership is False
+
+
+@pytest.mark.parametrize("name", ("edepsim_h5", "jaxtpc_wire"))
+def test_every_other_reader_keeps_the_truth_defaults(name):
+    cfg = _cfg(name)
+    assert cfg.particle.min_pc_size == 5
+    assert cfg.particle.voxelize.store == "voxels"
+    assert cfg.distance_threshold == 5.2
+    assert cfg.check_group_ownership is True
+
+
+def test_switching_the_pixel_reader_to_deposits_is_refused():
+    """A pixel batch is read as its hits; there is no deposit mode for it."""
+    from pysupera.config import check_readout_settings
+    with pytest.raises(ValueError, match="not supported"):
+        check_readout_settings(_cfg("jaxtpc_pixel", "reader.point_source=deposits"))
+    check_readout_settings(_cfg("jaxtpc_pixel"))                 # fine
+
+
+def test_a_flag_still_beats_the_reader_settings():
+    cfg = _cfg("jaxtpc_pixel", "particle.min_pc_size=40", "distance_threshold=7")
+    assert cfg.particle.min_pc_size == 40 and cfg.distance_threshold == 7
 
 
 # ---------------------------------------------------------------------------
@@ -136,8 +178,12 @@ def test_preset_fills_in_everything_a_sensor_hit_run_needs():
     cfg = _preset()
     assert cfg.reader.pixel_pitch_mm == 4.32
     assert list(cfg.reader.pixel_drift_direction) == [-1, 1]
-    assert cfg.reader.hit_charge_threshold == 500
-    assert cfg.particle.min_pc_size == 13
+    # The sensor image sets the threshold; a per-share cut would leave
+    # sensor pixels unlabelled.
+    assert cfg.reader.hit_charge_threshold == 0
+    assert cfg.particle.min_pc_size == 63
+    # points/flat: the true deposits behind the hits, 3 mm voxels
+    assert cfg.particle.voxelize.store == "voxels"
     # must clear the pixel diagonal, 4.32 * sqrt(2) = 6.11 mm
     assert cfg.distance_threshold > 4.32 * 2 ** 0.5
     # a group's hits straddle fragment splits in hit mode, so the invariant
@@ -145,21 +191,10 @@ def test_preset_fills_in_everything_a_sensor_hit_run_needs():
     assert cfg.check_group_ownership is False
 
 
-def test_the_threshold_and_min_pc_size_are_the_matched_pair():
-    """
-    They move together: cutting the halo thins the tracks, which lowers the
-    extent threshold.  85 goes with a threshold of 0 and 13 with 500;
-    mixing them agrees with the truth labelling on 85% of particles instead
-    of 95%.  This pins the pairing the preset ships.
-    """
-    cfg = _preset()
-    assert (cfg.reader.hit_charge_threshold, cfg.particle.min_pc_size) == (500, 13)
-
-
 def test_a_command_line_flag_still_beats_the_preset():
-    cfg = _preset("particle.min_pc_size=42", "reader.hit_charge_threshold=0")
+    cfg = _preset("particle.min_pc_size=42", "reader.hit_charge_threshold=3")
     assert cfg.particle.min_pc_size == 42
-    assert cfg.reader.hit_charge_threshold == 0
+    assert cfg.reader.hit_charge_threshold == 3
 
 
 def test_without_the_preset_nothing_changes():

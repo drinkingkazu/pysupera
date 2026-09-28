@@ -458,6 +458,24 @@ def _opt_float(node, key):
     return None if v is None else float(v)
 
 
+def check_readout_settings(cfg):
+    """
+    Raise when a reader's out-of-group settings do not fit how it reads.
+
+    reader=jaxtpc_pixel reads the detected hits and brings hit-mode values
+    for min_pc_size, distance_threshold and the rest
+    (conf/readout/jaxtpc_pixel.yaml).  A pixel batch is not read any other
+    way, so overriding reader.point_source is refused rather than run with
+    those settings.
+    """
+    marker = cfg.get("readout_settings", None)
+    source = str(cfg.reader.get("point_source", "hits"))
+    if marker == "pixel_hits" and source != "hits":
+        raise ValueError(
+            "reader=jaxtpc_pixel reads a pixel batch as its detected hits "
+            f"(reader.point_source=hits); {source!r} is not supported.")
+
+
 def build_reader(cfg: DictConfig):
     """
     Instantiate an :class:`~pysupera.readers.EventReaderBase` described by
@@ -475,11 +493,10 @@ def build_reader(cfg: DictConfig):
     JAXTPC readout simulation.  All particle-level metadata still comes from
     the EDepSim file at *cfg.io.input_path*.
 
-    ``cfg.reader.point_source`` then chooses what a point *is*: ``deposits``
-    (default) keeps truth geometry and lets the readout select, while
-    ``hits`` replaces the cloud with the detected pixel image.  See
-    ``pysupera.readers.pixel_hits`` for the ``hit_x_from`` and ``hit_energy``
-    conventions.
+    What a point *is* follows the readout: a wire batch is read as the
+    deposits its hits select (truth geometry), a pixel batch as its detected
+    hits.  See ``pysupera.readers.pixel_hits`` for the ``hit_x_from`` and
+    ``hit_energy`` conventions.
 
     With JAXTPC masking disabled (default)::
 
@@ -533,7 +550,8 @@ def build_reader(cfg: DictConfig):
         # Note: `k in cfg.reader` is False for a MISSING value, so the
         # membership test cannot be used to spot one -- is_missing can, and
         # returns False for a key the config genuinely does not declare.
-        _missing = [k for k in ("jaxtpc_seg_path", "jaxtpc_inst_path")
+        _missing = [k for k in ("jaxtpc_seg_path", "jaxtpc_inst_path",
+                                "jaxtpc_sensor_path")
                     if OmegaConf.is_missing(cfg.reader, k)]
         if _missing:
             raise ValueError(
@@ -542,8 +560,10 @@ def build_reader(cfg: DictConfig):
                 + ".  Pass them on the command line, e.g.\n"
                 "    reader.jaxtpc_seg_path=batch/step/run/name_step_0000_00.h5\n"
                 "    reader.jaxtpc_inst_path=batch/hits/run/name_hits_0000_00.h5\n"
+                "    reader.jaxtpc_sensor_path=batch/sensor/run/name_sensor_0000_00.h5\n"
                 "Use reader=edepsim_h5 to read the EDepSim steps directly "
                 "instead.")
+        check_readout_settings(cfg)
 
         jaxtpc_active = bool(seg_path) and bool(inst_path)
 
@@ -562,8 +582,10 @@ def build_reader(cfg: DictConfig):
                                                 "electron_energy_threshold", 0.05)),
                 min_pc_size               = int(cfg.particle.get("min_pc_size", -1)),
                 voxel_size                = _classify_voxel_size(cfg),
-                point_source              = str(cfg.reader.get("point_source",
-                                                "deposits")),
+                # None follows the readout: hits for pixel, deposits for wire.
+                point_source              = (str(cfg.reader.point_source)
+                                             if cfg.reader.get("point_source", None)
+                                             else None),
                 hit_x_from                = str(cfg.reader.get("hit_x_from",
                                                 "nominal")),
                 hit_energy                = str(cfg.reader.get("hit_energy",
@@ -585,6 +607,10 @@ def build_reader(cfg: DictConfig):
                                                 "readout_time_step_us"),
                 pixel_geometry_from_fit   = bool(cfg.reader.get(
                                                 "pixel_geometry_from_fit", False)),
+                step_key                  = str(cfg.reader.get("step_key",
+                                                "pstep/lar_vol")),
+                # points/flat is these segments, so they are always read.
+                truth_segments            = True,
             )
 
         # Default: full EDepSim reader (no JAXTPC masking).

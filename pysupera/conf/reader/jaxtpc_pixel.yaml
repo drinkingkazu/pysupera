@@ -1,25 +1,18 @@
-# JAXTPC pixel-readout input.
+# JAXTPC pixel-readout input, read as the detected image: a point is a hit on
+# a sensor pixel -- the energy the sensors recorded.
 #
 #   run_pysupera reader=jaxtpc_pixel \
 #       io.input_path=edepsim.h5 io.output_path=out.h5 \
 #       reader.jaxtpc_seg_path=batch/step/run/name_step_0000_00.h5 \
-#       reader.jaxtpc_inst_path=batch/hits/run/name_hits_0000_00.h5
+#       reader.jaxtpc_inst_path=batch/hits/run/name_hits_0000_00.h5 \
+#       reader.jaxtpc_sensor_path=batch/sensor/run/name_sensor_0000_00.h5
 #
-# As reader=jaxtpc_wire, but the readout is a single Pixel plane per volume
-# recording two pixel indices and a drift tick -- a natively 3-D image.  That
-# is what makes point_source=hits possible here and not for wire.
+# The settings that go with hits but live outside this group -- min_pc_size,
+# distance_threshold, check_group_ownership, what a stored point is -- come
+# with it from readout/jaxtpc_pixel.yaml.
 #
-# For the detected-image mode, add:
-#
-#       reader.point_source=hits \
-#       reader.jaxtpc_sensor_path=batch/sensor/run/name_sensor_0000_00.h5 \
-#       reader.pixel_pitch_mm=4.32 'reader.pixel_drift_direction=[-1,1]' \
-#       check_group_ownership=false distance_threshold=6.2
-#
-# distance_threshold must clear the pixel diagonal (pitch * sqrt(2)) or
-# defragmentation measures the pixel grid instead of the physics, and
-# check_group_ownership must be off because a group's hits can straddle a
-# fragment split.  Both are explained in the README.
+# A pixel readout records two pixel indices and a drift tick -- a natively 3-D
+# image -- which is what makes hits possible here and not for wire.
 
 defaults:
   - edepsim_h5
@@ -34,19 +27,16 @@ jaxtpc_inst_path: ???
 # ---------------------------------------------------------------------------
 # What a point is  (JAXTPC pixel readout only)
 # ---------------------------------------------------------------------------
-# deposits (default) — a point is a Geant4 energy deposit that the readout
-#                      detected.  The geometry is truth geometry; the readout
-#                      only decides which deposits survive.
-# hits               — a point is a fired pixel.  (py, pz, tick) is converted
-#                      back to (x, y, z), so the cloud carries pixelation,
-#                      diffusion, threshold and the drift-time ambiguity, and
-#                      the partitioner sees what the detector saw.  Requires a
-#                      pixel-readout hits file; wire readout has no 3-D image
-#                      to convert.
+# hits — a point is a hit on a sensor pixel.  (py, pz, tick) is converted
+#        back to (x, y, z), so the cloud carries pixelation, diffusion,
+#        threshold and the drift-time ambiguity, and the partitioner sees what
+#        the detector saw.  Requires a pixel-readout hits file and its sensor
+#        file.  The only way a pixel batch is read: the truth segments behind
+#        the hits are written alongside, in truth/.
 #
-# Roughly 4.2M points per event against 143k detected deposits, so expect the
+# Roughly 3M hits per event against 143k detected deposits, so expect the
 # run to cost accordingly.
-point_source: deposits
+point_source: hits
 
 # How the drift coordinate is obtained, when point_source=hits.
 #
@@ -72,25 +62,17 @@ point_source: deposits
 #          truth x to ~0.3 mm on group centres, 5.8 mm per hit.
 hit_x_from: nominal
 
-# Drop sensor hits carrying less than this much charge, in the units the
-# JAXTPC hits file uses: ionisation electrons induced on the pixel.  0
-# disables the cut.
+# Drop hits carrying less than this much charge, in ADC -- the units of the
+# JAXTPC hits file, which is the sensor image split by group.  0 disables
+# the cut, and 0 is the setting to keep.
 #
-# Compared against the magnitude, matching JAXTPC's own encoder: the readout
-# response is bipolar and about 16% of hits are negative, which is signal
-# rather than noise.
-#
-# Why a default at all.  JAXTPC applies no threshold worth the name -- 1
-# electron in the batch this was developed against -- so every pixel
-# carrying any induced-field influence reaches the point cloud: 4.18M points
-# for an event whose truth is 216k deposits, with the brightest 2% carrying
-# half the charge and the rest forming a halo two to three pixels wide
-# around every real deposit.
-#
-# For scale, the same run's sensor file states threshold_adc 7.0 at
-# 182 electrons_per_adc, i.e. 1274 electrons on the digitised waveform; 500
-# is deliberately below that.
-hit_charge_threshold: 500
+# Which pixels become points is decided by the sensor image, not by this:
+# with point_source=hits a hit is kept only on a pixel the sensor file holds,
+# i.e. one whose summed response JAXTPC kept at |ADC| >= threshold_adc (7 in
+# the batch this was developed against).  That makes the cloud the model's
+# input image pixel for pixel.  A cut here is applied per group share, after
+# the mask, so anything above 0 leaves sensor pixels with no label.
+hit_charge_threshold: 0
 
 # ---------------------------------------------------------------------------
 # Pixel geometry  (required by point_source=hits)
@@ -115,9 +97,11 @@ hit_charge_threshold: 500
 # Run without them once and the error lists what the data is consistent with,
 # so the values can be copied from it and then verified on the next run.
 
-# JAXTPC sensor HDF5 file.  Supplies velocity_cm_us and time_step_us, so they
-# do not have to be restated here.  Optional if both are given below.
-jaxtpc_sensor_path: ~
+# JAXTPC sensor HDF5 file.  Required by point_source=hits: its pixels are the
+# ones that become points (see hit_charge_threshold), and it must come from
+# the same JAXTPC run as jaxtpc_inst_path -- checked, not assumed.  It also
+# supplies velocity_cm_us and time_step_us, so they need not be restated.
+jaxtpc_sensor_path: ???
 
 # Pixel pitch in mm (square grid assumed).  Defaulted to the cubic_pixel
 # detector this was developed against (pixel_pitch 0.432 cm); change it for

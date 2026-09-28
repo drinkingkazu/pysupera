@@ -12,3 +12,22 @@ output_path: ???   # e.g. /data/events_merged.h5
 # compression_opts: only relevant for gzip (1=fast … 9=best).
 compression: lz4
 compression_opts: ~
+
+# How points/flat -- the bulk of the file -- is stored.  compression above
+# covers everything else.
+points:
+  # columns: chunks one column wide (16384 rows x 1), so each chunk holds a
+  # single quantity and compresses like it.  rows: chunks of whole rows.
+  # Measured on a pixel-hit file: 78.7 MB as rows, 45.6 MB as columns; a
+  # slice spanning all six columns then reads about 1.5x slower (six chunks
+  # instead of one), a single column 3x faster.
+  chunks: columns
+  # Bitshuffle + LZ4 instead of plain LZ4.  It groups the bits of every value
+  # before compressing, which pays off on continuous columns (wire deposits:
+  # 1.1 -> 0.8 MB) and on a rounded energy column (below); it costs a little
+  # on the gridded x, y, z of hits.
+  bitshuffle: true
+  # Round the energy column (column 4) to this many float32 mantissa bits:
+  # a relative error of at most 2^-(bits+1) at any magnitude.  null keeps it
+  # exact, which every reader does by default.
+  energy_mantissa_bits: ~

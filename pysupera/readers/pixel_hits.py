@@ -17,6 +17,19 @@ Every hit still has one Geant4 particle: a CSR entry belongs to exactly one
 group, and ``group_to_track`` gives each group one track.  The assignment is
 therefore unique without any nearest-neighbour matching.
 
+Which pixels: the sensor image
+------------------------------
+The hits file is the sensor image split by group: summed over groups, a
+pixel's hit charge is its sensor ADC (to the int16 storage precision).  But
+JAXTPC thresholds the *sum* -- ``|ADC| >= threshold_adc``, 7 in the batch
+this was written against -- and writes every group's share regardless, so
+about half the pixels in the hits file are ones the sensor never recorded.
+The labels are for a model whose input is that sensor image, so the cloud is
+masked to it: a hit survives only on a pixel the sensor file holds.  The
+threshold is read from the image rather than re-applied to summed hits,
+because a sum rebuilt from int16 shares lands on either side of 7 for pixels
+right at it.
+
 The inverse transform
 ---------------------
 ``y`` and ``z`` are pure geometry and invert exactly::
@@ -87,10 +100,14 @@ from ..utils import PointFeature
 #: diffusion-only path and is still read, matching JAXTPC's own loader.
 _CHARGE_SCALE = {'charges_i16': 32767.0, 'charges_u16': 65535.0}
 
-#: ``group_sizes`` is uint8, so a group of more than 255 entries cannot be
-#: represented.  JAXTPC caps rather than raising, and a capped group silently
-#: truncates the CSR, so it is worth naming when it happens.
-_MAX_GROUP_SIZE = 255
+#: Bits per coordinate in :func:`pixel_key`, and the bias that keeps a
+#: negative index (a tick before the window, say) from reaching the sign bit.
+_KEY_BITS = 21
+_KEY_BIAS = 1 << (_KEY_BITS - 1)
+
+
+class HitsFileError(ValueError):
+    """A hits file whose CSR does not describe its own arrays."""
 
 
 @dataclass(frozen=True)
@@ -174,18 +191,30 @@ def decode_plane_hits(plane) -> dict:
         per fired pixel/tick, plus ``group`` (int32), the volume-local group
         number each entry belongs to.
 
-    Notes
-    -----
-    The delta arrays are longer than ``group_sizes.sum()`` — JAXTPC pads them
-    to a chunk boundary.  The CSR length is the sum, never the array length;
-    reading to the end would append hundreds of zero-delta ghosts sitting on
-    top of the last group's peak.
+    Raises
+    ------
+    HitsFileError
+        When the arrays are longer than ``group_sizes.sum()``.  JAXTPC once
+        stored ``group_sizes`` as uint8, so a group of more than 255 entries
+        wrapped (300 became 44) and every later group on the plane decodes
+        at another group's pixels.  The lost 256s are the excess, which is
+        why it is always a multiple of 256; the sizes it came from cannot be
+        read back from the file, so the batch has to be regenerated.
     """
     sizes = plane['group_sizes'][:].astype(np.int64)
     groups = plane['group_ids'][:].astype(np.int32)
     n = int(sizes.sum())
 
-    capped = int((sizes >= _MAX_GROUP_SIZE).sum())
+    length = len(plane['delta_py'])
+    if length != n:
+        raise HitsFileError(
+            f"pixel plane {plane.name!r}: group_sizes sums to {n:,} but the "
+            f"CSR arrays hold {length:,} entries ({(length - n) / 256:g} x "
+            f"256 lost).  JAXTPC wrote this file with a uint8 group_sizes, "
+            f"so a group of more than 255 entries wrapped and every later "
+            f"group on the plane would be decoded at the wrong pixels.  "
+            f"Regenerate the batch with a JAXTPC that writes group_sizes as "
+            f"uint16.")
 
     key = next((k for k in _CHARGE_SCALE if k in plane), None)
     if key is None:
@@ -207,7 +236,61 @@ def decode_plane_hits(plane) -> dict:
     charge = peak * (plane[key][:n].astype(np.float32) / _CHARGE_SCALE[key])
 
     return {'py': py, 'pz': pz, 'tick': tick, 'charge': charge,
-            'group': np.repeat(groups, sizes), 'n_capped_groups': capped}
+            'group': np.repeat(groups, sizes)}
+
+
+def decode_sensor_plane(plane) -> dict:
+    """
+    Pixel coordinates of one plane of the JAXTPC sensor image.
+
+    The sensor file stores the pixels JAXTPC kept -- ``|ADC| >= threshold_adc``
+    on the summed response -- sorted by ``(py, pz, tick)``, as a start value
+    plus cumulative int16 differences.  Only the coordinates are returned:
+    the image decides *which* pixels exist, and the hits say whose they are.
+
+    A plane that recorded nothing has no ``n_pixels`` attribute and comes back
+    empty.
+    """
+    empty = np.zeros(0, dtype=np.int32)
+    if 'n_pixels' not in plane.attrs:
+        return {'py': empty, 'pz': empty, 'tick': empty}
+    out = {}
+    for name, delta, start in (('py', 'delta_py', 'py_start'),
+                               ('pz', 'delta_pz', 'pz_start'),
+                               ('tick', 'delta_time', 'time_start')):
+        # int64 before the running sum: the deltas are int16, and a sum in
+        # int16 would wrap on any plane wider than 32767 pixels or ticks.
+        d = np.cumsum(plane[delta][:].astype(np.int64))
+        out[name] = (int(plane.attrs[start]) + d).astype(np.int32)
+    return out
+
+
+def pixel_key(py, pz, tick):
+    """
+    One int64 per ``(py, pz, tick)``, so pixel sets compare as sorted arrays.
+
+    21 bits per coordinate, biased so a negative index keeps its own key
+    rather than colliding with a positive one.
+    """
+    b = np.int64(_KEY_BIAS)
+    return (((np.asarray(py, dtype=np.int64) + b) << (2 * _KEY_BITS))
+            | ((np.asarray(pz, dtype=np.int64) + b) << _KEY_BITS)
+            | (np.asarray(tick, dtype=np.int64) + b))
+
+
+def on_sensor(sensor_keys, py, pz, tick):
+    """Which ``(py, pz, tick)`` are pixels of the sorted *sensor_keys*."""
+    k = pixel_key(py, pz, tick)
+    if not len(sensor_keys):
+        return np.zeros(len(k), dtype=bool)
+    pos = np.searchsorted(sensor_keys, k).clip(0, len(sensor_keys) - 1)
+    return sensor_keys[pos] == k
+
+
+def _select(hits, keep):
+    """The entries of a :func:`decode_plane_hits` dict where *keep* holds."""
+    return {k: (v[keep] if isinstance(v, np.ndarray) else v)
+            for k, v in hits.items()}
 
 
 # ---------------------------------------------------------------------------
@@ -257,7 +340,8 @@ def build_hit_point_cloud(volumes, track_ids_edepsim, *,
                           x_from: str = 'nominal',
                           energy: str = 'charge',
                           time_step_us: float = 1.0,
-                          charge_threshold: float = 0.0):
+                          charge_threshold: float = 0.0,
+                          return_index: bool = False):
     """
     A flat point cloud of detected pixel hits, laid out per particle.
 
@@ -268,7 +352,12 @@ def build_hit_point_cloud(volumes, track_ids_edepsim, *,
         output), ``geom`` (:class:`VolumePixelGeometry`), ``group_to_track``,
         ``group_offset`` (where this volume's groups start in the event-global
         numbering) and, when the corresponding option is selected,
-        ``group_t0`` and ``group_de``.
+        ``group_t0`` and ``group_de``.  ``sensor``, when present, is the
+        sorted :func:`pixel_key` of every pixel in that volume's sensor
+        image; only hits on those pixels are kept.  That is what makes the
+        cloud the model's input pixel for pixel: the sensor decided the
+        threshold on the summed response, and a hit's own charge cannot
+        reproduce that decision.
     track_ids_edepsim : ndarray
         Track IDs in EDepSim particle order.  The returned offsets are
         aligned to it, so ``Particle.from_flat_arrays`` pairs each metadata
@@ -283,15 +372,18 @@ def build_hit_point_cloud(volumes, track_ids_edepsim, *,
         Readout tick length, used to put the time column in μs.
     charge_threshold : float
         Drop hits carrying less than this much charge, in the units the hits
-        file uses -- ionisation electrons induced on the pixel.  Compared
-        against the *magnitude*, matching JAXTPC's own
-        ``encode_correspondence_csr_pixel``: the readout response is
-        bipolar, and a large negative lobe is signal, not noise.
+        file uses -- ADC, the same as the sensor image, of which the hits are
+        the per-group decomposition.  Compared against the *magnitude*,
+        matching JAXTPC's own ``encode_correspondence_csr_pixel``: the
+        readout response is bipolar, and a large negative lobe is signal,
+        not noise.  Applied after the sensor mask, so anything above 0 leaves
+        sensor pixels unlabelled; 0 is the setting that keeps the cloud equal
+        to the input image.
 
-        JAXTPC applies no threshold worth the name (1 electron in this
-        batch), so without one every pixel carrying any induced-field
-        influence is a point: 4.18M of them for an event whose truth is
-        216k deposits, and the brightest 2% carry half the charge.
+    return_index : bool
+        Also return, per row, the ``index`` each volume's hits dict carried
+        (-1 when a volume had none) -- the reader puts the hit's position in
+        the JAXTPC hits CSR there.  Appended after *stats*.
 
     Returns
     -------
@@ -309,6 +401,9 @@ def build_hit_point_cloud(volumes, track_ids_edepsim, *,
     stats : dict
         Includes ``n_outside_volume``: nominal x values beyond their own
         volume's faces.  Counted, never clipped -- see the module docstring.
+        With a sensor image, ``n_sensor_pixels``, ``n_off_sensor`` (hits the
+        mask removed) and ``n_sensor_unlabelled`` (sensor pixels no kept hit
+        lands on -- none, for a hits file that decomposes its sensor file).
     """
     if x_from not in X_FROM:
         raise ValueError(f"x_from must be one of {X_FROM}, got {x_from!r}")
@@ -316,30 +411,40 @@ def build_hit_point_cloud(volumes, track_ids_edepsim, *,
         raise ValueError(f"energy must be one of {ENERGY_FROM}, got {energy!r}")
 
     xs, ys, zs, ts, es, gs, tr, sh = [], [], [], [], [], [], [], []
-    n_capped = 0
+    ix = []            # each kept hit's CSR index, when the caller gave one
     n_outside = 0
     n_cut = 0          # hits dropped by charge_threshold
-    n_decoded = 0      # hits in the file, before that cut
+    n_decoded = 0      # hits in the file, before any cut
+    n_sensor = 0       # pixels in the sensor image
+    n_off_sensor = 0   # hits on no sensor pixel
+    n_unlabelled = 0   # sensor pixels no kept hit lands on
 
     for vol in volumes:
         hits = vol['hits']
+        n_decoded += len(hits['group'])
+
+        # Counted before the empty-volume skip: a volume with sensor pixels
+        # and no hits is exactly the case the unlabelled count exists for.
+        sensor = vol.get('sensor')
+        if sensor is not None:
+            keep = on_sensor(sensor, hits['py'], hits['pz'], hits['tick'])
+            n_sensor += len(sensor)
+            n_off_sensor += int((~keep).sum())
+            hits = _select(hits, keep)
+
+        if charge_threshold > 0:
+            keep = np.abs(hits['charge']) >= charge_threshold
+            n_cut += int((~keep).sum())
+            hits = _select(hits, keep)
+
+        if sensor is not None:
+            n_unlabelled += len(sensor) - len(np.unique(
+                pixel_key(hits['py'], hits['pz'], hits['tick'])))
+
         if not len(hits['group']):
             continue
-        n_capped += int(hits.get('n_capped_groups', 0))
-        n_decoded += len(hits['group'])
         geom = vol['geom']
         g_local = hits['group']
-
-        q_raw = hits['charge']
-        if charge_threshold > 0:
-            keep = np.abs(q_raw) >= charge_threshold
-            n_cut += int((~keep).sum())
-            if not keep.all():
-                hits = {k: (v[keep] if isinstance(v, np.ndarray) else v)
-                        for k, v in hits.items()}
-                g_local = hits['group']
-                if not len(g_local):
-                    continue
 
         tick = hits['tick'].astype(np.float32)
         if x_from == 'true_t0':
@@ -389,16 +494,21 @@ def build_hit_point_cloud(volumes, track_ids_edepsim, *,
 
         gs.append(g_local.astype(np.int64) + int(vol['group_offset']))
         tr.append(vol['group_to_track'][g_local].astype(np.int64))
+        if 'index' in hits:
+            ix.append(np.asarray(hits['index'], dtype=np.int64))
 
     n_particles = len(track_ids_edepsim)
     if not xs:
-        return (np.zeros((0, 7), dtype=np.float32),
-                np.zeros((n_particles, 2), dtype=np.int64),
-                np.zeros(0, dtype=np.int64),
-                np.zeros(0, dtype=np.float32),
-                {'n_hits': 0, 'n_attached': 0, 'n_unmatched': 0,
-                 'n_capped_groups': n_capped, 'n_outside_volume': 0,
-                 'n_decoded': n_decoded, 'n_below_threshold': n_cut})
+        out = (np.zeros((0, 7), dtype=np.float32),
+               np.zeros((n_particles, 2), dtype=np.int64),
+               np.zeros(0, dtype=np.int64),
+               np.zeros(0, dtype=np.float32),
+               {'n_hits': 0, 'n_attached': 0, 'n_unmatched': 0,
+                'n_outside_volume': 0,
+                'n_decoded': n_decoded, 'n_below_threshold': n_cut,
+                'n_sensor_pixels': n_sensor, 'n_off_sensor': n_off_sensor,
+                'n_sensor_unlabelled': n_unlabelled})
+        return out + (np.zeros(0, dtype=np.int64),) if return_index else out
 
     x = np.concatenate(xs); y = np.concatenate(ys); z = np.concatenate(zs)
     t = np.concatenate(ts); e = np.concatenate(es)
@@ -447,8 +557,14 @@ def build_hit_point_cloud(volumes, track_ids_edepsim, *,
     flat[:, PointFeature.id] = np.arange(m, dtype=np.float32)
 
     stats = {'n_hits': n_hits, 'n_attached': m, 'n_unmatched': n_hits - m,
-             'n_capped_groups': n_capped, 'n_outside_volume': n_outside,
-             'n_decoded': n_decoded, 'n_below_threshold': n_cut}
+             'n_outside_volume': n_outside,
+             'n_decoded': n_decoded, 'n_below_threshold': n_cut,
+             'n_sensor_pixels': n_sensor, 'n_off_sensor': n_off_sensor,
+             'n_sensor_unlabelled': n_unlabelled}
+    if return_index:
+        index = (np.concatenate(ix) if len(ix) == len(xs) else
+                 np.full(n_hits, -1, dtype=np.int64))
+        return flat, offsets, group[sel], shift[sel], stats, index[sel]
     return flat, offsets, group[sel], shift[sel], stats
 
 

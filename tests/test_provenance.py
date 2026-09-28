@@ -123,3 +123,63 @@ class TestQueries:
     def test_unowned_is_never_selected(self):
         owner = np.array([NO_OWNER, NO_OWNER], dtype=np.int32)
         assert len(groups_of_particles(owner, [NO_OWNER])) == 0
+
+
+class TestAttachTruthClouds:
+    """The true segments behind the hits follow their group's owner."""
+
+    @staticmethod
+    def segs():
+        # x, y, z [mm], t [us], dE [MeV], dX [cm]; groups 0, 0, 1, 2, -1
+        flat = np.array([[0.1, 0, 0, 5, 1, .03], [0.2, 0, 0, 3, 2, .03],
+                         [9, 9, 9, 1, 4, .03], [50, 50, 50, 0, 8, .03],
+                         [70, 70, 70, 0, 16, .03]], dtype=np.float32)
+        return flat, np.array([0, 0, 1, 2, -1], dtype=np.int64)
+
+    def test_segments_go_to_the_owner_of_their_group(self):
+        from pysupera.provenance import attach_truth_clouds
+        ps = [FakeParticle(7, []), FakeParticle(9, [])]
+        owner = np.array([7, 9, NO_OWNER], dtype=np.int32)
+        stats = attach_truth_clouds(ps, owner, *self.segs())
+        np.testing.assert_array_equal(ps[0].truth_cloud[:, 4], [1, 2])
+        np.testing.assert_array_equal(ps[1].truth_cloud[:, 4], [4])
+        # group 2 is unowned and -1 is no group: neither is attached
+        assert stats == {"n_segments": 5, "n_owned": 3, "n_rows": 3}
+
+    def test_voxelizing_merges_with_the_deposit_rules(self):
+        from pysupera.provenance import attach_truth_clouds
+        ps = [FakeParticle(7, [])]
+        owner = np.array([7, NO_OWNER, NO_OWNER], dtype=np.int32)
+        attach_truth_clouds(ps, owner, *self.segs(), voxel_size=3.0,
+                            origin=[0, 0, 0])
+        tc = ps[0].truth_cloud
+        assert len(tc) == 1                          # both segments in one cell
+        np.testing.assert_allclose(tc[0, :3], [1.5, 1.5, 1.5])   # cell centre
+        assert tc[0, 3] == 3                         # t: earliest
+        assert tc[0, 4] == 3                         # dE summed
+        assert tc[0, 5] == pytest.approx(0.06)       # dX summed
+
+    def test_voxels_take_direction_and_momentum_from_the_earliest_step(self):
+        """
+        With the nine truth columns, a voxel's theta, phi and |p| are those of
+        its earliest step -- not zero, and not an average.
+        """
+        from pysupera.provenance import attach_truth_clouds
+        # x, y, z, t, dE, dX, theta, phi, p; two steps in one 3 mm cell
+        flat = np.array([[0.1, 0, 0, 5, 1, .03, 1.0, 2.0, 50.0],
+                         [0.2, 0, 0, 3, 2, .03, 0.5, -1.0, 80.0]], dtype=np.float32)
+        ps = [FakeParticle(7, [])]
+        attach_truth_clouds(ps, np.array([7], dtype=np.int32), flat,
+                            np.array([0, 0], dtype=np.int64),
+                            voxel_size=3.0, origin=[0, 0, 0])
+        tc = ps[0].truth_cloud
+        assert len(tc) == 1 and tc[0, 3] == 3            # earliest t
+        np.testing.assert_allclose(tc[0, 6:], [0.5, -1.0, 80.0])
+        assert tc[0, 4] == 3                             # dE summed
+
+    def test_particles_owning_nothing_get_an_empty_cloud(self):
+        from pysupera.provenance import attach_truth_clouds
+        ps = [FakeParticle(7, []), FakeParticle(8, [])]
+        owner = np.array([7, 7, 7], dtype=np.int32)
+        attach_truth_clouds(ps, owner, *self.segs())
+        assert ps[1].truth_cloud.shape == (0, 6)

@@ -14,6 +14,7 @@ import pytest
 
 from pysupera.readers.pixel_hits import (
     ENERGY_FROM,
+    HitsFileError,
     PixelGeometryError,
     VolumePixelGeometry,
     X_FROM,
@@ -21,7 +22,10 @@ from pysupera.readers.pixel_hits import (
     calibrate_volume,
     window_truncation,
     decode_plane_hits,
+    decode_sensor_plane,
     group_reductions,
+    on_sensor,
+    pixel_key,
 )
 from pysupera.utils import PointFeature
 
@@ -31,8 +35,12 @@ from pysupera.utils import PointFeature
 # ---------------------------------------------------------------------------
 
 class FakePlane(dict):
-    """Enough of an h5py group for decode_plane_hits: __contains__ and [] ."""
+    """Enough of an h5py group for the decoders: __contains__, [] and attrs."""
     name = "/fake/Pixel"
+
+    def __init__(self, *a, attrs=None, **kw):
+        super().__init__(*a, **kw)
+        self.attrs = dict(attrs or {})
 
 
 def make_plane(sizes, centres, deltas, peaks, frac, pad=0, charge_key="charges_i16"):
@@ -40,9 +48,9 @@ def make_plane(sizes, centres, deltas, peaks, frac, pad=0, charge_key="charges_i
     A CSR pixel plane.
 
     *deltas* is a list of (dpy, dpz, dt) per entry and *frac* the stored
-    per-entry charge fraction.  *pad* appends unused trailing entries, which
-    is what JAXTPC actually writes -- the delta arrays run to a chunk
-    boundary past ``group_sizes.sum()``.
+    per-entry charge fraction.  *pad* appends trailing entries no group
+    claims, which is what a file written with a wrapped uint8 group_sizes
+    looks like.
     """
     n = sum(sizes)
     d = np.asarray(deltas, dtype=np.int8).reshape(n, 3)
@@ -53,7 +61,7 @@ def make_plane(sizes, centres, deltas, peaks, frac, pad=0, charge_key="charges_i
     c = np.asarray(centres, dtype=np.int16).reshape(len(sizes), 3)
     return FakePlane({
         "group_ids":    np.arange(len(sizes), dtype=np.int32) * 2,   # not 0..G
-        "group_sizes":  np.asarray(sizes, dtype=np.uint8),
+        "group_sizes":  np.asarray(sizes, dtype=np.uint16),
         "center_py":    c[:, 0], "center_pz": c[:, 1], "center_times": c[:, 2],
         "peak_charges": np.asarray(peaks, dtype=np.float32),
         "delta_py":     d[:, 0], "delta_pz": d[:, 1], "delta_times": d[:, 2],
@@ -80,17 +88,18 @@ def test_decode_expands_centres_plus_deltas():
     np.testing.assert_allclose(got["charge"], [100.0, 50.0, -50.0], rtol=1e-3)
 
 
-def test_decode_ignores_the_padding_tail():
+def test_decode_refuses_arrays_longer_than_the_groups():
     """
-    JAXTPC pads the delta arrays past ``group_sizes.sum()``.  Reading to the
-    end of the array instead would append zero-delta ghosts sitting exactly
-    on the last group's peak -- points that look plausible and are not there.
+    Entries no group claims are what a uint8 group_sizes leaves behind: a
+    300-entry group stored as 44, and every later group read 256 entries
+    early.  Decoding anyway would put hits on other groups' pixels, so the
+    file is refused, with the excess expressed in the 256s it lost.
     """
     plane = make_plane(sizes=[2], centres=[[10, 20, 30]],
                        deltas=[[0, 0, 0], [1, 1, 1]], peaks=[10.0],
-                       frac=[32767, 32767], pad=64)
-    got = decode_plane_hits(plane)
-    assert len(got["py"]) == 2
+                       frac=[32767, 32767], pad=256)
+    with pytest.raises(HitsFileError, match="1 x 256 lost"):
+        decode_plane_hits(plane)
 
 
 def test_decode_accepts_the_legacy_unsigned_charge():
@@ -108,10 +117,58 @@ def test_decode_without_a_charge_array_names_the_subset_tool():
         decode_plane_hits(plane)
 
 
-def test_decode_reports_groups_at_the_uint8_cap():
-    plane = make_plane(sizes=[255], centres=[[0, 0, 0]],
-                       deltas=[[0, 0, 0]] * 255, peaks=[1.0], frac=[1] * 255)
-    assert decode_plane_hits(plane)["n_capped_groups"] == 1
+def test_decode_a_group_larger_than_255():
+    """The group a uint8 group_sizes could not hold, and the one after it."""
+    plane = make_plane(sizes=[300, 1], centres=[[0, 0, 0], [50, 60, 70]],
+                       deltas=[[0, 0, 0]] * 301, peaks=[1.0, 2.0],
+                       frac=[32767] * 301)
+    got = decode_plane_hits(plane)
+    assert len(got["py"]) == 301
+    assert (got["group"][:300] == 0).all() and got["group"][300] == 2
+    assert (got["py"][300], got["pz"][300], got["tick"][300]) == (50, 60, 70)
+
+
+# ---------------------------------------------------------------------------
+# The sensor image
+# ---------------------------------------------------------------------------
+
+def make_sensor_plane(py, pz, tick):
+    """A sensor plane as JAXTPC writes it: sorted, start plus int16 steps."""
+    order = np.lexsort((tick, pz, py))
+    py, pz, tick = (np.asarray(a, dtype=np.int32)[order] for a in (py, pz, tick))
+    step = lambda a: np.diff(a, prepend=a[0]).astype(np.int16)
+    return FakePlane(
+        {"delta_py": step(py), "delta_pz": step(pz), "delta_time": step(tick),
+         "values": np.ones(len(py), dtype=np.float32)},
+        attrs={"py_start": int(py[0]), "pz_start": int(pz[0]),
+               "time_start": int(tick[0]), "n_pixels": len(py)})
+
+
+def test_decode_sensor_plane_undoes_the_delta_encoding():
+    plane = make_sensor_plane(py=[3, 1, 1], pz=[0, 5, 5], tick=[9, 2, 400])
+    got = decode_sensor_plane(plane)
+    np.testing.assert_array_equal(got["py"], [1, 1, 3])
+    np.testing.assert_array_equal(got["pz"], [5, 5, 0])
+    np.testing.assert_array_equal(got["tick"], [2, 400, 9])
+
+
+def test_decode_sensor_plane_that_recorded_nothing():
+    """JAXTPC writes no datasets or attributes for an empty plane."""
+    got = decode_sensor_plane(FakePlane({}))
+    assert all(len(v) == 0 for v in got.values())
+
+
+def test_pixel_key_keeps_negative_indices_apart():
+    k = pixel_key([0, 0, 0, 1], [0, 0, 1, 0], [-1, 1, 0, 0])
+    assert len(np.unique(k)) == 4
+
+
+def test_on_sensor_selects_exactly_the_sensor_pixels():
+    sensor = np.unique(pixel_key([1, 2], [1, 2], [10, 20]))
+    np.testing.assert_array_equal(
+        on_sensor(sensor, [1, 1, 2, 3], [1, 1, 2, 3], [10, 11, 20, 30]),
+        [True, False, True, False])
+    assert not on_sensor(np.zeros(0, dtype=np.int64), [1], [1], [1]).any()
 
 
 # ---------------------------------------------------------------------------
@@ -254,7 +311,6 @@ def _one_volume(n_per_group=(2, 2), tracks=(7, 9), t0=(0.0, 100.0),
         "tick":   np.array([10, 10, 20, 20], dtype=np.int32),
         "charge": np.array([3.0, 1.0, 2.0, 2.0], dtype=np.float32),
         "group":  np.repeat([0, 1], n_per_group).astype(np.int32),
-        "n_capped_groups": 0,
     }
     return {"hits": hits, "geom": GEOM,
             "group_to_track": np.array(tracks, dtype=np.int64),
@@ -352,6 +408,61 @@ def test_empty_event_gives_empty_slices():
     assert stats["n_hits"] == 0
 
 
+def _sensor_of(py, pz, tick):
+    return np.unique(pixel_key(py, pz, tick))
+
+
+def test_sensor_mask_keeps_only_the_sensor_pixels():
+    """
+    The hits file also holds the shares of pixels whose summed response
+    stayed under threshold.  With a sensor image only its pixels survive.
+    """
+    vol = _one_volume()
+    vol["sensor"] = _sensor_of([0, 2, 3], [0, 0, 0], [10, 20, 20])  # not py=1
+    flat, _, _, _, stats = build_hit_point_cloud([vol], np.array([7, 9]))
+    assert stats["n_decoded"] == 4 and stats["n_hits"] == 3
+    assert stats["n_off_sensor"] == 1
+    assert stats["n_sensor_pixels"] == 3 and stats["n_sensor_unlabelled"] == 0
+    # py=1 was the hit dropped; pixel centres sit at y_min + (py + 0.5) pitch
+    kept_py = np.round((flat[:, PointFeature.y] - GEOM.y_min_mm)
+                       / GEOM.pitch_mm - 0.5)
+    np.testing.assert_array_equal(np.sort(kept_py), [0, 2, 3])
+
+
+def test_sensor_pixels_no_hit_lands_on_are_counted():
+    vol = _one_volume()
+    vol["sensor"] = _sensor_of([0, 1, 2, 3, 9], [0] * 5, [10, 10, 20, 20, 99])
+    _, _, _, _, stats = build_hit_point_cloud([vol], np.array([7, 9]))
+    assert stats["n_hits"] == 4 and stats["n_sensor_unlabelled"] == 1
+
+
+def test_a_sensor_pixel_shared_by_two_groups_is_one_pixel():
+    """Several particles on one pixel: both hits stay, the pixel counts once."""
+    vol = _one_volume()
+    vol["hits"]["py"] = np.array([0, 0, 2, 3], dtype=np.int32)
+    vol["sensor"] = _sensor_of([0, 2, 3], [0, 0, 0], [10, 20, 20])
+    _, _, _, _, stats = build_hit_point_cloud([vol], np.array([7, 9]))
+    assert stats["n_hits"] == 4 and stats["n_sensor_unlabelled"] == 0
+
+
+def test_a_charge_cut_after_the_mask_shows_up_as_unlabelled_pixels():
+    vol = _one_volume()
+    vol["sensor"] = _sensor_of([0, 1, 2, 3], [0] * 4, [10, 10, 20, 20])
+    _, _, _, _, stats = build_hit_point_cloud([vol], np.array([7, 9]),
+                                              charge_threshold=1.5)
+    assert stats["n_below_threshold"] == 1          # the 1.0 hit at py=1
+    assert stats["n_sensor_unlabelled"] == 1
+
+
+def test_a_volume_with_sensor_pixels_and_no_hits_is_counted():
+    vol = _one_volume()
+    vol["hits"] = {k: v[:0] for k, v in vol["hits"].items()}
+    vol["sensor"] = _sensor_of([5], [5], [5])
+    _, _, _, _, stats = build_hit_point_cloud([vol], np.array([7, 9]))
+    assert stats["n_hits"] == 0
+    assert stats["n_sensor_pixels"] == 1 and stats["n_sensor_unlabelled"] == 1
+
+
 # ---------------------------------------------------------------------------
 # The readout window
 # ---------------------------------------------------------------------------
@@ -447,3 +558,16 @@ def test_shift_follows_the_drift_direction():
     # group 1 has t0 = 100 us; -1 * 100 * 1.6 = -160 mm
     np.testing.assert_allclose(s0[2:], -160.0, atol=1e-3)
     np.testing.assert_allclose(s0[:2], 0.0, atol=1e-6)   # group 0 has t0 = 0
+
+
+def test_voxelizing_always_snaps_to_cell_centres():
+    """
+    Even when no two points share a cell.  Returning such a cloud unchanged
+    left 17% of the truth cloud off its grid while the rest was on it.
+    """
+    from pysupera.preproc import _voxelize_point_cloud
+    pc = np.array([[0.2, 0.2, 0.2, 1, 1, 1], [4.1, 0.2, 0.2, 2, 1, 1]], dtype=np.float32)
+    out, inv = _voxelize_point_cloud(pc, np.array([3.0] * 3), np.zeros(3),
+                                     return_inverse=True)
+    np.testing.assert_allclose(out[:, :3], [[1.5, 1.5, 1.5], [4.5, 1.5, 1.5]])
+    np.testing.assert_array_equal(inv, [0, 1])

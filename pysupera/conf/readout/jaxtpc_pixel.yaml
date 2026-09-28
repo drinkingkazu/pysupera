@@ -1,0 +1,30 @@
+# @package _global_
+#
+# Settings that go with reader=jaxtpc_pixel -- the detected pixel image, i.e.
+# the energy the sensors recorded -- but live outside the reader group.
+# config.yaml loads this file for the chosen reader after its own values,
+# so these replace the truth-deposit defaults; a command-line flag still
+# beats them.  They are only right together.
+
+particle:
+  # Extent below which a particle is a low-energy scatter, in 3 mm voxels.
+  # Tuned on the sensor-masked hits of a 10-event batch: each EDepSim
+  # particle's LE-ness from its hits at this value, against the same
+  # particle's from truth deposits at the default 5.  Agreement peaks at 63
+  # (99.26% of 55k particles; per-event best 58-70) and is flat around it
+  # -- 99.22% at 60, 98.73% at 85.  3 mm * 63^(1/3) = 11.9 mm, the track
+  # width of a 4.32 mm-pitch image.
+  min_pc_size: 63
+
+# Must clear the pixel diagonal (pitch * sqrt(2) = 6.11 mm) or
+# defragmentation measures the pixel grid instead of the physics.
+distance_threshold: 6.2
+
+# A group's hits can straddle a fragment split here -- the readout leaves
+# gaps the deposit cloud does not have -- so the invariant the groups/ table
+# rests on does not hold and the run resolves by majority instead.
+check_group_ownership: false
+
+# Marks these settings as hit-mode ones, so a run that switches the pixel
+# reader back to truth deposits is stopped instead of keeping them.
+readout_settings: pixel_hits

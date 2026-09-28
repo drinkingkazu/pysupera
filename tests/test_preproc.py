@@ -884,3 +884,58 @@ class TestSubsetVoxmap:
     def test_offsets_stay_a_valid_fencepost(self):
         off, ids = subset_voxmap(self._vm(), np.array([True, True, True]))
         assert off[0] == 0 and off[-1] == len(ids)
+
+
+# ---------------------------------------------------------------------------
+# Fast paths: packed-key voxel unique, batched defragmentation
+# ---------------------------------------------------------------------------
+
+from pysupera.preproc import _unique_rows                         # noqa: E402
+
+
+class TestUniqueRows:
+    """_unique_rows must be np.unique(axis=0) exactly, faster or not."""
+
+    @pytest.mark.parametrize("keys", [
+        np.random.default_rng(0).integers(-50, 50, (5000, 4)),      # negative
+        np.c_[np.zeros(200, np.int64),
+              np.random.default_rng(1).integers(0, 3, (200, 3))],   # a constant column
+        np.random.default_rng(2).integers(-2**40, 2**40, (500, 4)),  # too wide: fallback
+        np.array([[7, 7, 7, 7]]),
+    ])
+    def test_matches_numpy(self, keys):
+        uk, inv = np.unique(keys, axis=0, return_inverse=True)
+        got_uk, got_inv = _unique_rows(keys)
+        np.testing.assert_array_equal(got_uk, uk)
+        np.testing.assert_array_equal(got_inv, inv.reshape(-1))
+
+
+class TestBatchedLabels:
+    """
+    The batched path must hand every cloud the labels the per-cloud path
+    does -- same values, not just the same partition -- because
+    _split_fragments numbers spawned particles in label order.
+    """
+
+    def _clouds(self):
+        rng = np.random.default_rng(3)
+        out = []
+        for n in (3, 5, 40, 200, 1, 2):
+            # clouds overlap in space, so only the fourth coordinate keeps
+            # their points out of each other's neighbourhoods
+            out.append(rng.uniform(0, 12, (n, 3)).astype(np.float32))
+        out.append(np.zeros((4, 3), np.float32))                    # coincident
+        out.append(np.array([[0, 0, 0], [100, 0, 0], [0, 100, 0]], np.float32))
+        return out
+
+    def test_same_labels_as_one_at_a_time(self):
+        d = ScipyDefragmenter(distance_threshold=3.0, min_pc_size=2)
+        clouds = self._clouds()
+        for got, xyz in zip(d._get_labels_many(clouds), clouds):
+            np.testing.assert_array_equal(got, d._get_labels(xyz))
+
+    def test_a_single_cloud(self):
+        d = ScipyDefragmenter(distance_threshold=3.0, min_pc_size=2)
+        xyz = self._clouds()[3]
+        np.testing.assert_array_equal(d._get_labels_many([xyz])[0],
+                                      d._get_labels(xyz))

@@ -1657,6 +1657,12 @@ def _verify_same_datasets(src: str, dst: str) -> None:
 def _compression_kwargs_from_filters(ds) -> dict:
     """Reproduce a dataset's third-party filter (LZ4 / Blosc) as kwargs."""
     filters = dict(ds._filters or {})
+    if "32008" in filters:
+        # Bitshuffle; its 5th option names the codec (2 = LZ4, 3 = zstd).
+        import hdf5plugin
+        opts = tuple(filters["32008"] or ())
+        cname = "zstd" if len(opts) > 4 and opts[4] == 3 else "lz4"
+        return dict(hdf5plugin.Bitshuffle(cname=cname))
     if "32004" in filters:
         return _compress_kwargs("lz4", None)
     if "32001" in filters:

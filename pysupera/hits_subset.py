@@ -53,9 +53,56 @@ def _plane_names(vol_group) -> list[str]:
             and "group_ids" in vol_group[k]]
 
 
+#: Per-entry charge datasets JAXTPC writes, and the scale each is stored at.
+_CHARGE = {"charges_i16": 32767.0, "charges_u16": 65535.0}
+
+
+def decode_hits(plane) -> dict:
+    """
+    Every hit of one plane, in CSR order -- the order hit_labels is written in.
+
+    Wire planes give ``hit_wire``; pixel planes ``hit_py`` and ``hit_pz``;
+    both give ``hit_tick`` and ``hit_charge`` (the plane's own units: ENC for
+    wire, ADC for pixel).  A plane whose arrays are longer than its
+    ``group_sizes`` sum -- JAXTPC's old uint8 bug -- is refused, since every
+    later group would decode at another group's cells.
+    """
+    import numpy as np
+    sizes = plane["group_sizes"][:].astype(np.int64)
+    n = int(sizes.sum())
+    if len(plane["delta_times"]) != n:
+        raise ValueError(
+            f"{plane.name}: group_sizes sums to {n:,} but the CSR holds "
+            f"{len(plane['delta_times']):,} entries -- a hits file written "
+            f"with a uint8 group_sizes; regenerate it.")
+    key = next((k for k in _CHARGE if k in plane), None)
+    rep = lambda name: np.repeat(plane[name][:].astype(np.int32), sizes)
+    out = {"hit_tick": (rep("center_times")
+                        + plane["delta_times"][:n].astype(np.int32)).astype(np.int16)}
+    if "center_wires" in plane:
+        out["hit_wire"] = (rep("center_wires")
+                           + plane["delta_wires"][:n].astype(np.int32)).astype(np.int16)
+    else:
+        out["hit_py"] = (rep("center_py")
+                         + plane["delta_py"][:n].astype(np.int32)).astype(np.int16)
+        out["hit_pz"] = (rep("center_pz")
+                         + plane["delta_pz"][:n].astype(np.int32)).astype(np.int16)
+    if key is not None:
+        peak = np.repeat(plane["peak_charges"][:].astype(np.float32), sizes)
+        out["hit_charge"] = (np.abs(peak) * plane[key][:n].astype(np.float32)
+                             / np.float32(_CHARGE[key])).astype(np.float32)
+    return out
+
+
 def extract(src: str, dst: str, n_events: int = 3, level: int = 4,
-            verbose: bool = True) -> dict:
-    """Copy *n_events* worth of the plane arrays from *src* into *dst*."""
+            verbose: bool = True, hits: bool = True) -> dict:
+    """
+    Copy *n_events* worth of the plane arrays from *src* into *dst*.
+
+    With *hits* (the default) every hit is decoded and written too
+    (:func:`decode_hits`), which is what the viewers draw; without, only the
+    group centres, a small fraction of the size.
+    """
     import h5py
     try:
         import hdf5plugin       # noqa: F401  (registers Blosc/LZ4 for reading)
@@ -81,6 +128,15 @@ def extract(src: str, dst: str, n_events: int = 3, level: int = 4,
                 vg = fin[f"{ek}/{vol}"]
                 for plane in _plane_names(vg):
                     planes.add(plane)
+                    # A plane that carries only its centres (a subset of a
+                    # subset, a hand-made file) has no hits to decode.
+                    if hits and all(k in vg[plane] for k in
+                                    ("group_sizes", "delta_times", "center_times")):
+                        for name, arr in decode_hits(vg[plane]).items():
+                            fout.create_dataset(
+                                f"{ek}/{vol}/{plane}/{name}", data=arr,
+                                compression="gzip", compression_opts=level)
+                            n_ds += 1
                     for name in KEEP:
                         if name not in vg[plane]:
                             continue
@@ -124,7 +180,9 @@ def main() -> None:
     p.add_argument("-n", "--events", type=int, default=3,
                    help="Number of events to copy; -1 for all")
     p.add_argument("-l", "--level", type=int, default=4, help="gzip level (1-9)")
+    p.add_argument("--centres-only", action="store_true",
+                   help="Skip the decoded hits and copy only the group centres")
     a = p.parse_args()
     if not 1 <= a.level <= 9:
         p.error("--level must be between 1 and 9")
-    extract(a.src, a.dst, a.events, a.level)
+    extract(a.src, a.dst, a.events, a.level, hits=not a.centres_only)

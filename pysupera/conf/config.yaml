@@ -7,9 +7,9 @@ defaults:
   #   jaxtpc_wire   JAXTPC wire readout (U/V/Y planes).  Particle metadata
   #                 still comes from the EDepSim file at io.input_path; the
   #                 point cloud keeps only deposits the readout detected.
-  #   jaxtpc_pixel  JAXTPC pixel readout (one Pixel plane).  As above, and
-  #                 additionally supports reader.point_source=hits, which
-  #                 replaces the cloud with the detected pixel image.
+  #   jaxtpc_pixel  JAXTPC pixel readout (one Pixel plane), read as the
+  #                 detected image: a point is a hit on a sensor pixel, the
+  #                 energy the sensors recorded.  Needs the sensor file too.
   #
   # Override on the command line with reader=jaxtpc_pixel.  Each variant
   # inherits edepsim_h5 and adds only what its own arrangement needs.
@@ -17,6 +17,11 @@ defaults:
   - checker: cpu_single
   - conditions: default
   - _self_
+  # Settings that go with the chosen reader but live outside its group --
+  # min_pc_size, distance_threshold and the like, for the pixel hits.
+  # Listed after _self_ so they replace the defaults below for that reader;
+  # empty for the others.  A command-line flag still overrides them.
+  - readout: ${reader}
   # Optional bundle of detector-specific values that cut across config
   # groups -- reader geometry, min_pc_size, the thresholds that only make
   # sense together.  Listed after _self_ so it overrides the defaults
@@ -213,28 +218,14 @@ particle:
   # track-width across, (width / voxel_size) ** 3.
   #
   #   truth deposits   track width  4.9 mm -> (4.9/3)^3 =  5   <- this default
-  #   pixel sensor hits            12.8 mm -> (12.8/3)^3 = 77, best fit 85
   #
-  # For sensor hits the width depends on how hard the hits are cut, so this
-  # and reader.hit_charge_threshold are a matched pair -- mixing them is
-  # worse than either:
+  #   pixel sensor hits            11.9 mm -> (11.9/3)^3 = 63
   #
-  #   hit_charge_threshold   track width   min_pc_size   agrees with truth@5
-  #   ----------------------------------------------------------------------
-  #       0 e-                  13.1 mm         85              99.0%
-  #     500 e-                   6.5 mm         13              95.5%
-  #     500 e-                   6.5 mm         85 (mixed)      85.2%
-  #
-  # The uncut pairing keeps every electron and 4.18M points per event; the
-  # 500 e- pairing keeps 73.5% of the charge and 190k points, and runs 4x
-  # faster.  preset=cubic_pixel_hits selects the second.
-  #
-  # Measured over ten events of a 4.32 mm-pitch pixel detector on a 3 mm
-  # grid: the best-agreeing cut per event ranged 81-90, and at a fixed 85
-  # the sensor-hit labelling matches the truth-deposit labelling on 99.0% of
-  # particles.  So with reader.point_source=hits, set:
-  #
-  #   particle.min_pc_size=85
+  # For sensor hits (sensor-masked, pixel pitch 4.32 mm) the value was fitted
+  # rather than derived: each EDepSim particle's LE-ness from its hits
+  # against the same particle's from truth deposits at 5.  Over ten events
+  # agreement peaks at 63 (99.26%; per-event best 58-70), which
+  # preset=cubic_pixel_hits sets.
   min_pc_size: 5
 
   # Pre-processing: voxelize point clouds onto a regular 3-D grid.
@@ -255,6 +246,20 @@ particle:
     # When true, skips the separate merge_duplicates preprocessing step.
     # Safe because exact-coordinate duplicates always fall in the same voxel.
     merge_duplicates: true
+    # What points/flat stores.  With JAXTPC input (wire or pixel) it is the
+    # true energy deposits behind the hits -- every Geant4 segment whose
+    # JAXTPC group left hits, read from the EDepSim steps, given to the
+    # particle owning that group: x, y, z [mm], t [us], dE [MeV], dX [cm],
+    # theta, phi [rad], p [MeV/c].  The hits stay in the JAXTPC hits file,
+    # labelled per hit in hit_labels/.  Without JAXTPC it is the deposits
+    # the partitioning ran on.
+    #   voxels  on this grid (voxel_size, origin), merged per particle: cell
+    #           centres, t the earliest, dE and dX summed, and theta, phi, p
+    #           of the earliest step -- the particle entering the cell.
+    #   points  every segment as it is.
+    # Voxelization on voxel_size drives proximity, defragmentation and the
+    # extent classification whatever is stored.
+    store: voxels
     # Write <output>_voxmap.h5: for every output voxel, which input deposits
     # were merged into it and with what energy.  Useful for truth studies and
     # for debugging voxelization, but it carries one row per *input* point

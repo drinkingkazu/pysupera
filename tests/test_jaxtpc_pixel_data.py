@@ -16,6 +16,10 @@ The directory is expected in JAXTPC's current production layout::
 
     <dir>/step/<run>/<name>_step_<NNNN>_<SS>.h5
     <dir>/hits/<run>/<name>_hits_<NNNN>_<SS>.h5
+    <dir>/sensor/<run>/<name>_sensor_<NNNN>_<SS>.h5
+
+It has to be written by a JAXTPC whose ``group_sizes`` is uint16: an older
+batch is refused on read (see ``test_a_batch_with_wrapped_group_sizes_is_refused``).
 """
 
 import os
@@ -31,7 +35,9 @@ from pysupera.readers.format_jaxtpc import read_readout_type
 
 # Default location: the scratch tree this was developed against.
 _REPO = Path(__file__).resolve().parents[1]
-_DEFAULT_DIR = _REPO.parent / "data" / "jaxtpc_pixel"
+_DEFAULT_DIR = _REPO.parent / "data" / "output_pixel"
+#: The same batch as written before the uint8 group_sizes fix, if kept.
+_WRAPPED_DIR = _REPO.parent / "data" / "jaxtpc_pixel"
 _DEFAULT_EDEPSIM = _REPO.parent / "data" / "kazu.h5"
 
 
@@ -101,17 +107,22 @@ def hit_kwargs(**over):
     return kw
 
 
-@pytest.fixture(scope="module")
-def reader():
+def _wire():
+    """A JAXTPC wire batch for the deposit path, or None when absent."""
+    root = Path(os.environ.get("PYSUPERA_JAXTPC_WIRE_DIR",
+                               str(_REPO.parent / "data" / "output_wireplane")))
+    edep = Path(os.environ.get("PYSUPERA_WIRE_EDEPSIM_H5", str(_DEFAULT_EDEPSIM)))
+    step, hits = _one("step", root), _one("hits", root)
+    if not root.is_dir() or not edep.is_file() or step is None or hits is None:
+        return None
+    return str(edep), str(step), str(hits)
+
+
+def test_it_is_a_pixel_batch():
     from pysupera.readers import JaxtpcHDF5Reader
-    edep, step, hits = _P
-    with JaxtpcHDF5Reader(edepsim_path=str(edep), seg_path=str(step),
-                          inst_path=str(hits)) as r:
-        yield r
-
-
-def test_it_is_a_pixel_batch(reader):
-    assert reader.readout_type == "pixel"
+    with JaxtpcHDF5Reader(**hit_kwargs()) as r:
+        assert r.readout_type == "pixel"
+        assert r.point_source == "hits"
     with h5py.File(_P[2], "r") as f:
         assert read_readout_type(f) == "pixel"
         # One plane per volume, named Pixel -- not three projections.
@@ -121,62 +132,26 @@ def test_it_is_a_pixel_batch(reader):
         assert "center_py" in vol["Pixel"] and "center_wires" not in vol["Pixel"]
 
 
-def test_reads_visible_point_clouds(reader):
-    particles = reader[0]
-    assert len(particles) > 0
-    with_points = [p for p in particles if len(p.point_cloud)]
-    assert with_points, "every particle came back empty"
-    # Visibility is a filter, not a wipe: some deposits survive and some do not.
-    stats = reader.last_mask_stats
-    assert 0 < stats["n_visible"] < stats["n_total"]
+def test_a_pixel_batch_is_not_read_as_deposits():
+    """A pixel batch is read as its hits; there is no deposit mode for it."""
+    from pysupera.readers import JaxtpcHDF5Reader
+    edep, step, hits = (str(x) for x in _P)
+    with pytest.raises(ValueError, match="pixel readout"):
+        JaxtpcHDF5Reader(edepsim_path=edep, seg_path=step, inst_path=hits,
+                         point_source="deposits")
 
 
-def test_deposit_ids_index_the_group_table(reader):
-    """
-    Each particle carries the *input deposit* row behind every point, and
-    ``last_deposit_to_group`` is indexed by exactly that.  If the two ever
-    drift apart the group table silently describes the wrong deposits, so
-    check the bound rather than trust it.
-    """
-    particles = reader[0]
-    d2g = reader.last_deposit_to_group
-    assert d2g is not None and len(d2g)
-    for p in particles:
-        dep = getattr(p, "deposit_id", None)
-        if dep is None or not len(dep):
-            continue
-        assert len(dep) == len(p.point_cloud)
-        assert dep.min() >= 0 and dep.max() < len(d2g)
-
-
-def test_every_visible_deposit_belongs_to_a_readout_group(reader):
-    """
-    The reader's contract: a deposit is in a point cloud only because its
-    group produced a hit.  Verify it the long way round, straight from the
-    file, rather than by re-running the same function.
-    """
-    particles = reader[0]
-    d2g = reader.last_deposit_to_group
-
-    with h5py.File(_P[2], "r") as f:
-        ev = f["event_000"]
-        active, off = set(), 0
-        for vname in sorted(k for k in ev if k.startswith("volume_")):
-            vol = ev[vname]
-            for g in (vol[k] for k in vol if isinstance(vol[k], h5py.Group)):
-                active.update((g["group_ids"][:].astype(np.int64) + off).tolist())
-            off += len(vol["group_to_track"])
-
-    dep = np.concatenate([p.deposit_id for p in particles
-                          if getattr(p, "deposit_id", None) is not None
-                          and len(p.deposit_id)])
-    assert len(dep)
-    assert set(np.unique(d2g[dep]).tolist()) <= active
+def test_the_readout_decides_the_point_source():
+    """Left unset, the reader follows the file: hits for pixel."""
+    from pysupera.readers import JaxtpcHDF5Reader
+    kw = hit_kwargs(); kw.pop("point_source")
+    with JaxtpcHDF5Reader(**kw) as r:
+        assert r.point_source == "hits"
 
 
 def test_subset_of_the_real_file(tmp_path):
     dst = tmp_path / "pixel_small.h5"
-    info = extract(str(_P[2]), str(dst), n_events=1, verbose=False)
+    info = extract(str(_P[2]), str(dst), n_events=1, verbose=False, hits=False)
     assert info["readout"] == "pixel"
     assert info["planes"] == ["Pixel"]
     # The point of the tool: the CSR bulk is what makes the file big.
@@ -186,6 +161,24 @@ def test_subset_of_the_real_file(tmp_path):
         assert {"center_py", "center_pz", "center_times",
                 "peak_charges", "group_ids"} <= set(pg.keys())
         assert read_readout_type(f) == "pixel"
+
+
+def test_subset_decodes_every_hit_in_csr_order(tmp_path):
+    """
+    The viewers draw the subset's decoded hits against hit_labels, entry for
+    entry, so they must be the hits file's own CSR entries in its own order.
+    """
+    from pysupera.readers.pixel_hits import decode_plane_hits
+    dst = tmp_path / "pixel_hits.h5"
+    extract(str(_P[2]), str(dst), n_events=1, verbose=False)
+    with h5py.File(dst, "r") as f, h5py.File(_P[2], "r") as src:
+        for vol in (0, 1):
+            g = f[f"event_000/volume_{vol}/Pixel"]
+            h = decode_plane_hits(src[f"event_000/volume_{vol}/Pixel"])
+            np.testing.assert_array_equal(g["hit_py"][:], h["py"])
+            np.testing.assert_array_equal(g["hit_pz"][:], h["pz"])
+            np.testing.assert_array_equal(g["hit_tick"][:], h["tick"])
+            np.testing.assert_allclose(g["hit_charge"][:], h["charge"], rtol=1e-6)
 
 
 # ---------------------------------------------------------------------------
@@ -288,7 +281,7 @@ def test_fitting_the_geometry_is_opt_in_and_warns():
 def test_hit_mode_attaches_every_hit(hit_reader):
     particles = hit_reader[0]
     st = hit_reader.last_hit_stats
-    assert st["n_hits"] > 1_000_000        # the detected image is not small
+    assert st["n_hits"] > 100_000          # the detected image is not small
     assert st["n_unmatched"] == 0
     assert sum(len(p.point_cloud) for p in particles) == st["n_attached"]
     # A hit belongs to one group and a group to one track, so no hit is shared.
@@ -323,10 +316,18 @@ def test_true_t0_lands_on_the_truth_cloud():
     pytest.importorskip("scipy")
     from scipy.spatial import cKDTree
     from pysupera.readers import JaxtpcHDF5Reader
-    edep, step, hits = (str(x) for x in _P)
-    with JaxtpcHDF5Reader(edepsim_path=edep, seg_path=step,
-                          inst_path=hits) as r:
-        truth = {p.id: p.point_cloud for p in r[0] if len(p.point_cloud)}
+    # The truth: every segment of the event, by the track its group maps to.
+    with JaxtpcHDF5Reader(**hit_kwargs(truth_segments=True)) as r:
+        r[0]
+        flat, group = r.last_truth_segments
+    with h5py.File(_P[2], "r") as f:
+        ev = f["event_000"]
+        g2t = np.concatenate([ev[f"volume_{k}/group_to_track"][:] for k in (0, 1)])
+    track = g2t[group]
+    order = np.argsort(track, kind="stable")
+    tids, starts = np.unique(track[order], return_index=True)
+    ends = np.r_[starts[1:], len(order)]
+    truth = {int(t): flat[order[a:b], :3] for t, a, b in zip(tids, starts, ends)}
 
     got = {}
     for mode in ("true_t0", "nominal"):
@@ -335,10 +336,10 @@ def test_true_t0_lands_on_the_truth_cloud():
                          key=lambda p: -len(p.point_cloud))[:10]
             d = []
             for p in big:
-                t = truth.get(p.id)
+                t = truth.get(int(getattr(p, "geant4_id", -1)))
                 if t is None or len(t) < 20:
                     continue
-                dist, _ = cKDTree(t[:, :3]).query(p.point_cloud[:, :3], k=1)
+                dist, _ = cKDTree(t).query(p.point_cloud[:, :3], k=1)
                 d.append(float(np.median(dist)))
         got[mode] = float(np.median(d))
 
@@ -506,164 +507,9 @@ def test_the_shift_takes_few_distinct_values(hit_reader):
     assert n < 100, f"{n} distinct shifts -- expected a few tens"
 
 
-def test_written_output_carries_the_shift(tmp_path):
-    """
-    End to end: the column survives voxelisation and the write, and reading
-    x back and adding it puts the cloud inside the detector again -- the
-    nominal x does not have to be.
-    """
-    from pysupera.io_v3 import read_events_v3
-    import subprocess
-
-    exe = _run_pysupera()
-    edep, step, hits = (str(x) for x in _P)
-    out = tmp_path / "hits.h5"
-    cmd = [exe, "reader=jaxtpc_pixel",
-           f"io.input_path={edep}", f"io.output_path={out}",
-           f"reader.jaxtpc_seg_path={step}", f"reader.jaxtpc_inst_path={hits}",
-           f"reader.jaxtpc_sensor_path={_sensor()}",
-           "reader.point_source=hits",
-           f"reader.pixel_pitch_mm={PITCH_MM}",
-           "reader.pixel_drift_direction=[-1,1]",
-           "check_group_ownership=false", "distance_threshold=6.2",
-           "max_events=1", "progress=false", "report=false",
-           f"hydra.run.dir={tmp_path}"]
-    r = subprocess.run(cmd, capture_output=True, text=True, timeout=900)
-    assert r.returncode == 0, r.stdout[-3000:] + r.stderr[-3000:]
-
-    with read_events_v3(str(out)) as store:
-        view = store[0]
-        shift = store.true_x_shift(0)
-        assert shift is not None and len(shift) == len(view.points)
-        x = view.points[:, 0]
-        true_x = x + shift
-        # the true positions sit inside the detector; the nominal ones are
-        # displaced by each interaction's own t0 and need not
-        assert true_x.min() > -2160.0 and true_x.max() < 2160.0
-        assert np.abs(shift).max() > 100.0
-
-
-def test_deposit_mode_writes_the_column_as_zero(tmp_path):
-    """
-    The relation true_x = x + true_x_shift should hold for every file, so a
-    deposit-mode run writes zeros rather than omitting the column.
-    """
-    from pysupera.io_v3 import read_events_v3
-    import subprocess
-
-    exe = _run_pysupera()
-    edep, step, hits = (str(x) for x in _P)
-    out = tmp_path / "dep.h5"
-    r = subprocess.run(
-        [exe, "reader=jaxtpc_pixel", f"io.input_path={edep}",
-         f"io.output_path={out}", f"reader.jaxtpc_seg_path={step}",
-         f"reader.jaxtpc_inst_path={hits}", "max_events=1",
-         "progress=false", "report=false", f"hydra.run.dir={tmp_path}"],
-        capture_output=True, text=True, timeout=900)
-    assert r.returncode == 0, r.stdout[-3000:] + r.stderr[-3000:]
-    with read_events_v3(str(out)) as store:
-        shift = store.true_x_shift(0)
-        assert shift is not None and not shift.any()
-
-
 # ---------------------------------------------------------------------------
-# pysupera-truth-subset, and the run metadata the viewers read
+# The run metadata the viewers read
 # ---------------------------------------------------------------------------
-
-def test_truth_subset_carries_what_the_viewer_needs(tmp_path):
-    """
-    vis_truth.html labels a truth deposit by walking deposit -> group ->
-    fragment, so it needs the deposit positions from the step file and
-    deposit_to_group from the hits file -- and it cannot read either, both
-    being Blosc.  The extract has to bring all of it across as gzip.
-    """
-    from pysupera.truth_subset import extract
-    _edep, step, hits = (str(x) for x in _P)
-    dst = tmp_path / "truth.h5"
-    info = extract(step, hits, str(dst), n_events=1, verbose=False)
-    assert info["events"] == 1 and info["deposits"] > 0
-    with h5py.File(dst, "r") as f:
-        vol = f["event_000/volume_0"]
-        assert {"positions", "de", "charge", "deposit_to_group"} <= set(vol.keys())
-        n = int(vol.attrs["n_actual"])
-        # every array is truncated to the real row count, not the padded shape
-        for k in ("positions", "de", "charge", "deposit_to_group"):
-            assert vol[k].shape[0] == n
-        # the attributes needed to put positions back into mm
-        for a in ("pos_step_mm", "pos_origin_x", "pos_origin_y", "pos_origin_z"):
-            assert a in vol.attrs
-        # gzip, or the browser cannot open it
-        assert vol["positions"].compression == "gzip"
-    # and it is worth doing: two Blosc files of tens of MB become one small one
-    assert info["size_after"] < (info["size_step"] + info["size_hits"]) / 5
-
-
-def test_truth_subset_charge_and_de_are_different_quantities(tmp_path):
-    """
-    Both are kept because they answer different questions -- dE is energy in
-    MeV, charge is the ionisation electrons that survived recombination --
-    and the viewer thresholds on one while showing the other.
-    """
-    from pysupera.truth_subset import extract
-    _edep, step, hits = (str(x) for x in _P)
-    dst = tmp_path / "truth.h5"
-    extract(step, hits, str(dst), n_events=1, verbose=False)
-    with h5py.File(dst, "r") as f:
-        de = f["event_000/volume_0/de"][:]
-        ch = f["event_000/volume_0/charge"][:]
-    assert de.dtype == np.float32 and ch.dtype == np.float32   # not float16
-    assert np.median(de) < 1.0 and np.median(ch) > 100.0       # MeV vs electrons
-
-
-def test_the_deposit_to_group_chain_closes(tmp_path):
-    """
-    The join vis_truth.html performs: a deposit's group, shifted by the
-    volume offset, must index the output's groups/fragment_id.  If those two
-    numbering spaces ever drift apart the viewer paints truth deposits with
-    another object's label and nothing raises.
-    """
-    from pysupera.truth_subset import extract
-    from pysupera.io_v3 import read_events_v3
-    import subprocess
-
-    exe = _run_pysupera()
-    edep, step, hits = (str(x) for x in _P)
-    out = tmp_path / "out.h5"
-    r = subprocess.run(
-        [exe, "reader=jaxtpc_pixel", f"io.input_path={edep}",
-         f"io.output_path={out}", f"reader.jaxtpc_seg_path={step}",
-         f"reader.jaxtpc_inst_path={hits}",
-         f"reader.jaxtpc_sensor_path={_sensor()}", "reader.point_source=hits",
-         f"reader.pixel_pitch_mm={PITCH_MM}",
-         "reader.pixel_drift_direction=[-1,1]",
-         "check_group_ownership=false", "distance_threshold=6.2",
-         "max_events=1", "progress=false", "report=false",
-         f"hydra.run.dir={tmp_path}"],
-        capture_output=True, text=True, timeout=900)
-    assert r.returncode == 0, r.stdout[-3000:] + r.stderr[-3000:]
-
-    truth = tmp_path / "truth.h5"
-    extract(step, hits, str(truth), n_events=1, verbose=False)
-
-    with h5py.File(out, "r") as fo, h5py.File(truth, "r") as ft:
-        go = fo["groups/offsets"][:]
-        vi = fo["groups/volume_offsets_index"][:]
-        ga, gb = int(go[0]), int(go[1])
-        frag = fo["groups/fragment_id"][ga:gb]
-        voff = fo["groups/volume_offsets"][int(vi[0]):int(vi[1])]
-        labelled = total = 0
-        for v, vol in enumerate(sorted(k for k in ft["event_000"]
-                                       if k.startswith("volume_"))):
-            g = ft[f"event_000/{vol}/deposit_to_group"][:].astype(np.int64)
-            g = g + int(voff[v])
-            total += len(g)
-            # every group number must land inside the table, not past its end
-            assert g.min() >= 0 and g.max() < len(frag), \
-                f"{vol}: group {g.max()} outside a table of {len(frag)}"
-            labelled += int((frag[g] >= 0).sum())
-    # most deposits are claimed; the rest are the ones the readout never saw
-    assert 0.3 < labelled / total < 1.0
-
 
 def test_output_records_how_it_was_made(tmp_path):
     """
@@ -693,3 +539,230 @@ def test_output_records_how_it_was_made(tmp_path):
     assert a.get("hit_energy") == "charge"
     assert a.get("hit_x_from") == "nominal"
     assert a.get("readout_type") == "pixel"
+
+
+# ---------------------------------------------------------------------------
+# The sensor image decides which pixels exist
+# ---------------------------------------------------------------------------
+
+def _sensor_pixel_count(event_key="event_000"):
+    """Pixels JAXTPC wrote to the sensor file, counted from its attributes."""
+    with h5py.File(_sensor(), "r") as f:
+        ev = f[event_key]
+        return sum(int(ev[v][p].attrs.get("n_pixels", 0))
+                   for v in ev for p in ev[v])
+
+
+def test_every_sensor_pixel_is_labelled_and_nothing_else_is(hit_reader):
+    """
+    The labels are for a model whose input is the sensor image, so the cloud
+    has to cover that image exactly: no sensor pixel without a hit on it, and
+    no hit off it.  The hits file holds about twice as many pixels -- every
+    group's share, whether or not the sum passed threshold -- so the mask
+    has real work to do.
+    """
+    hit_reader[0]
+    st = hit_reader.last_hit_stats
+    assert st["n_sensor_pixels"] == _sensor_pixel_count()
+    assert st["n_sensor_unlabelled"] == 0
+    assert st["n_off_sensor"] > 0
+    assert st["n_hits"] + st["n_off_sensor"] == st["n_decoded"]
+
+
+def test_hit_mode_needs_the_sensor_file():
+    from pysupera.readers import JaxtpcHDF5Reader
+    with pytest.raises(ValueError, match="jaxtpc_sensor_path"):
+        JaxtpcHDF5Reader(**hit_kwargs(sensor_path=None))
+
+
+def test_a_sensor_file_from_another_run_is_refused(tmp_path):
+    """A mask from another run would keep whatever happens to overlap."""
+    import shutil
+    from pysupera.readers import JaxtpcHDF5Reader
+    other = tmp_path / "other_sensor.h5"
+    shutil.copy(_sensor(), other)
+    with h5py.File(other, "a") as f:
+        f["config"].attrs["batch_timestamp"] = 1
+    with pytest.raises(ValueError, match="different JAXTPC runs"):
+        JaxtpcHDF5Reader(**hit_kwargs(sensor_path=str(other)))
+
+
+@pytest.mark.skipif(not (_WRAPPED_DIR / "hits").is_dir(),
+                    reason=f"no pre-fix batch at {_WRAPPED_DIR}")
+def test_a_batch_with_wrapped_group_sizes_is_refused():
+    """
+    The batch as JAXTPC first wrote it: uint8 group_sizes, so each group of
+    more than 255 entries shifted every later group on its plane.  Decoding
+    it would put about 8% of the sensor pixels' labels on the wrong pixels.
+    """
+    from pysupera.readers import JaxtpcHDF5Reader
+    from pysupera.readers.pixel_hits import HitsFileError
+    old = {d: str(sorted((_WRAPPED_DIR / d).rglob("*.h5"))[0])
+           for d in ("step", "hits", "sensor")}
+    kw = hit_kwargs(seg_path=old["step"], inst_path=old["hits"],
+                    sensor_path=old["sensor"])
+    with JaxtpcHDF5Reader(**kw) as r:
+        with pytest.raises(HitsFileError, match="x 256 lost"):
+            r[0]
+
+
+def test_every_segment_arrives_with_its_step_values_and_group():
+    """
+    The truth cloud is built downstream from these, by group ownership, so
+    every segment has to arrive -- in either mode -- with a group inside the
+    event's group space and its EDepSim step's values: the seg file's own
+    (rounded) position, time and dX must agree.
+    """
+    from pysupera.readers import JaxtpcHDF5Reader
+    edep, step, hits = (str(x) for x in _P)
+    with JaxtpcHDF5Reader(**hit_kwargs(truth_segments=True)) as r:
+        r[0]
+        flat, group = r.last_truth_segments
+        segs = r._load_seg_volumes("event_000")
+        n_groups = r.last_n_groups
+    seg = np.concatenate([s_["positions_mm"][:s_["n_actual"]] for s_ in segs
+                          if s_["n_actual"]])
+    assert flat.shape == (len(seg), 9) and len(group) == len(seg)
+    assert group.min() >= 0
+    if n_groups is not None:
+        assert group.max() < n_groups
+    np.testing.assert_allclose(flat[:, :3], seg, atol=0.16)      # 0.3 mm grid
+    t0 = np.concatenate([s_["t0_us"][:s_["n_actual"]] for s_ in segs if s_["n_actual"]])
+    np.testing.assert_allclose(flat[:, 3], t0, atol=0.6)          # float16 us
+    dx = np.concatenate([s_["dx"][:s_["n_actual"]] for s_ in segs if s_["n_actual"]])
+    np.testing.assert_allclose(flat[:, 5] * 10.0, dx, rtol=2e-3, atol=1e-4)  # cm vs mm (float16)
+    assert (flat[:, 4] >= 0).all()
+    # direction and momentum: theta in [0, pi], phi in [-pi, pi], |p| > 0
+    assert (flat[:, 6] >= 0).all() and (flat[:, 6] <= np.pi + 1e-3).all()
+    assert (np.abs(flat[:, 7]) <= np.pi + 1e-3).all() and (flat[:, 8] > 0).all()
+
+
+def test_without_truth_segments_the_reader_reads_none(hit_reader):
+    hit_reader[0]
+    assert hit_reader.last_truth_segments is None
+
+
+
+def _run_to(tmp_path, reader, edep, step, hits, *extra):
+    """Run the pipeline from this tree on one event; the output path."""
+    import subprocess, sys
+    out = tmp_path / f"{reader}.h5"
+    code = ("import sys; from pysupera._run import main; "
+            "sys.argv[0] = 'run_pysupera'; main()")
+    r = subprocess.run(
+        [sys.executable, "-c", code, f"reader={reader}",
+         f"io.input_path={edep}", f"io.output_path={out}",
+         f"reader.jaxtpc_seg_path={step}", f"reader.jaxtpc_inst_path={hits}",
+         "max_events=1", "progress=false", f"hydra.run.dir={tmp_path}", *extra],
+        cwd=str(_REPO), capture_output=True, text=True)
+    assert r.returncode == 0, r.stdout[-2000:] + r.stderr[-2000:]
+    return str(out)
+
+
+def _check_labels_against_the_hits_file(out, hits):
+    """Shared: one label per CSR entry, naming real rows, instance consistent."""
+    from pysupera.io_v3 import read_events_v3, check_ranges
+    assert check_ranges(out) == []
+    with read_events_v3(out) as st:
+        v = st[0]
+        lab = st.hit_labels(0)
+        assert st.point_columns == ("x", "y", "z", "t", "dE", "dX",
+                                    "theta", "phi", "p")
+    # every voxel carries a real direction and momentum (its earliest step)
+    assert (v.points[:, 8] > 0).all()
+    assert (v.points[:, 6] >= 0).all() and (v.points[:, 6] <= np.pi + 1e-3).all()
+    c = v.columns
+    frag_rows = {int(i) for i, f in zip(c["id"], c["frag_id"]) if f == i}
+    inst_rows = {int(i) for i, j in zip(c["id"], c["inst_id"]) if j == i}
+    frag_inst = {int(i): int(x) for i, x in zip(c["id"], c["frag_inst_id"])}
+    with h5py.File(hits, "r") as f:
+        for (vol, pl), d in lab.items():
+            g = f[f"event_000/volume_{vol}/{d['source']}"]
+            assert len(d["fragment_id"]) == int(g["group_sizes"][:].astype(np.int64).sum())
+            fr, ins = d["fragment_id"], d["instance_id"]
+            t = fr >= 0
+            assert set(np.unique(fr[t]).tolist()) <= frag_rows
+            assert set(np.unique(ins[ins >= 0]).tolist()) <= inst_rows
+            assert all(frag_inst[int(a)] == int(b) for a, b in
+                       set(zip(fr[t].tolist(), ins[t].tolist())))
+    return v, lab
+
+
+def test_pixel_hit_labels_follow_the_sensor_image(tmp_path):
+    """
+    Pixel: every CSR entry gets a label, and exactly the hits whose pixel the
+    sensor file lacks are untraced (-1, on_sensor False) -- checked here
+    against the sensor file itself, not the reader's own mask.
+    """
+    from pysupera.readers.pixel_hits import (decode_plane_hits,
+                                             decode_sensor_plane, pixel_key,
+                                             on_sensor)
+    edep, step, hits = (str(x) for x in _P)
+    out = _run_to(tmp_path, "jaxtpc_pixel", edep, step, hits,
+                  f"reader.jaxtpc_sensor_path={_sensor()}")
+    v, lab = _check_labels_against_the_hits_file(out, hits)
+    assert set(lab) == {(0, 0), (1, 0)}
+    with h5py.File(hits, "r") as fh, h5py.File(_sensor(), "r") as fs:
+        for (vol, _), d in lab.items():
+            h = decode_plane_hits(fh[f"event_000/volume_{vol}/Pixel"])
+            s = decode_sensor_plane(fs[f"event_000/volume_{vol}/Pixel"])
+            on = on_sensor(np.unique(pixel_key(s["py"], s["pz"], s["tick"])),
+                           h["py"], h["pz"], h["tick"])
+            np.testing.assert_array_equal(d["on_sensor"], on)
+            np.testing.assert_array_equal(d["fragment_id"] >= 0, on)
+
+
+@pytest.mark.skipif(_wire() is None, reason="no JAXTPC wire batch")
+def test_wire_hit_labels_are_the_group_owners(tmp_path):
+    """Wire: every plane's hits labelled by the fragment owning their group."""
+    edep, step, hits = _wire()
+    out = _run_to(tmp_path, "jaxtpc_wire", edep, step, hits)
+    v, lab = _check_labels_against_the_hits_file(out, hits)
+    from pysupera.io_v3 import read_events_v3
+    with read_events_v3(out) as st:
+        fo, le, voff = st.group_owners(0)
+    with h5py.File(hits, "r") as f:
+        for (vol, pl), d in lab.items():
+            assert "on_sensor" not in d
+            g = f[f"event_000/volume_{vol}/{d['source']}"]
+            gid = (np.repeat(g["group_ids"][:].astype(np.int64),
+                             g["group_sizes"][:].astype(np.int64)) + int(voff[vol]))
+            np.testing.assert_array_equal(d["fragment_id"], fo[gid])
+
+
+
+@pytest.mark.skipif(_wire() is None, reason="no JAXTPC wire batch")
+def test_deposit_points_and_voxels_describe_the_same_fragments(tmp_path):
+    """
+    For truth deposits -- the wire readout -- store=points writes each
+    deposit and store=voxels the proximity-grid voxels.  Only what a point
+    is may differ: the same fragments, with the same energy each.
+    """
+    import subprocess, sys
+    from pysupera.io_v3 import read_events_v3, check_ranges
+    edep, step, hits = _wire()
+    code = ("import sys; from pysupera._run import main; "
+            "sys.argv[0] = 'run_pysupera'; main()")
+    energy, rows = {}, {}
+    for store in ("points", "voxels"):
+        out = tmp_path / f"{store}.h5"
+        r = subprocess.run(
+            [sys.executable, "-c", code, "reader=jaxtpc_wire",
+             f"io.input_path={edep}", f"io.output_path={out}",
+             f"reader.jaxtpc_seg_path={step}", f"reader.jaxtpc_inst_path={hits}",
+             "max_events=1", f"particle.voxelize.store={store}",
+             "progress=false", f"hydra.run.dir={tmp_path}"],
+            cwd=str(_REPO), capture_output=True, text=True)
+        assert r.returncode == 0, r.stdout[-2000:] + r.stderr[-2000:]
+        assert check_ranges(str(out)) == []
+        with read_events_v3(str(out)) as st:
+            v = st[0]
+            f = v.group_of_points("frag")
+            ids, inv = np.unique(f, return_inverse=True)
+            energy[store] = dict(zip(ids.tolist(), np.bincount(
+                inv, weights=v.points[:, 4].astype(np.float64)).tolist()))
+            rows[store] = len(v.points)
+    assert rows["points"] > rows["voxels"]
+    assert set(energy["points"]) == set(energy["voxels"])
+    for k, e in energy["points"].items():
+        assert e == pytest.approx(energy["voxels"][k], rel=1e-5)

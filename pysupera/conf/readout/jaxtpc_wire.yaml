@@ -1,0 +1,4 @@
+# @package _global_
+#
+# Settings that go with reader=jaxtpc_wire but live outside the reader group.  None:
+# this reader runs on the defaults in config.yaml.  See readout/jaxtpc_pixel.

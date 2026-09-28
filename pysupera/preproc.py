@@ -151,6 +151,38 @@ class MergeRecord:
 # Shared helper
 # ============================================================================
 
+def _unique_rows(keys: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """
+    ``np.unique(keys, axis=0, return_inverse=True)`` for an int64 key table.
+
+    The row-wise unique sorts a structured view and is an order of magnitude
+    slower than a 1-D sort, so when every column's range fits, the columns
+    are packed into one int64 -- offset to start at zero, most significant
+    first -- which sorts in the same lexicographic order.  Wider keys fall
+    back to the row-wise call.
+
+    Returns
+    -------
+    unique_keys : np.ndarray, shape (M, C)
+    inverse : np.ndarray, shape (N,)
+    """
+    lo = keys.min(axis=0)
+    bits = [int(s).bit_length() for s in keys.max(axis=0) - lo]
+    if sum(bits) > 63:
+        uk, inv = np.unique(keys, axis=0, return_inverse=True)
+        return uk, inv.reshape(-1)
+    packed = np.zeros(len(keys), dtype=np.int64)
+    for c, b in enumerate(bits):
+        packed <<= b
+        packed |= keys[:, c] - lo[c]
+    upacked, inv = np.unique(packed, return_inverse=True)
+    uk = np.empty((len(upacked), keys.shape[1]), dtype=keys.dtype)
+    for c in range(keys.shape[1] - 1, -1, -1):
+        uk[:, c] = (upacked & ((1 << bits[c]) - 1)) + lo[c]
+        upacked >>= bits[c]
+    return uk, inv.reshape(-1)
+
+
 def _split_fragments(
     p: Particle,
     labels: np.ndarray,
@@ -318,6 +350,10 @@ class DefragmentBase(ABC):
             0-based contiguous cluster index per point.
         """
 
+    def _get_labels_many(self, xyzs: list) -> list:
+        """:meth:`_get_labels` for each cloud; backends may batch it."""
+        return [self._get_labels(xyz) for xyz in xyzs]
+
     # ------------------------------------------------------------------
     # Shared processing loop (early exits + fragment splitting)
     # ------------------------------------------------------------------
@@ -458,7 +494,8 @@ class DefragmentBase(ABC):
                 )
                 labels_list = [lbl for group in nested for lbl in group]
             else:
-                labels_list = [self._get_labels(xyz) for _, _, xyz in to_compute]
+                labels_list = self._get_labels_many(
+                    [xyz for _, _, xyz in to_compute])
 
             for (idx, _, _), labels in zip(to_compute, labels_list):
                 precomp[idx] = labels
@@ -871,7 +908,8 @@ def _voxelize_point_cloud(
     pc: np.ndarray,
     voxel_size: np.ndarray,
     origin: np.ndarray | None,
-) -> np.ndarray:
+    return_inverse: bool = False,
+):
     """
     Bin each point into a regular 3-D grid and merge points that share the
     same voxel.
@@ -886,20 +924,22 @@ def _voxelize_point_cloud(
         Lower corner from which voxel indices are computed.  When ``None``
         the per-cloud minimum of the input coordinates is used so that the
         grid is always tightly aligned to the data.
+    return_inverse : bool
+        Also return, per input point, the output row it went into.
 
     Returns
     -------
     np.ndarray, shape (M, F), M <= N
         New array where each row represents one non-empty voxel.  The
-        x, y, z columns hold the voxel-centre coordinates; remaining
-        feature columns are aggregated by the same rules as
-        :func:`_merge_point_cloud` (time=min, dE=sum, dX=sum).
-        Returns the original array unchanged when every voxel already
-        contains exactly one point.
+        x, y, z columns hold the voxel-centre coordinates -- always, even
+        when no two points share a voxel, so every cloud this returns is on
+        the one grid; remaining feature columns are aggregated by the same
+        rules as :func:`_merge_point_cloud` (time=min, dE=sum, dX=sum).
+    np.ndarray, shape (N,), only with *return_inverse*
     """
     coords = pc[:, :3]
     if len(coords) == 0:
-        return pc   # nothing to voxelize
+        return (pc, np.zeros(0, dtype=np.int64)) if return_inverse else pc
     org    = coords.min(axis=0) if origin is None else origin
 
     # Integer voxel indices for every point
@@ -907,10 +947,8 @@ def _voxelize_point_cloud(
 
     # Unique voxels and group membership
     unique_idx, inv = np.unique(idx, axis=0, return_inverse=True)
+    inv = inv.reshape(-1)
     n_out = len(unique_idx)
-
-    if n_out == len(pc):
-        return pc   # already one point per voxel — no copy needed
 
     n_cols = pc.shape[1]
     out    = np.zeros((n_out, n_cols), dtype=pc.dtype)
@@ -925,7 +963,7 @@ def _voxelize_point_cloud(
         out[:, col] = init_val
         ufunc.at(out[:, col], inv, pc[:, col])
 
-    return out
+    return (out, inv) if return_inverse else out
 
 
 class VoxelizeProcessor:
@@ -1123,7 +1161,7 @@ class VoxelizeProcessor:
         pids = np.repeat(np.arange(len(particles), dtype=np.int64), lengths)
         keys = np.concatenate([pids[:, None], vox_idx], axis=1)  # (total, 4)
 
-        unique_keys, inv = np.unique(keys, axis=0, return_inverse=True)
+        unique_keys, inv = _unique_rows(keys)
         n_out = len(unique_keys)
 
         # Voxel-centre coordinates per output row
@@ -1278,6 +1316,40 @@ class ScipyDefragmenter(DefragmentBase):
         )
         _, labels = connected_components(graph, directed=False)
         return labels
+
+    def _get_labels_many(self, xyzs: list) -> list:
+        """
+        All clouds in one tree and one graph, instead of one of each per cloud.
+
+        An event sends thousands of mostly small clouds here, and per call the
+        tree and graph set-up costs more than the clustering.  The clouds are
+        stacked with a fourth coordinate, ``k * (eps + 1)`` for cloud *k*, so
+        points of different clouds are always more than eps apart while the
+        distance within a cloud is unchanged -- its fourth term is exactly 0.
+        Components are numbered in order of their first node, so a cloud's
+        components are a contiguous run starting at its first node's label:
+        subtracting that gives the labels :meth:`_get_labels` returns.
+        """
+        from scipy.spatial import cKDTree
+        from scipy.sparse import csr_matrix
+        from scipy.sparse.csgraph import connected_components
+
+        if len(xyzs) < 2:
+            return [self._get_labels(xyz) for xyz in xyzs]
+        lengths = np.array([len(x) for x in xyzs], dtype=np.int64)
+        starts = np.concatenate([[0], np.cumsum(lengths)[:-1]])
+        n = int(lengths.sum())
+        pts = np.empty((n, 4), dtype=np.float64)
+        pts[:, :3] = np.concatenate(xyzs)
+        pts[:, 3] = np.repeat(np.arange(len(xyzs), dtype=np.float64)
+                              * (np.ceil(self.eps) + 1.0), lengths)
+        pairs = cKDTree(pts).query_pairs(self.eps, output_type='ndarray')
+        rows = np.concatenate([pairs[:, 0], pairs[:, 1]])
+        cols = np.concatenate([pairs[:, 1], pairs[:, 0]])
+        graph = csr_matrix(
+            (np.ones(len(rows), dtype=np.uint8), (rows, cols)), shape=(n, n))
+        _, labels = connected_components(graph, directed=False)
+        return [labels[s:s + m] - labels[s] for s, m in zip(starts, lengths)]
 
 
 # ============================================================================

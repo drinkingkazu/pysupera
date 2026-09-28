@@ -138,6 +138,16 @@ def read_readout_type(inst_file) -> str:
 # ``deposit_to_group``.  Both spellings are accepted, in this order.
 _SEG_TO_GROUP_KEYS = ('segment_to_group', 'deposit_to_group')
 
+#: Columns of a truth-segment row: position [mm], time [us], deposited
+#: energy [MeV], step length [cm] -- the PointFeature layout of a deposit --
+#: then the step's direction (theta from the z axis, phi) [rad] and its
+#: momentum magnitude [MeV/c].
+TRUTH_COLUMNS = ('x', 'y', 'z', 't', 'dE', 'dX', 'theta', 'phi', 'p')
+
+#: JAXTPC's readout planes, by the index their hit_labels group carries.
+#: A plane named otherwise is numbered in file order after these.
+PLANE_INDEX = {'U': 0, 'V': 1, 'Y': 2, 'Pixel': 0}
+
 # Datasets every non-empty seg volume must provide.
 _SEG_REQUIRED_DATASETS = ('positions', 'de', 'dx', 't0_us', 'charge')
 
@@ -496,7 +506,7 @@ class JaxtpcHDF5Reader(EventReaderBase):
         electron_energy_threshold: float = _DEFAULT_ELECTRON_ENERGY_THRESHOLD,
         min_pc_size: int | None = None,
         voxel_size: float | None = None,
-        point_source: str = 'deposits',
+        point_source: str | None = None,
         hit_x_from: str = 'nominal',
         hit_energy: str = 'charge',
         hit_reference_tick: float = 0.0,
@@ -508,20 +518,40 @@ class JaxtpcHDF5Reader(EventReaderBase):
         readout_time_step_us: float | None = None,
         pixel_geometry_from_fit: bool = False,
         pixel_geometry: list | None = None,
+        step_key: str = 'pstep/lar_vol',
+        truth_segments: bool = False,
     ) -> None:
         import h5py
 
+        # A pixel readout is read as its detected hits and a wire readout as
+        # the deposits its hits select; the readout decides.  None follows
+        # it, and asking a pixel batch for deposits is refused.
+        with h5py.File(inst_path, 'r') as _f:
+            _readout = read_readout_type(_f)
+        if point_source is None:
+            point_source = 'hits' if _readout == 'pixel' else 'deposits'
         if point_source not in ('deposits', 'hits'):
             raise ValueError(
                 f"point_source must be 'deposits' or 'hits', "
                 f"got {point_source!r}")
+        if point_source == 'deposits' and _readout == 'pixel':
+            raise ValueError(
+                f"{inst_path} is a pixel readout, which is read as its "
+                f"detected hits (point_source='hits'); reading its truth "
+                f"deposits instead is not supported.")
         self._point_source = point_source
         self._hit_x_from = hit_x_from
         self._hit_energy = hit_energy
         self._hit_reference_tick = float(hit_reference_tick or 0.0)
-        # Drop hits below this many induced electrons.  JAXTPC applies
-        # essentially none, so this is where a readout threshold enters.
+        # Drop hits below this many ADC.  The sensor image already applies
+        # the readout threshold, so anything above 0 cuts into its pixels.
         self._hit_charge_threshold = float(hit_charge_threshold or 0.0)
+        if point_source == 'hits' and not sensor_path:
+            raise ValueError(
+                "point_source='hits' needs reader.jaxtpc_sensor_path.  The "
+                "sensor image is the model input the labels are for, and it "
+                "decides which pixels exist: the hits file also holds every "
+                "sub-threshold share, about half of its pixels.")
         # Stated pixel geometry.  Preferred over anything fitted: see
         # pysupera.readers.pixel_hits.verify_volume_geometry for why a
         # constant derived from the truth it is later checked against cannot
@@ -547,6 +577,23 @@ class JaxtpcHDF5Reader(EventReaderBase):
         #: position.  Hit mode only; None otherwise.
         self.last_true_x_shift = None
 
+        #: Per input hit, its position in the event's JAXTPC hits CSR.  Hit
+        #: mode only; None otherwise.
+        self.last_hit_index = None
+
+        #: The event's readout planes as CSR entries; see _plane_entries.
+        self.last_planes = None
+        self._on_sensor = {}
+
+        #: ``(flat, group)`` for the event just read, when *truth_segments*:
+        #: every seg-file segment as an ``(S, 10)`` row of TRUTH_COLUMNS,
+        #: read from the EDepSim step it came from, and its event-global
+        #: group.  Which become the truth cloud is decided downstream, by
+        #: group ownership.  None otherwise.
+        self.last_truth_segments = None
+        self._step_key = step_key
+        self._want_truth = bool(truth_segments)
+
         self._edepsim_path = edepsim_path
         self._seg_path     = seg_path
         self._inst_path    = inst_path
@@ -568,6 +615,8 @@ class JaxtpcHDF5Reader(EventReaderBase):
         self._inst_file    = h5py.File(inst_path, 'r')
         self._sensor_file  = (h5py.File(sensor_path, 'r')
                               if sensor_path else None)
+        if point_source == 'hits':
+            self._check_same_batch()
 
         self._n_events = len(self._edepsim_file[self._part_key])
 
@@ -644,6 +693,11 @@ class JaxtpcHDF5Reader(EventReaderBase):
             self.last_group_volume_offsets = _g_offs
             self.last_n_groups = _hstats['n_groups']
             self.last_deposit_volume_offsets = []
+            self.last_truth_segments = (
+                self._truth_segments(index, event_key, seg_volumes, _g_offs)
+                if self._want_truth else None)
+            self.last_planes = self._plane_entries(event_key, _g_offs,
+                                                   self._on_sensor)
             deposit_id = np.arange(len(point_cloud_flat), dtype=np.int64)
         else:
             # A segment is visible if its group_id appears in a readout-plane's
@@ -669,6 +723,7 @@ class JaxtpcHDF5Reader(EventReaderBase):
                              for idx in vol.values())
             _n_attached = len(point_cloud_flat)
             self.last_true_x_shift = None
+            self.last_hit_index = None
             self.last_mask_stats = {
                 'n_total':    _n_total,     # deposits in the seg file
                 'n_visible':  _n_visible,   # survived the readout threshold
@@ -697,6 +752,12 @@ class JaxtpcHDF5Reader(EventReaderBase):
             self.last_deposit_to_group, self.last_group_volume_offsets = \
                 self._load_deposit_groups(event_key, seg_volumes)
             self.last_deposit_volume_offsets = volume_offsets
+            self.last_truth_segments = (
+                self._truth_segments(index, event_key, seg_volumes,
+                                     self.last_group_volume_offsets)
+                if self._want_truth else None)
+            self.last_planes = self._plane_entries(
+                event_key, self.last_group_volume_offsets, None)
 
         _particles = Particle.from_flat_arrays(
             ids                 = _ids,
@@ -797,6 +858,156 @@ class JaxtpcHDF5Reader(EventReaderBase):
             return None
         v = cfg.attrs.get(name)
         return None if v is None else float(v)
+
+    #: Config attributes that name a JAXTPC batch file.  The sensor and hits
+    #: files of one batch agree on all that both carry.
+    _BATCH_IDENTITY = ('batch_timestamp', 'dataset_name', 'file_index',
+                       'global_event_offset')
+
+    def _check_same_batch(self):
+        """
+        Raise unless the sensor and hits files come from one JAXTPC run.
+
+        A mask from another run keeps whichever hits happen to share a pixel
+        with it -- a plausible-looking cloud with nothing behind it.
+        """
+        a = self._sensor_file.get('config')
+        b = self._inst_file.get('config')
+        if a is None or b is None:
+            return
+        for k in self._BATCH_IDENTITY:
+            if k in a.attrs and k in b.attrs:
+                va, vb = a.attrs[k], b.attrs[k]
+                if va != vb:
+                    raise ValueError(
+                        f"reader.jaxtpc_sensor_path and reader."
+                        f"jaxtpc_inst_path are from different JAXTPC runs: "
+                        f"config.{k} is {va!r} in {self._sensor_path} and "
+                        f"{vb!r} in {self._inst_path}.")
+
+    def _truth_segments(self, index, event_key, seg_volumes, g_offs):
+        """
+        Every segment of the event, with its event-global group.
+
+        The values come from the EDepSim step each segment was made from, at
+        full precision: the seg file stores positions on a 0.3 mm grid and
+        the rest as float16.
+        JAXTPC splits the step list into volumes by position and keeps the
+        order within each, so segment k of volume v is the k-th step lying
+        in volume v.  That is checked, not assumed: the counts must agree
+        and the positions must match to the seg file's quantisation.
+
+        Columns: :data:`TRUTH_COLUMNS` -- x, y, z [mm], t [us], dE [MeV],
+        dX [cm], theta, phi [rad] (theta from the z axis, the convention the
+        steps follow), |p| [MeV/c].
+        """
+        steps = self._edepsim_file[self._step_key][index]
+        pos = np.c_[steps['x'], steps['y'], steps['z']].astype(np.float32)
+        # JAXTPC's volume test, in its own arithmetic: float32 cm, half-open.
+        cm = pos / np.float32(10.0)
+        ranges = self._volume_ranges()
+        ev = self._inst_file[event_key]
+        flats, groups = [], []
+        for v, sv in enumerate(seg_volumes):
+            n = int(sv.get('n_actual', 0) or 0)
+            vg = ev.get(f'volume_{v}')
+            if not n or vg is None:
+                continue
+            key = next((k for k in _SEG_TO_GROUP_KEYS if k in vg), None)
+            if key is None or ranges is None:
+                continue
+            r = np.asarray(ranges[v], dtype=np.float64) / 10.0
+            inside = np.ones(len(cm), dtype=bool)
+            for a in range(3):
+                inside &= (cm[:, a] >= r[a, 0]) & (cm[:, a] < r[a, 1])
+            idx = np.flatnonzero(inside)
+            if len(idx) != n:
+                raise ValueError(
+                    f"{event_key}/volume_{v}: {len(idx):,} EDepSim steps lie "
+                    f"in the volume but the seg file has {n:,} segments, so "
+                    f"segments cannot be matched to their steps (is "
+                    f"io.input_path the EDepSim file this batch was made "
+                    f"from?).")
+            off = float(np.abs(sv['positions_mm'][:n] - pos[idx]).max())
+            if off > 1.0:
+                raise ValueError(
+                    f"{event_key}/volume_{v}: segments sit up to {off:.2f} mm "
+                    f"from the EDepSim steps matched to them, beyond the seg "
+                    f"file's 0.3 mm quantisation -- not the same steps.")
+            st = steps[idx]
+            f = np.empty((n, len(TRUTH_COLUMNS)), dtype=np.float32)
+            f[:, 0:3] = pos[idx]
+            f[:, 3] = st['t'] / 1000.0                    # ns -> us
+            f[:, 4] = st['de']
+            f[:, 5] = st['dx'] / 10.0                     # mm -> cm
+            f[:, 6] = st['theta']
+            f[:, 7] = st['phi']
+            f[:, 8] = st['p']
+            flats.append(f)
+            groups.append(vg[key][:n].astype(np.int64)
+                          + int(g_offs[v] if v < len(g_offs) else 0))
+        if not flats:
+            return (np.zeros((0, len(TRUTH_COLUMNS)), dtype=np.float32),
+                    np.zeros(0, dtype=np.int64))
+        return np.concatenate(flats), np.concatenate(groups)
+
+    def _plane_entries(self, event_key, g_offs, on_sensor):
+        """
+        Every readout plane of the event, as its CSR entries' groups.
+
+        One dict per (volume, plane), in file order: ``volume``, ``plane``
+        (:data:`PLANE_INDEX`), ``source`` (the plane's name in the hits
+        file), ``group`` (event-global group of each entry, in CSR order) and
+        ``on_sensor`` (pixel: whether each entry lies on a sensor pixel;
+        otherwise None).  This is the space hit_labels is written in.
+        """
+        import h5py
+        ev = self._inst_file[event_key]
+        out = []
+        for pos, vol_name in enumerate(self._volume_names(ev)):
+            # The group offsets follow this list's order; the volume number is
+            # the name's.
+            v = int(vol_name.split('_', 1)[1])
+            vg = ev[vol_name]
+            names = [k for k in vg if isinstance(vg[k], h5py.Group)
+                     and 'group_ids' in vg[k]]
+            known = sorted((n for n in names if n in PLANE_INDEX),
+                           key=lambda n: PLANE_INDEX[n])
+            other = [n for n in names if n not in PLANE_INDEX]
+            index = {n: PLANE_INDEX[n] for n in known}
+            index.update({n: len(known) + i for i, n in enumerate(other)})
+            for name in known + other:
+                g = vg[name]
+                sizes = g['group_sizes'][:].astype(np.int64)
+                group = (np.repeat(g['group_ids'][:].astype(np.int64), sizes)
+                         + int(g_offs[pos] if pos < len(g_offs) else 0))
+                sens = None
+                if on_sensor is not None and v in on_sensor:
+                    sens = np.asarray(on_sensor[v], dtype=bool)
+                    if len(sens) != len(group):
+                        raise ValueError(
+                            f"{event_key}/{vol_name}/{name}: {len(sens)} "
+                            f"sensor flags for {len(group)} hits")
+                out.append({'volume': v, 'plane': index[name],
+                            'source': name, 'group': group,
+                            'on_sensor': sens})
+        return out
+
+    def _sensor_pixels(self, event_key, v):
+        """Sorted pixel keys of volume *v*'s sensor image for one event."""
+        ev = self._sensor_file.get(event_key)
+        if ev is None:
+            raise KeyError(
+                f"{event_key} is in the hits file but not in the sensor file "
+                f"{self._sensor_path}.")
+        vg = ev.get(f'volume_{v}')
+        planes = [] if vg is None else [
+            vg[k] for k in vg if hasattr(vg[k], 'attrs') and 'delta_py' in vg[k]]
+        if not planes:
+            # Nothing recorded in this volume: no pixel may be labelled.
+            return np.zeros(0, dtype=np.int64)
+        s = _px.decode_sensor_plane(planes[0])
+        return np.unique(_px.pixel_key(s['py'], s['pz'], s['tick']))
 
     def _stated_drift_terms(self):
         """
@@ -1000,6 +1211,8 @@ class JaxtpcHDF5Reader(EventReaderBase):
         # the true x whichever drift convention is in force.
         n_steps = self._num_time_steps()
         trunc_before = trunc_after = trunc_total = 0
+        csr_off = 0
+        self._on_sensor = {}
         volumes = []
         for v, seg_vol in enumerate(seg_volumes):
             vol_key = f'volume_{v}'
@@ -1010,11 +1223,22 @@ class JaxtpcHDF5Reader(EventReaderBase):
             if plane is None:
                 continue
             n_groups = len(vg['group_to_track'])
+            hits = _px.decode_plane_hits(plane)
+            # Each hit's position in the event's hits CSR, counting volume by
+            # volume in file order.
+            hits['index'] = np.arange(len(hits['group']), dtype=np.int64) + csr_off
+            csr_off += len(hits['group'])
+            sensor = self._sensor_pixels(event_key, v)
+            # Which entries lie on a sensor pixel -- every entry, before the
+            # mask: what hit_labels' on_sensor records.
+            self._on_sensor[v] = _px.on_sensor(
+                sensor, hits['py'], hits['pz'], hits['tick'])
             entry = {
-                'hits': _px.decode_plane_hits(plane),
+                'hits': hits,
                 'geom': self._pixel_geoms[v],
                 'group_to_track': vg['group_to_track'][:].astype(np.int64),
                 'group_offset': g_offs[v] if v < len(g_offs) else 0,
+                'sensor': sensor,
             }
             if want_de or want_t0:
                 t0, de, _ = self._group_truth(seg_vol, vg, n_groups, want_de)
@@ -1041,11 +1265,15 @@ class JaxtpcHDF5Reader(EventReaderBase):
             dt = float(self._pixel_geoms[0].time_step_us)
             if not np.isfinite(dt) or dt <= 0:
                 dt = 1.0
-        flat, offsets, group_of_point, x_shift, stats = \
+        flat, offsets, group_of_point, x_shift, stats, hit_index = \
             _px.build_hit_point_cloud(
                 volumes, track_ids, x_from=self._hit_x_from,
                 energy=self._hit_energy, time_step_us=dt,
-                charge_threshold=self._hit_charge_threshold)
+                charge_threshold=self._hit_charge_threshold,
+                return_index=True)
+        #: Per point, its position in the event's hits CSR (volume by volume
+        #: in file order): the link from a stored hit back to the hits file.
+        self.last_hit_index = hit_index
         stats['n_groups'] = n_groups_total
         stats['n_deposits'] = trunc_total
         stats['n_before_window'] = trunc_before

@@ -47,6 +47,33 @@ class _NullCtx:
     def append_event(self, *_): pass
 
 
+
+def _rows_by_input_id(particles):
+    """
+    Every input point's first six columns, keyed the way the voxmap names it.
+
+    The voxelizer records a particle's reader-supplied ``deposit_id`` when
+    every non-empty particle carries one (deposit mode: the seg-file deposit
+    index), and the ``PointFeature.id`` column otherwise (hit mode).  The
+    same rule is applied here, so a particle's voxmap ids index these rows.
+    """
+    import numpy as np
+    from pysupera.utils import PointFeature
+    live = [p for p in particles if len(p.point_cloud)]
+    if not live:
+        return np.zeros((0, 6), dtype=np.float32)
+    deps = [getattr(p, "deposit_id", None) for p in live]
+    if all(d is not None and len(d) == len(p.point_cloud)
+           for d, p in zip(deps, live)):
+        ids = np.concatenate(deps).astype(np.int64)
+    else:
+        ids = np.concatenate([p.point_cloud[:, PointFeature.id]
+                              for p in live]).astype(np.int64)
+    rows = np.zeros((int(ids.max()) + 1, 6), dtype=np.float32)
+    rows[ids] = np.concatenate([p.point_cloud[:, :6] for p in live])
+    return rows
+
+
 @hydra.main(config_path=_CONF_DIR, config_name="config", version_base=None)
 def main(cfg: DictConfig) -> None:
     """Partition all events in the input file and write results."""
@@ -54,7 +81,10 @@ def main(cfg: DictConfig) -> None:
     import numpy as np
     from collections import defaultdict
     from pysupera.io_v3 import open_writer_v3
-    from pysupera.provenance import build_group_owners, remap_owners, le_flags
+    from pysupera.provenance import (build_group_owners, remap_owners, le_flags,
+                                     attach_truth_clouds)
+    from pysupera.hit_labels import build_hit_labels, check_pixel_labels
+    from pysupera.readers.format_jaxtpc import TRUTH_COLUMNS
     from pysupera.io import open_voxmap_writer
     from pysupera.partitioner import ParticlePartitioner
     from pysupera.merge import merge_em_showers
@@ -84,11 +114,30 @@ def main(cfg: DictConfig) -> None:
               f"{int(cfg.particle.min_pc_size)} with point_source=hits.  That "
               f"is a voxel count tuned for truth deposits, where a particle "
               f"fills one or two cells; a pixel image fills many more, so "
-              f"almost nothing will be classified kLEScatter.  The value "
-              f"depends on reader.hit_charge_threshold, because cutting the "
-              f"halo thins the tracks: 85 at a threshold of 0, 13 at 500.  "
-              f"preset=cubic_pixel_hits sets a matched pair.")
+              f"almost nothing will be classified kLEScatter.  "
+              f"preset=cubic_pixel_hits sets a hit-mode value.")
     _owner_resolve = 'majority' if _hit_points else 'first'
+    # What a stored point is.  With JAXTPC input, points/flat holds the true
+    # energy deposits behind the hits -- every segment whose JAXTPC group
+    # left hits, given to the particle owning that group -- and store picks
+    # voxels (on particle.voxelize.voxel_size / origin, the default) or the
+    # segments themselves (points).  The hits stay in the JAXTPC hits file,
+    # labelled per hit in hit_labels.  Without JAXTPC the cloud is the
+    # deposits the partitioning ran on, voxelized or (points) not.
+    _store = str((cfg.particle.get('voxelize', {}) or {}).get('store', 'voxels'))
+    if _store not in ('voxels', 'points'):
+        raise ValueError(f"particle.voxelize.store must be 'voxels' or "
+                         f"'points', got {_store!r}")
+    _jaxtpc = (bool(cfg.reader.get('jaxtpc_seg_path', None))
+               and bool(cfg.reader.get('jaxtpc_inst_path', None)))
+    _store_points = voxelizer is not None and _store == 'points' and not _jaxtpc
+    _vx = cfg.particle.get('voxelize', {}) or {}
+    _tv = _vx.get('voxel_size', 3)
+    _truth_voxel = (None if _store == 'points'
+                    else [float(v) for v in _tv] if hasattr(_tv, '__iter__')
+                    else float(_tv))
+    _vo = _vx.get('origin', None)
+    _truth_origin = None if _vo is None else [float(v) for v in _vo]
     _owner_report: dict = {}
     _straddle_total = 0
     _pixel_geom_report = None
@@ -154,6 +203,10 @@ def main(cfg: DictConfig) -> None:
     mask_stats: dict = defaultdict(list)
     # Detected-hit counts; only populated when reader.point_source=hits.
     hit_stats: dict = defaultdict(list)
+    # Truth-cloud counts; only populated when the truth cloud is written.
+    truth_stats: dict = defaultdict(list)
+    # Hit-label counts; only populated with JAXTPC input.
+    label_stats: dict = defaultdict(list)
     n_events = 0
 
     _max_events = int(cfg.get("max_events", -1))
@@ -189,7 +242,7 @@ def main(cfg: DictConfig) -> None:
             print(f"[run]   point source  : {_psrc}"
                   + (f"  (x from {cfg.reader.get('hit_x_from', 'nominal')}, "
                      f"energy {cfg.reader.get('hit_energy', 'charge')}, "
-                     f"charge >= {cfg.reader.get('hit_charge_threshold', 0)} e-)"
+                     f"charge >= {cfg.reader.get('hit_charge_threshold', 0)} ADC)"
                      if _psrc == 'hits' else ""))
 
         _n_available = len(store)
@@ -204,7 +257,9 @@ def main(cfg: DictConfig) -> None:
 
         with open_writer_v3(cfg.io.output_path,
                             compression=cfg.io.compression,
-                            compression_opts=cfg.io.compression_opts) as writer, \
+                            compression_opts=cfg.io.compression_opts,
+                            points=dict(cfg.io.get('points', {}) or {}),
+                            columns=(TRUTH_COLUMNS if _jaxtpc else None)) as writer, \
              (open_voxmap_writer(cfg.io.output_path,
                                  compression=cfg.io.compression,
                                  compression_opts=cfg.io.compression_opts)
@@ -216,6 +271,13 @@ def main(cfg: DictConfig) -> None:
                 'hit_x_from':   cfg.reader.get('hit_x_from', None) if _hit_points else None,
                 'hit_energy':   cfg.reader.get('hit_energy', None) if _hit_points else None,
                 'readout_type': _readout,
+                # What a points/flat row is: a voxel of this size, or a
+                # deposit (store=points).
+                'store': _store,
+                'voxel_size': _truth_voxel,
+                # Precision of the energy column: null means exact.
+                'energy_mantissa_bits': (cfg.io.get('points', {}) or {}).get(
+                    'energy_mantissa_bits', None),
             })
 
             from tqdm import tqdm
@@ -239,6 +301,16 @@ def main(cfg: DictConfig) -> None:
                 if _pixel_geom_report is None:
                     _pixel_geom_report = getattr(
                         store, 'pixel_geometry_report', None)
+                    # The geometry that turned each hit's (py, pz, tick) into
+                    # (x, y, z), so a viewer can place the hits exactly as the
+                    # reader did -- the inferred x included.
+                    _geoms = getattr(store, 'pixel_geometry', None)
+                    if _geoms:
+                        import json as _json
+                        from dataclasses import asdict as _asdict
+                        writer.set_meta({'pixel_geometry': _json.dumps(
+                            [dict(_asdict(g), x_anode_mm=g.x_anode_mm,
+                                  mm_per_tick=g.mm_per_tick) for g in _geoms])})
                 _hs = getattr(store, 'last_hit_stats', None)
                 if _hs:
                     for _k, _v in _hs.items():
@@ -256,6 +328,13 @@ def main(cfg: DictConfig) -> None:
                               f"({100.0 * _ms['n_masked'] / _tot:.1f}%)"
                               + (f" unmatched={_ms['n_unmatched']:,}"
                                  if _ms['n_unmatched'] else ""))
+
+                # The input points themselves, by input row id, when those --
+                # not the voxels -- are what is written.  Voxelization then
+                # serves the proximity and merging steps only; see
+                # particle.voxelize.store.
+                _input_rows = (_rows_by_input_id(particles)
+                               if _store_points else None)
 
                 # skip merge_duplicates when voxelizer subsumes it
                 if merge_processor is not None and not (voxelizer and voxelizer.merge_duplicates):
@@ -464,62 +543,106 @@ def main(cfg: DictConfig) -> None:
                         f"{'...' if len(_uncovered) > 10 else ''}"
                     )
 
-                # ── true_x_shift, carried onto the voxels ──────────────────
-                # The reader gives one shift per input hit; the rows about to
-                # be written are voxels, so each takes the shift of a hit
-                # that made it.  Which one barely matters: the shift is
-                # constant per (interaction, volume), and measured over an
-                # event only 0.09% of voxels mix two values at all, by at
-                # most 0.05 mm -- the sub-microsecond t0 jitter inside one
-                # interaction.  The 200 mm case, a track crossing the
-                # cathode, never shares a voxel, because the nominal x is
-                # exactly what slides its two halves apart.
-                _shift_in = getattr(store, 'last_true_x_shift', None)
-                if _shift_in is not None:
+                # ── Store the input points instead of the voxels ──────────
+                # Plain EDepSim, store=points: every voxel knows the input rows
+                # it was made from (the voxmap, tracked for provenance), so a
+                # particle's voxels expand back into exactly its own deposits.
+                if _input_rows is not None:
                     for _p in particles:
-                        _n = len(_p.point_cloud)
-                        if not _n:
-                            _p.true_x_shift = np.zeros(0, dtype=np.float32)
-                            continue
                         _vm = getattr(_p, 'voxmap', None)
-                        _v = None
-                        if _vm is not None:
-                            _off, _ids = _vm
-                            _off = np.asarray(_off)
-                            if _ids is not None and len(_off) == _n + 1:
-                                _v = _shift_in[np.asarray(_ids,
-                                                          dtype=np.int64)[_off[:-1]]]
-                        if _v is None:
-                            # No voxel map: the cloud is still the hits, so
-                            # the reader's per-hit slice lines up as it is.
-                            _d = getattr(_p, 'deposit_id', None)
-                            _v = (_shift_in[np.asarray(_d, dtype=np.int64)]
-                                  if _d is not None and len(_d) == _n
-                                  else np.zeros(_n, dtype=np.float32))
-                        _p.true_x_shift = np.asarray(_v, dtype=np.float32)
-
-                # ── Write ───────────────────────────────────────────────────
-                _t = time.perf_counter()
-                _layout = build_layout(particles, _frag_groups, _inst_groups,
-                                       vertices=getattr(store, 'last_vertices', None))
-                writer.append_event(_layout)
+                        if _vm is None or _vm[1] is None:
+                            if len(_p.point_cloud):
+                                raise RuntimeError(
+                                    f"Event {event_idx}: particle {_p.id} has "
+                                    f"{len(_p.point_cloud)} voxels but no voxel "
+                                    f"map, so its input points cannot be "
+                                    f"recovered.")
+                            continue
+                        _ids = np.asarray(_vm[1], dtype=np.int64)
+                        _p.point_cloud = _input_rows[_ids].astype(np.float32, copy=False)
 
                 # ── JAXTPC group ownership ─────────────────────────────────
                 # Which hits belong to which reconstructed object.  Hits
                 # attach to groups and groups attach to one particle, so this
                 # one table answers it for instances and fragments alike --
                 # see pysupera.provenance.  Absent outside JAXTPC mode, where
-                # there are no hits to group.
+                # there are no hits to group.  Settled before the layout
+                # because the truth cloud is laid out by it.
+                _t = time.perf_counter()
                 _d2g = getattr(store, 'last_deposit_to_group', None)
-                if _d2g is None:
-                    writer.append_group_owners(np.zeros(0, dtype=np.int32))
-                else:
+                _owner = None
+                if _d2g is not None:
                     _owner = build_group_owners(
                         particles, _d2g, _n_groups_of(store),
                         check=_check_group_owner,
                         resolve=_owner_resolve, report=_owner_report)
                     _straddle_total += int(
                         _owner_report.get('n_straddled', 0) or 0)
+
+                # ── Per-hit labels (JAXTPC) ────────────────────────────────
+                # Settled while the particles still carry the clouds they were
+                # partitioned on: for pixel those are the hits, and each hit's
+                # particle is read off its voxel map.
+                _labels = None
+                _planes = getattr(store, 'last_planes', None)
+                if _jaxtpc and _planes is not None:
+                    _hit_idx = getattr(store, 'last_hit_index', None)
+                    if _hit_points and _hit_idx is not None:
+                        _rp = np.full(len(_hit_idx), -1, dtype=np.int64)
+                        for _p in particles:
+                            _vm = getattr(_p, 'voxmap', None)
+                            if _vm is not None and _vm[1] is not None:
+                                _rp[np.asarray(_vm[1], dtype=np.int64)] = int(_p.id)
+                        _labels = build_hit_labels(
+                            _planes, particles, _frag_groups, _inst_groups,
+                            row_particle=_rp, hit_index=_hit_idx)
+                        check_pixel_labels(_labels)
+                    elif _owner is not None:
+                        _labels = build_hit_labels(
+                            _planes, particles, _frag_groups, _inst_groups,
+                            owner=_owner)
+                    if _labels is not None:
+                        for _d in _labels:
+                            _f = _d['fragment_id']
+                            label_stats['n_hits'].append(len(_f))
+                            label_stats['n_traced'].append(int((_f >= 0).sum()))
+
+                # ── points/flat: the true deposits behind the hits (JAXTPC) ─
+                # Each segment follows its group to the owning particle, so the
+                # cloud nests in the same fragments and instances the hits do.
+                if _jaxtpc:
+                    _segs = getattr(store, 'last_truth_segments', None)
+                    if _segs is None or _owner is None:
+                        for _p in particles:
+                            _p.truth_cloud = np.zeros((0, len(TRUTH_COLUMNS)),
+                                                      dtype=np.float32)
+                    else:
+                        _ts = attach_truth_clouds(
+                            particles, _owner, _segs[0], _segs[1],
+                            voxel_size=_truth_voxel, origin=_truth_origin)
+                        for _k, _v in _ts.items():
+                            truth_stats[_k].append(_v)
+                    for _p in particles:
+                        _p.point_cloud = _p.truth_cloud
+
+                # ── Write ───────────────────────────────────────────────────
+                # Every fragment and instance a hit is labelled with gets a
+                # row, whether or not it holds points of its own.
+                _keep = set()
+                for _d in (_labels or ()):
+                    _keep.update(np.unique(_d['fragment_id']).tolist())
+                    _keep.update(np.unique(_d['instance_id']).tolist())
+                _keep.discard(-1)
+                _layout = build_layout(particles, _frag_groups, _inst_groups,
+                                       vertices=getattr(store, 'last_vertices', None),
+                                       keep=_keep)
+                writer.append_event(_layout)
+                if _labels is not None:
+                    writer.append_hit_labels(_labels)
+
+                if _owner is None:
+                    writer.append_group_owners(np.zeros(0, dtype=np.int32))
+                else:
                     # Record the fragment, not the particle: only a fraction
                     # of particles get a row, so a particle id would often
                     # name something the reader cannot resolve.  Every
@@ -661,6 +784,7 @@ def main(cfg: DictConfig) -> None:
             print(f"  {_SEP}")
             for label, key in (
                 ("Pixel hits in the file", 'n_decoded'),
+                ("Pixels in the sensor image", 'n_sensor_pixels'),
                 ("Pixel hits kept",        'n_hits'),
                 ("Attached to a particle", 'n_attached'),
                 ("Groups in the event",    'n_groups'),
@@ -680,6 +804,20 @@ def main(cfg: DictConfig) -> None:
             # shrinking it -- which is why it is reported and not inferred.
             _cut = sum(hit_stats.get('n_below_threshold', [0]))
             _dec = sum(hit_stats.get('n_decoded', [0]))
+            # Hits whose pixel the sensor image does not hold: shares of a
+            # pixel whose summed response stayed under JAXTPC's threshold.
+            _off = sum(hit_stats.get('n_off_sensor', [0]))
+            if _off:
+                print(f"  {'Off the sensor image':<{_W}} "
+                      f"{_off:>10,} ({100.0 * _off / max(1, _dec):.1f}%)")
+            # Sensor pixels no kept hit lands on.  Zero when the hits file
+            # decomposes its sensor file; anything else is a pixel the model
+            # sees and the labels do not describe.
+            _unl = sum(hit_stats.get('n_sensor_unlabelled', [0]))
+            if _unl:
+                _sen = sum(hit_stats.get('n_sensor_pixels', [0]))
+                print(f"  {'Sensor pixels left unlabelled':<{_W}} "
+                      f"{_unl:>10,} ({100.0 * _unl / max(1, _sen):.2f}%)")
             if _cut:
                 print(f"  {'Below the charge threshold':<{_W}} "
                       f"{_cut:>10,} ({100.0 * _cut / max(1, _dec):.1f}%)")
@@ -714,11 +852,23 @@ def main(cfg: DictConfig) -> None:
                 print(f"  {'Groups split across fragments':<{_W}} "
                       f"{_straddle_total:>10,} ({100.0 * _straddle_total / _gt:.2f}%)"
                       f"  -- resolved by majority")
-            _cap = sum(hit_stats.get('n_capped_groups', [0]))
-            if _cap:
-                # group_sizes is uint8, so a group of more than 255 entries
-                # cannot be stored and JAXTPC truncates its CSR.
-                print(f"  {'Groups at the uint8 size cap':<{_W}} {_cap:>10,}")
+
+        # ── Truth cloud (pixel hit mode) ──────────────────────────────────
+        if truth_stats.get('n_segments'):
+            _seg = sum(truth_stats['n_segments'])
+            _own = sum(truth_stats['n_owned'])
+            _row = sum(truth_stats['n_rows'])
+            print(f"\n[run] True deposits behind the hits  ({n_events} event(s))")
+            print(f"  {'Segments in the seg file':<{_W}} {_seg:>10,}")
+            print(f"  {'Behind an owned group':<{_W}} {_own:>10,}"
+                  f" ({100.0 * _own / max(1, _seg):.1f}%)")
+            _how = ('segments' if _truth_voxel is None
+                    else f'{_truth_voxel} mm voxels')
+            print(f"  {'points/flat rows (' + _how + ')':<{_W}} {_row:>10,}")
+        if label_stats.get('n_hits'):
+            _nh = sum(label_stats['n_hits']); _nt = sum(label_stats['n_traced'])
+            print(f"  {'Hits labelled (hit_labels)':<{_W}} {_nt:>10,}"
+                  f" of {_nh:,} ({100.0 * _nt / max(1, _nh):.1f}%)")
 
         # ── Time profile ──────────────────────────────────────────────────
         total = sum(profile.values())
