@@ -1782,6 +1782,17 @@ let FMT3=false;
 function probeFragLevel(){
   _FRAG_LEVEL=false;
   if(!hf) return false;
+  // 3.x: one particles table; a fragment level exists when some row heads a
+  // fragment (frag_id == id).
+  if(FMT3){
+    try{
+      const pg=hf.get('particles');
+      if(!pg.keys().includes('frag_id')) return false;
+      const f=pg.get('frag_id').value, id=pg.get('id').value;
+      for(let k=0;k<f.length;k++) if(Number(f[k])===Number(id[k])){ _FRAG_LEVEL=true; break; }
+    }catch(e){ _FRAG_LEVEL=false; }
+    return _FRAG_LEVEL;
+  }
   try{
     if(!hf.keys().includes('particle_fragments')) return false;
     const g=hf.get('particle_fragments');
@@ -2739,8 +2750,10 @@ async function openBuf(name, buf){
     try{ _hasL0=hf.keys().includes('particles')
                 &&Number(hf.get('particles').get('id').shape[0])>0; }catch(e){}
     let _hasG4=false;
-    try{ _hasG4=hf.keys().includes('particle_instances')
-                &&hf.get('particle_instances').keys().includes('geant4_trackid'); }catch(e){}
+    try{ _hasG4=FMT3
+          ? hf.get('particles').keys().includes('geant4_trackid')
+          : (hf.keys().includes('particle_instances')
+             &&hf.get('particle_instances').keys().includes('geant4_trackid')); }catch(e){}
     logMsg('format '+_fv+' \u00b7 fragment level: '+(_FRAG_LEVEL?'yes':'no')
            +' \u00b7 level-0 particles: '+(_hasL0?'yes':'no')
            +' \u00b7 geant4_trackid: '+(_hasG4?'yes':'no'));
