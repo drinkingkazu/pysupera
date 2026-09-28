@@ -36,7 +36,8 @@ A Python library for grouping simulated LArTPC particles into physics partitions
    - [Interaction columns](#interaction-columns)
    - [ID conventions](#id-conventions)
    - [Wire and pixel readout](#wire-and-pixel-readout)
-   - [Truth deposits or detected hits](#truth-deposits-or-detected-hits)
+   - [Wire deposits and pixel hits](#wire-deposits-and-pixel-hits)
+   - [What the output stores (JAXTPC input)](#what-the-output-stores-jaxtpc-input)
    - [Hit provenance (JAXTPC mode)](#hit-provenance-jaxtpc-mode)
      - [Seeing it](#seeing-it)
    - [Expert and debugging output](#expert-and-debugging-output)
@@ -47,7 +48,10 @@ A Python library for grouping simulated LArTPC particles into physics partitions
    - [Profiling and W&B logging](#profiling-and-wb-logging)
 8. [CLI Usage](#cli-usage)
 9. [Compute Backends](#compute-backends)
+   - [Pipeline performance](#pipeline-performance)
 10. [Algorithms](#algorithms)
+   - [Voxelization](#voxelization-1)
+   - [Defragmentation](#defragmentation-1)
    - [Partition-level Incremental Algorithm](#partition-level-incremental-algorithm)
    - [Proximity Check](#proximity-check)
    - [Condition Pipeline](#condition-pipeline)
@@ -307,11 +311,13 @@ label (`-1`) and are drawn grey.
 
 #### What the energy column holds
 
-Nothing in the point columns says whether the energy column is true dE or
-measured charge, so the run writes it down as root attributes
-(`point_source`, `hit_energy`, `hit_x_from`, `readout_type`) and the viewers
-could label the column from them. Guessing from the presence of negative values
-works on a busy event and fails on a quiet one.
+In `points/flat` it is always true dE in MeV: with JAXTPC input the stored
+points are the true deposits behind the hits, whatever the partitioning ran
+on. Measured charge stays in the JAXTPC hits file, which is where
+`vis_drift.html` reads it from. The root attributes `point_source`,
+`hit_energy`, `hit_x_from` and `readout_type` record what the *partitioning*
+ran on — for a pixel run, the hits' charge at nominal x — not what
+`points/flat` holds.
 
 ---
 
@@ -401,7 +407,7 @@ the true deposits behind the hits in `points/flat` and a label per hit in
 
 `reader=jaxtpc_pixel` also brings the settings hits need outside the reader
 group — `particle.min_pc_size`, `distance_threshold`,
-`check_group_ownership`, `particle.voxelize.store` — from
+`check_group_ownership` — from
 `conf/readout/jaxtpc_pixel.yaml`, loaded after `config.yaml`'s own values; a
 command-line flag still wins. `reader.point_source=deposits` is refused.
 
@@ -434,19 +440,21 @@ see [Step 0](#step-0--configuration).
 
 | Key | Default | Description |
 |---|---|---|
-| `distance_threshold` | `5.0` | Proximity distance *D* in point-cloud coordinate units |
-| `verbose` | `true` | Print per-event progress |
+| `distance_threshold` | `5.2` | Proximity distance *D* in point-cloud coordinate units (6.2 with `reader=jaxtpc_pixel`) |
+| `verbose` | `false` | Print per-event detail |
 | `report` | `true` | Print end-of-run summary statistics |
 | `enable_diagnostics` | `false` | Record every merge decision for inspection |
 | `check_particle_tree` | `false` | Validate parent–child consistency before partitioning |
-| `checker` | `gpu` | Default compute backend (config group; override with `checker=cpu_single` etc.) |
+| `checker` | `cpu_single` | Compute backend (config group; override with `checker=cpu_multi` etc.) |
 
 **Particle preprocessing parameters** (`particle.*`):
 
 | Key | Default | Description |
 |---|---|---|
-| `particle.min_pc_size` | `-1` | Min point-cloud size for semantic-type classification; `-1` disables (all sizes accepted) |
-| `particle.merge_duplicates` | `true` | Collapse points sharing identical (x,y,z) coordinates before partitioning |
+| `particle.min_pc_size` | `5` | Occupied voxels below which a particle is `kLEScatter` (63 with `reader=jaxtpc_pixel`); `-1` disables |
+| `particle.merge_duplicates` | `true` | Collapse points sharing identical (x,y,z) coordinates; subsumed by the voxelizer when it is on |
+| `particle.voxelize.enabled` | `true` | Merge each particle's points on a `voxel_size` grid (3 mm, fixed `origin`) before defragmentation |
+| `particle.voxelize.store` | `voxels` | What `points/flat` holds: the voxels, or (`points`) every input point |
 | `particle.defragment` | `true` | Split disconnected point-cloud fragments into new `kLEScatter` particles |
 | `particle.preprocessor.name` | `scipy` | Defragmentation backend: `scipy`, `gpu`, or `rapids` |
 
@@ -471,11 +479,12 @@ configure(cfg)   # sets module-level defaults (min_pc_size, etc.)
 
 ### Step 1 — Preprocessing
 
-Two optional preprocessing stages run before partitioning.
+Three stages run before partitioning, in this order, each within one
+particle at a time: merge duplicates, voxelization, defragmentation.
 
 #### Merge Duplicates
 
-Collapses points that share identical (x, y, z) voxel positions within each particle's point cloud.  Aggregation: `time = min`, `energy = sum`, `dEdx = max`.  Enable with:
+Collapses points that share identical (x, y, z) positions within each particle's point cloud.  Aggregation: `time = min`, `dE = sum`, `dX = sum`.  Skipped when the voxelizer runs with `voxelize.merge_duplicates: true` (the default), since voxelizing merges them anyway.  Enable with:
 
 ```yaml
 # config.yaml
@@ -483,16 +492,24 @@ particle:
   merge_duplicates: true
 ```
 
+#### Voxelization
+
+Bins every particle's points on the `particle.voxelize` grid (3 mm cells from
+a fixed `origin`) and merges the points sharing a cell: cell centre,
+`time = min`, `dE = sum`, `dX = sum`. The voxels are what proximity,
+defragmentation and the extent classification see. See
+[Voxelization](#voxelization-1) under Algorithms for how it is computed.
+
 #### Defragmentation
 
-A particle's point cloud may be *fragmented* — split into spatially disconnected clusters that should logically belong to the same particle.  The defragmenter runs a connected-components algorithm (eps-ball radius = `distance_threshold`) on each particle's point cloud independently, then detaches small disconnected fragments (size ≤ `min_pc_size`) as new `kLEScatter` particles.
+A particle's point cloud may be *fragmented* — split into spatially disconnected clusters that should logically belong to the same particle.  The defragmenter runs a connected-components algorithm (eps-ball radius = `distance_threshold`) on each particle's point cloud independently, then detaches small disconnected fragments (size ≤ `min_pc_size`) as new `kLEScatter` particles.  By default only `kShower`, `kDelta`, `kMichel` and `kLEScatter` particles are examined (`preprocessor.sem_types`); tracks are left whole.
 
 Enable with:
 
 ```yaml
 particle:
   defragment: true
-  min_pc_size: -1       # default: -1 (disabled); set e.g. 5 to split small fragments
+  min_pc_size: 5        # voxels; fragments this small become kLEScatter
   preprocessor:
     name: scipy         # choices: scipy (default), gpu, rapids
 ```
@@ -503,7 +520,7 @@ particle:
 | `gpu` | `cupy` | Large point clouds (> `min_pts_for_gpu` points) |
 | `rapids` | `cupy` + `cudf` + `cugraph` | Fully GPU, no CPU round-trip |
 
-All backends share the same fast-path early-exit checks (single point, two-point connected, bounding-box diameter ≤ eps) that skip the full CC algorithm for the majority of particles.
+All backends share the same fast-path early-exit checks (single point, two-point connected, bounding-box diameter ≤ eps) that skip the full CC algorithm for the majority of particles.  The `scipy` backend then clusters all remaining particles of an event in one pass — see [Defragmentation](#defragmentation-1) under Algorithms.
 
 ---
 
@@ -822,13 +839,22 @@ readers see the absolute form.
 
 ### Point columns
 
+`points/columns` names them. The first six are common to every run; JAXTPC
+runs add three:
+
 ```
-0:x  1:y  2:z  3:time  4:dE  5:dX
+EDepSim only   0:x  1:y  2:z  3:time  4:dE  5:dX
+JAXTPC         0:x  1:y  2:z  3:t     4:dE  5:dX  6:theta  7:phi  8:p
 ```
 
-Both merge stages operate within a single particle, so `dE` and `dX` both sum
-over a particle-voxel and **dE/dX is column 4 / column 5**, exactly. Guard
-against `dX == 0`: EDepSim writes zero-length steps, a few percent of voxels.
+Units are mm, µs, MeV, cm, rad and MeV/c. theta and phi are the step
+direction (theta from the z axis) and p the momentum magnitude, taken from
+the earliest step in the voxel — the particle entering the cell.
+
+Every merge stage operates within a single particle, so `dE` and `dX` both
+sum over a particle-voxel and **dE/dX is column 4 / column 5**, exactly.
+Guard against `dX == 0`: EDepSim writes zero-length steps, a few percent of
+voxels.
 
 ### Wire and pixel readout
 
@@ -993,13 +1019,22 @@ with read_events_v3("out.h5") as store:
     frag = labels[(0, 1)]["fragment_id"]   # volume 0, plane V
 ```
 
-| per 10 events | pixel | wire |
+| per 10 events (sample batch, default LZ4) | pixel | wire |
 |---|---|---|
-| `points/flat` (3 mm voxels) | 1.9 MB | 2.9 MB |
-| `hit_labels/` | 10.5 MB (28.9M hits) | 2.2 MB (16.8M hits) |
-| whole file | ~14 MB | ~7 MB |
+| `points/flat` (3 mm voxels, 9 columns) | 3.8 MB (177k voxels) | 5.7 MB (270k voxels) |
+| `hit_labels/` | 11.1 MB (28.9M hits) | 2.2 MB (16.8M hits) |
+| `groups/` | 0.5 MB | 0.7 MB |
+| whole file | 16.3 MB | 9.7 MB |
+
+The 10-event pixel run labels 24.9M of the 28.9M hits (86.1%); the rest are
+exactly the hits off the sensor image.
 
 #### The drift coordinate — `reader.hit_x_from`
+
+This and the next few settings shape the cloud a pixel run *partitions*; none
+of them changes what is stored, since `points/flat` holds the true deposits
+at their true positions. `vis_drift.html` computes the nominal x of every hit
+itself, from the `pixel_geometry` root attribute the run writes.
 
 `y` and `z` are pure geometry and invert exactly, to half a pixel. `x` is
 drift time, and a tick counts from the start of the readout window — so it
@@ -1079,7 +1114,7 @@ a wall the reconstruction does not have.
 `charge` (default) is what the readout measured. The response is bipolar, so
 about 16% of hits carry negative charge; that is signal, not error.
 `true_de` instead shares each group's true deposited energy over its hits in
-proportion to `|charge|` — comparable with deposit mode's column, at the cost
+proportion to `|charge|` — comparable with a truth cloud's dE, at the cost
 of putting a truth quantity into a detected cloud. **`dx` is 0 in both
 cases**: a hit is a pixel and a tick, and has no path length, so anything
 reading dE/dx sees zero.
@@ -1140,16 +1175,16 @@ blob one track-width across, `(width / voxel_size)³`.
 | input | track width | implied threshold |
 |---|---|---|
 | truth deposits | 4.9 mm | (4.9/3)³ ≈ **5** — the default |
-| pixel sensor hits | 12.8 mm | (12.8/3)³ ≈ 77, best fit **85** |
+| pixel sensor hits (sensor-masked) | 11.9 mm | (11.9/3)³ ≈ **63** — fitted, set by `reader=jaxtpc_pixel` |
 
-A track is 3.2× thicker in the pixel image, which is diffusion plus the
-field response over about three pixel pitches. Measured over ten events, the
-best-agreeing cut per event ranged 81–90, and at a fixed 85 the sensor-hit
-labelling matches the truth-deposit labelling on **99.0%** of particles
-(worst event 98.5%) — not merely the same fraction, the same particles. That was measured before the uint8
-`group_sizes` fix and the sensor mask; on the masked hits the best value is
-63 (99.26%), which `reader=jaxtpc_pixel` sets — see
-[Which pixels: the sensor image](#which-pixels-the-sensor-image).
+A track is about 2.4× thicker in the pixel image, which is diffusion plus the
+field response over a few pixel pitches. The pixel value was fitted rather
+than derived — each EDepSim particle's LE-ness from its hits against the same
+particle's from truth deposits at 5 — and at 63 the two agree on **99.26%**
+of particles, not merely the same fraction but the same ones (per-event best
+58–70; see [Which pixels: the sensor image](#which-pixels-the-sensor-image)).
+An earlier fit, on unmasked hits decoded with the uint8 `group_sizes` bug,
+gave 85; it no longer applies.
 
 Note this also changed truth-deposit labelling, from 85.8% to 95.3% LE,
 because particles spread over a handful of rows inside one or two voxels are
@@ -1169,21 +1204,28 @@ Event 0, one event:
 | 8.0 mm | 6,900 → 2,426 | 8,128 → 3,197 |
 | 10.0 mm | 6,900 → 2,349 | 7,372 → 2,555 |
 
-Deposit mode never splits at all — 0.3 mm deposit spacing keeps a track
+The truth deposits never split at all — 0.3 mm deposit spacing keeps a track
 connected at any of these thresholds.
 
 **A group can straddle a fragment split.** The `groups/` table rests on the
 invariant that it cannot, which holds for deposits (0 of 354,959) and does
-*not* hold for hits: the readout leaves gaps the deposit cloud does not have,
-defragmentation cuts there, and 1.84% of groups end up on both sides.
-`check_group_ownership=false` is therefore required in hit mode, and the run
-resolves each straddled group by majority and reports how many there were.
+*not* strictly hold for hits: the readout leaves gaps the deposit cloud does
+not have, and defragmentation can cut there. On the sensor-masked hits it is
+rare — 70 of about 574k groups (0.01%) over 10 events; before the mask and
+the `group_sizes` fix it was 1.84% — but not zero, so
+`check_group_ownership=false` is set for hit mode, and the run resolves each
+straddled group by majority and reports how many there were. `hit_labels/` is
+unaffected: pixel hits are labelled one by one, not through their group.
 
 ### Hit provenance (JAXTPC mode)
 
-Which readout hits belong to which reconstructed object. A hit is the
-projection of a JAXTPC *group*, and `groups/` records the fragment that owns
-each group, plus one bit saying whether that group is low-energy:
+Which readout hits belong to which reconstructed object. For a label per hit,
+read `hit_labels/` (see [What the output stores](#what-the-output-stores-jaxtpc-input)):
+it is aligned with the hits file and needs no join. `groups/` is the
+group-level view behind it, kept because it is small and answers questions
+about groups directly. A hit is the projection of a JAXTPC *group*, and
+`groups/` records the fragment that owns each group, plus one bit saying
+whether that group is low-energy:
 
 ```python
 with read_events_v3("out.h5") as store:
@@ -1262,8 +1304,9 @@ about 21% of the output under LZ4, less under gzip.
 
 #### Seeing it
 
-`vis_hits.html` shows this mapping directly — 3-D voxels beside the 2-D
-readout planes, hover either side to light up the other. See
+`vis_hits.html` (wire) and `vis_drift.html` (pixel) show the hit labels
+directly — truth voxels beside the readout, hover either side to light up the
+other. See
 [Browser viewers](#browser-viewers) for its
 controls and for preparing its two inputs.
 
@@ -1356,6 +1399,11 @@ for batch in loader:                      # batch_size counts *events*
         i = ev["voxel_instance"]          # (V,) instance id
         k = ev["voxel_interaction"]       # (V,) interaction id
 ```
+
+It reads `points/flat`, so for a JAXTPC file the input is the truth voxels,
+not the detector hits. A loader that pairs the JAXTPC hits file with
+`hit_labels/` (the intended model input for JAXTPC runs) is not written yet;
+`read_events_v3(...).hit_labels(ev)` gives the labels to build one from.
 
 Point clouds differ in length between events, so a batch stays a **list** of
 events rather than a padded tensor; `batch_size` therefore means exactly a
@@ -1574,9 +1622,9 @@ Select the backend via the `backend` parameter of `ParticlePartitioner` or `chec
 
 | Backend name | Config key | Requirement | Description |
 |---|---|---|---|
-| `cpu-single` | `cpu_single` | `scipy` | Single-threaded KDTree |
+| `cpu-single` | `cpu_single` | `scipy` | Single-threaded KDTree; **default** |
 | `cpu-multi` | `cpu_multi` | `scipy`, `joblib` | KDTree + joblib thread pool |
-| `gpu` | `gpu` | `cuml` (RAPIDS) | RAPIDS NearestNeighbors (brute-force L2); **default** |
+| `gpu` | `gpu` | `cuml` (RAPIDS) | RAPIDS NearestNeighbors (brute-force L2) |
 | `bulk-gpu` | `bulk_gpu` | `cupy` | CuPy chunked brute-force; accepts `chunk_size` |
 | `numba` | `numba` | `numba`, CUDA | CUDA kernel with shared-memory tiling; accepts `block_size` |
 | `cell-hash-cpu-single` | `cell_hash_cpu_single` | `scipy` | Cell-hash spatial index, single thread |
@@ -1585,9 +1633,100 @@ Select the backend via the `backend` parameter of `ParticlePartitioner` or `chec
 
 For the partition-level proximity mode (the hot path), all CPU backends override `batch_check_cloud_proximity` to build the parent KDTree **once** per candidate group rather than once per pair.
 
+On LArTPC events the default is also the fastest CPU choice. `partition_combined`
+over the same 3 pixel events (16 cores):
+
+| `checker=` | `partition_combined` |
+|---|---|
+| `cpu_single` | **3.4 s** |
+| `cpu_multi` | 7.8 s |
+| `cell_hash_cpu_multi` | 16.9 s |
+| `numba` | 24.9 s (includes JIT compilation) |
+
+Most candidate groups are small, so thread dispatch costs more than it saves.
+
+### Pipeline performance
+
+`run_pysupera` prints a time profile per stage at the end of a run
+(`report=true`). On the sample batches (10 events each, `checker=cpu_single`,
+one process), wall time including start-up and I/O:
+
+| run mode | wall | per event | largest stages (s per event) |
+|---|---|---|---|
+| EDepSim only | 19.7 s | ~2.0 s | partition 0.73, defragment 0.15, voxelize 0.13, write 0.11 |
+| JAXTPC wire | 29.0 s | ~2.9 s | write 0.93, partition 0.70, defragment 0.16, voxelize 0.16 |
+| JAXTPC pixel | 49.6 s | ~5.0 s | partition 1.66, write 0.82, voxelize 0.60, defragment 0.40 |
+
+A pixel event is the heaviest: about 2.9M hits are read, 2.5M of them (the
+on-sensor ones) partitioned, and all 2.9M labelled. Reading the hits and
+sensor files takes about 0.8 s per event, outside the stage profile. For wire,
+writing (`hit_labels/` for 1.7M hits per event, compressed) is the largest
+stage. The run is single-process; throughput scales by
+running files, or event ranges, as separate processes.
+
+Two changes (September 2026) cut the pixel time by 27% with output
+bit-for-bit identical — checked dataset by dataset on 10 events of each mode:
+
+| stage (10 events, mean of 3 alternating runs) | before | after | |
+|---|---|---|---|
+| pixel voxelize | 21.6 s | 6.0 s | 3.6× |
+| pixel defragment | 10.1 s | 4.0 s | 2.5× |
+| pixel wall | 68.3 s | 49.6 s | −27% |
+| wire voxelize / defragment | 2.5 / 2.5 s | 1.6 / 1.6 s | ~1.6× |
+| wire wall | 35.5 s | 29.0 s | −18% |
+| EDepSim voxelize / defragment | 2.3 / 2.7 s | 1.3 / 1.5 s | ~1.8× |
+| EDepSim wall | 22.8 s | 19.7 s | −13% (noisy) |
+
+Before them, a profile of 3 pixel events put 83% of the stage time in three
+places: one `np.unique(keys, axis=0)` in the voxelizer (1.4 s per event),
+14,212 per-particle KD-tree and connected-components calls in
+defragmentation (1.35 s per event, mostly set-up overhead on tiny clouds),
+and partitioning. The first two are described under
+[Voxelization](#voxelization-1) and [Defragmentation](#defragmentation-1).
+Repeated runs of identical code on this machine varied by up to 35%, so
+compare stage times across alternating runs rather than single wall times.
+
 ---
 
 ## Algorithms
+
+### Voxelization
+
+`VoxelizeProcessor` voxelizes every particle of an event in one pass. Each
+point gets the key (particle index, vx, vy, vz), and one `np.unique` over the
+keys gives the output voxels and, per point, the voxel it went into; the
+merge rules are then applied per column with `ufunc.at`.
+
+The row-wise `np.unique(keys, axis=0)` sorts a structured view and is an
+order of magnitude slower than a 1-D sort, so `_unique_rows` packs the four
+columns into one int64 instead — each offset to start at zero, most
+significant first, which sorts in the same lexicographic order — and unpacks
+the unique keys afterwards. It falls back to the row-wise call if the column
+ranges need more than 63 bits. On 3.3M rows: 0.14 s instead of 2.46 s, same
+result.
+
+For JAXTPC input the stored truth voxels are made separately
+(`provenance.voxelize_truth`), because they carry columns the generic merge
+rules do not know: theta, phi and p come from the earliest step in the cell.
+
+### Defragmentation
+
+The defragmenter screens every particle first (one point, two touching
+points, or a bounding box within eps: one cluster, nothing to do) and
+clusters the rest. The `scipy` backend clusters them all together
+(`ScipyDefragmenter._get_labels_many`): the clouds are stacked with a fourth
+coordinate `k · (⌈eps⌉ + 1)` for cloud *k*, so points of different clouds are
+always more than eps apart, while within a cloud the fourth term is exactly
+zero and distances are unchanged. One KD-tree `query_pairs` and one
+`connected_components` then replace one of each per particle — 14k per pixel
+event.
+
+`connected_components` numbers components in order of their lowest node, so
+a cloud's components form a contiguous run of labels starting at its first
+point's label; subtracting that gives exactly the labels a per-cloud call
+returns. The labels themselves matter, not just the partition:
+`_split_fragments` numbers the spawned LE particles in label order. The
+`gpu` and `rapids` backends, and `n_jobs ≠ 1`, keep the per-particle path.
 
 ### Partition-level Incremental Algorithm
 
