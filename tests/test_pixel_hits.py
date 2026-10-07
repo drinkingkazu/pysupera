@@ -586,6 +586,29 @@ def test_window_truncation_is_empty_when_nothing_is_late():
     assert window_truncation(x, t0, GEOM, 2701) == (0, 0, 2)
 
 
+@pytest.mark.parametrize("stats, expected", [
+    # every deposit after the last tick: run 725 event 11, t0 >= 860 us
+    ({"n_deposits": 42805, "n_before_window": 0, "n_after_window": 42805},
+     True),
+    ({"n_deposits": 10, "n_before_window": 4, "n_after_window": 6}, True),
+    # one deposit in the window: an empty image then means something else
+    ({"n_deposits": 10, "n_before_window": 0, "n_after_window": 9}, False),
+    # no deposits, or not hit mode: the configuration problem the guard is for
+    ({"n_deposits": 0, "n_before_window": 0, "n_after_window": 0}, False),
+    (None, False),
+    ({}, False),
+])
+def test_an_event_wholly_outside_the_window_is_told_apart(stats, expected):
+    """
+    The run's empty-image guard halts on an event with no points, because
+    that is nearly always a wrong file.  An event whose interaction came so
+    late that none of its charge reached the anode before the last tick is
+    the detector instead, and is written out empty.
+    """
+    from pysupera._run import _wholly_outside_window
+    assert _wholly_outside_window(stats) is expected
+
+
 # ---------------------------------------------------------------------------
 # Out-of-volume points
 # ---------------------------------------------------------------------------

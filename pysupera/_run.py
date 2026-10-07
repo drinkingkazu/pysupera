@@ -74,6 +74,21 @@ def _rows_by_input_id(particles):
     return rows
 
 
+def _wholly_outside_window(hit_stats):
+    """
+    Whether every deposit of an event arrived outside the readout window.
+
+    *hit_stats* is the reader's ``last_hit_stats`` for the event (``None``
+    outside hit mode).  True only when there were deposits to miss: an event
+    with none is the configuration problem the empty-image guard exists for.
+    """
+    hs = hit_stats or {}
+    n_dep = int(hs.get('n_deposits', 0) or 0)
+    n_out = (int(hs.get('n_before_window', 0) or 0)
+             + int(hs.get('n_after_window', 0) or 0))
+    return n_dep > 0 and n_out >= n_dep
+
+
 @hydra.main(config_path=_CONF_DIR, config_name="config", version_base=None)
 def main(cfg: DictConfig) -> None:
     """Partition all events in the input file and write results."""
@@ -216,6 +231,8 @@ def main(cfg: DictConfig) -> None:
     # Empty-image policy: halt by default, warn once when explicitly allowed.
     _allow_empty_image = bool(cfg.get("allow_empty_image", False))
     _warned_empty_image = False
+    # Events written empty because no deposit reached the readout window.
+    n_out_of_window_events = 0
 
     # Interaction-ID validation: raise by default, warn once when relaxed.
     _check_int_id = bool(cfg.get("check_interaction_id", True))
@@ -433,7 +450,22 @@ def main(cfg: DictConfig) -> None:
                 # holds no charge at all.  This is nearly always a config
                 # error (wrong seg/inst file, wrong step_key) rather than
                 # physics, so halt unless explicitly allowed.
-                if not _nonzero:
+                #
+                # The exception is an event the readout never saw: deposits
+                # are there, but every one arrived outside the readout
+                # window -- an interaction late enough that its charge
+                # reaches the anode after the last tick.  That is the
+                # detector, not the config, so it is written out empty (the
+                # event numbering stays aligned with the input) and the
+                # guard stays armed for everything else.
+                if not _nonzero and _wholly_outside_window(_hs):
+                    n_out_of_window_events += 1
+                    print(f"[run] event {event_idx}: none of its "
+                          f"{_hs['n_deposits']:,} deposits arrived inside the "
+                          f"readout window ({_hs['n_before_window']:,} "
+                          f"before, {_hs['n_after_window']:,} after); "
+                          f"written as an empty event.")
+                elif not _nonzero:
                     _msg = (
                         f"Event {event_idx}: empty image — all "
                         f"{len(particles)} particle(s) have an empty point "
@@ -830,6 +862,11 @@ def main(cfg: DictConfig) -> None:
                 if _bef:
                     print(f"  {'Deposits before it opened':<{_W}} "
                           f"{_bef:>10,} ({100.0 * _bef / _dep:.1f}%)")
+            if n_out_of_window_events:
+                print(f"  {'Events wholly outside it':<{_W}} "
+                      f"{n_out_of_window_events:>10,} "
+                      f"({100.0 * n_out_of_window_events / max(1, n_events):.1f}%)"
+                      f"  -- written empty")
 
             # A reconstructed x beyond its own volume's faces.  Counted, never
             # clipped: with a nominal t0 the drift coordinate is an inference,
