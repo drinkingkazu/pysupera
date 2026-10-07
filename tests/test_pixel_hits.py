@@ -20,6 +20,7 @@ from pysupera.readers.pixel_hits import (
     X_FROM,
     build_hit_point_cloud,
     calibrate_volume,
+    verify_volume_geometry,
     window_truncation,
     decode_plane_hits,
     decode_sensor_plane,
@@ -285,6 +286,96 @@ def test_calibration_needs_enough_groups():
     py, pz, tick, t0, truth = _synth_groups(GEOM, n=4, seed=4)
     with pytest.raises(PixelGeometryError, match="too few"):
         calibrate_volume(py, pz, tick, t0, truth)
+
+
+def _synth_shared_t0(geom, t0_us, n=932, seed=5):
+    """
+    Groups on *geom* whose deposits all share one interaction time.
+
+    Truth x is scattered by a few tenths of a mm, as a deposit centroid is
+    about its group's tick; without that a 0.01 us spread in t0 would pin
+    the velocity exactly, which no real event does.
+    """
+    rng = np.random.default_rng(seed)
+    py = rng.integers(0, 1000, n)
+    pz = rng.integers(0, 1000, n)
+    tick = rng.integers(0, 2000, n).astype(float)
+    t0 = np.full(n, t0_us) + rng.normal(0, 0.01, n)
+    x, y, z = geom.to_xyz(py, pz, tick - t0 / geom.time_step_us)
+    x = x + rng.normal(0, 0.3, n)
+    return py, pz, tick, t0, np.stack([x, y, z], axis=1)
+
+
+@pytest.mark.parametrize("geom", [GEOM, MIRRORED])
+def test_verify_accepts_the_right_geometry_when_t0_does_not_vary(geom):
+    """
+    With one shared, non-zero t0 the t0 slope of x is degenerate with the
+    intercept.  The check once anchored on the fit's intercept and so
+    rejected a correct geometry by hundreds of mm; the anchor must come from
+    the stated constants instead.
+    """
+    py, pz, tick, t0, truth = _synth_shared_t0(geom, 460.0)
+    rep = verify_volume_geometry(geom, py, pz, tick, t0, truth)
+    assert rep["residual_mm"]["x"] < 1.0
+    assert rep["reference_tick_derived"] == pytest.approx(0.0, abs=0.5)
+    # ...and the velocity it cannot see is not reported as if it could.
+    assert not rep["measured"]["velocity_measured"]
+    assert np.isnan(rep["measured"]["drift_velocity_mm_us"])
+
+
+def test_verify_still_rejects_a_wrong_tick_length_when_t0_does_not_vary():
+    py, pz, tick, t0, truth = _synth_shared_t0(GEOM, 460.0, seed=6)
+    wrong = VolumePixelGeometry(y_min_mm=-2160.0, z_min_mm=-2160.0,
+                                x_min_mm=-2160.0, x_max_mm=0.0,
+                                drift_direction=-1, pitch_mm=4.32,
+                                drift_velocity_mm_us=1.6, time_step_us=0.4)
+    with pytest.raises(PixelGeometryError, match="not measurable"):
+        verify_volume_geometry(wrong, py, pz, tick, t0, truth)
+
+
+def test_calibration_refuses_to_invent_a_velocity_when_t0_does_not_vary():
+    """
+    The fit used to split the degenerate intercept and t0 slope however it
+    liked and store the result as the drift velocity and reference tick.
+    """
+    py, pz, tick, t0, truth = _synth_shared_t0(GEOM, 460.0, seed=8)
+    with pytest.raises(PixelGeometryError, match="cannot be measured"):
+        calibrate_volume(py, pz, tick, t0, truth, x_range=(-2160.0, 0.0))
+
+
+@pytest.mark.parametrize("stated", [{"drift_velocity_mm_us": 1.6},
+                                    {"time_step_us": 0.5}])
+@pytest.mark.parametrize("geom, x_range", [(GEOM, (-2160.0, 0.0)),
+                                           (MIRRORED, (0.0, 2160.0))])
+def test_calibration_takes_the_stated_drift_when_t0_does_not_vary(
+        stated, geom, x_range):
+    py, pz, tick, t0, truth = _synth_shared_t0(geom, 460.0, seed=9)
+    got, report = calibrate_volume(py, pz, tick, t0, truth, x_range=x_range,
+                                   **stated)
+    assert report["velocity_source"].startswith("stated")
+    assert got.drift_direction == geom.drift_direction
+    assert got.drift_velocity_mm_us == pytest.approx(1.6, rel=1e-3)
+    assert got.time_step_us == pytest.approx(0.5, rel=1e-3)
+    assert got.reference_tick == pytest.approx(0.0, abs=0.5)
+    assert report["residual_mm"]["x"] < 1.0
+
+
+def test_calibration_prefers_the_fit_when_t0_varies():
+    """A stated velocity is a fallback, never an override of a measurement."""
+    py, pz, tick, t0, truth = _synth_groups(GEOM, seed=10)
+    got, report = calibrate_volume(py, pz, tick, t0, truth,
+                                   x_range=(-2160.0, 0.0),
+                                   drift_velocity_mm_us=1.0)
+    assert report["velocity_source"] == "fit"
+    assert got.drift_velocity_mm_us == pytest.approx(1.6, rel=1e-6)
+
+
+def test_verify_measures_the_velocity_when_t0_varies():
+    py, pz, tick, t0, truth = _synth_groups(GEOM, seed=7)
+    rep = verify_volume_geometry(GEOM, py, pz, tick, t0, truth)
+    assert rep["measured"]["velocity_measured"]
+    assert rep["measured"]["drift_velocity_mm_us"] == pytest.approx(1.6,
+                                                                    rel=1e-6)
 
 
 # ---------------------------------------------------------------------------

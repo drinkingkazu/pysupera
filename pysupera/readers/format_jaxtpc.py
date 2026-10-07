@@ -1157,8 +1157,13 @@ class JaxtpcHDF5Reader(EventReaderBase):
                 say.append(
                     f"    volume {v}: pixel_pitch_mm ~ {m['pitch_mm']:.4f}, "
                     f"pixel_drift_direction ~ {m['drift_direction']:+d}, "
-                    f"drift_velocity_mm_us ~ {m['drift_velocity_mm_us']:.4f}, "
-                    f"readout_time_step_us ~ {m['time_step_us']:.4f}")
+                    + (f"drift_velocity_mm_us ~ "
+                       f"{m['drift_velocity_mm_us']:.4f}, "
+                       f"readout_time_step_us ~ {m['time_step_us']:.4f}"
+                       if m['velocity_measured'] else
+                       f"drift_velocity_mm_us and readout_time_step_us not "
+                       f"measurable (t0 spread {m['t0_spread_us']:.3g} us; "
+                       f"{m['mm_per_tick']:.4f} mm/tick is their product)"))
             raise _px.PixelGeometryError(
                 f"point_source='hits' needs the pixel geometry, and "
                 f"{note}.\n"
@@ -1184,11 +1189,13 @@ class JaxtpcHDF5Reader(EventReaderBase):
             f"reader.jaxtpc_sensor_path.", RuntimeWarning, stacklevel=2)
         geoms, reports = [], []
         xr = self._volume_x_ranges()
+        vel, dt, _src = self._stated_drift_terms()
         for v, (py, pz, tk, t0, cent) in enumerate(pairs):
             geom, rep = _px.calibrate_volume(
                 py, pz, tk, t0, cent, volume_id=v,
                 x_range=xr[v] if xr and v < len(xr) else None,
-                reference_tick=self._hit_reference_tick)
+                reference_tick=self._hit_reference_tick,
+                drift_velocity_mm_us=vel, time_step_us=dt)
             rep['source'] = 'fitted'
             rep['source_note'] = note
             geoms.append(geom)

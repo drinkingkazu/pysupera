@@ -706,10 +706,15 @@ def verify_volume_geometry(geom, py, pz, tick, t0, xyz_truth, volume_id=0):
 
     measured = _measure_volume(py, pz, tick, t0, xt, yt, zt)
 
-    # Where the data puts the anchor, given the stated anode and tick length.
-    derived_ref = (geom.drift_direction
-                   * (measured['fit_intercept_mm'] - geom.x_anode_mm)
-                   / geom.mm_per_tick) if geom.mm_per_tick else 0.0
+    # Where the data puts the anchor, given every stated constant: the tick
+    # each group would have had at the anode at t0 = 0, by the stated drift,
+    # read off group by group.  Not from the fit's intercept -- when t0
+    # barely varies, a fit cannot tell the intercept from the t0 slope, and
+    # an anchor taken from it is wrong by whatever the slope absorbed.
+    derived_ref = float(np.median(
+        tick - t0 / geom.time_step_us
+        - geom.drift_direction * (geom.x_anode_mm - xt) / geom.mm_per_tick)
+    ) if geom.mm_per_tick else 0.0
 
     # Apply the stated geometry, but anchored where the data says.  t0 is
     # removed too: the question here is whether the pitch, velocity and
@@ -744,9 +749,8 @@ def verify_volume_geometry(geom, py, pz, tick, t0, xyz_truth, volume_id=0):
             f"anode {geom.x_anode_mm:+.1f} mm, reference tick "
             f"{geom.reference_tick:g}\n"
             f"  data says: pitch {measured['pitch_mm']:.4f} mm, "
-            f"{measured['mm_per_tick']:.4f} mm/tick, v "
-            f"{measured['drift_velocity_mm_us']:.4f} mm/us, dt "
-            f"{measured['time_step_us']:.4f} us, drift "
+            f"{measured['mm_per_tick']:.4f} mm/tick, "
+            f"{describe_measured_drift(measured)}, drift "
             f"{measured['drift_direction']:+d}\n"
             f"Check reader.pixel_pitch_mm, reader.pixel_drift_direction and "
             f"the sensor file, or that the hits and step files are from the "
@@ -768,30 +772,86 @@ def verify_volume_geometry(geom, py, pz, tick, t0, xyz_truth, volume_id=0):
             'source': 'stated'}
 
 
+#: The drift velocity is read off the t0 slope of x, so it is only a
+#: measurement when that slope is pinned to better than this, relative.
+_VELOCITY_REL_ERR_MAX = 0.05
+
+
+def _fit_drift(tick, t0, xt):
+    """
+    Regress truth x on ``(1, tick, t0)``, and say whether the t0 slope is real.
+
+    The drift velocity is the t0 slope: how x moves with t0 at fixed tick.
+    When every deposit shares nearly the same t0 that column is the constant
+    column scaled, the fit splits intercept and slope however it likes, and
+    both are meaningless -- only the tick slope survives.  So the slope's
+    standard error is checked against the slope itself.
+
+    Returns
+    -------
+    icept, b_tick, b_t0 : float
+    measured : bool
+        Whether ``b_t0`` (and hence the intercept) is pinned by the data.
+    """
+    A = np.stack([np.ones_like(tick), tick, t0], axis=1)
+    coef, *_ = np.linalg.lstsq(A, xt, rcond=None)
+    icept, b_tick, b_t0 = (float(c) for c in coef)
+    # Var(b_t0) is sigma^2 over the part of t0 that neither the constant nor
+    # the tick explains.
+    t0_perp = t0 - A[:, :2] @ np.linalg.lstsq(A[:, :2], t0, rcond=None)[0]
+    ss_perp = float(t0_perp @ t0_perp)
+    dof = max(len(xt) - 3, 1)
+    sigma = float(np.sqrt(np.sum((xt - A @ coef) ** 2) / dof))
+    measured = bool(ss_perp > 0 and b_t0 != 0 and
+                    sigma / np.sqrt(ss_perp)
+                    < _VELOCITY_REL_ERR_MAX * abs(b_t0))
+    return icept, b_tick, b_t0, measured
+
+
 def _measure_volume(py, pz, tick, t0, xt, yt, zt):
-    """What the data says the geometry is.  Reporting only -- never applied."""
+    """
+    What the data says the geometry is.  Reporting only -- never applied.
+
+    The drift velocity comes from how x moves with t0 at fixed tick, so it
+    needs t0 to vary.  When every deposit shares nearly the same t0 that
+    slope is degenerate with the intercept and the fit returns whatever
+    split minimises the residual; the velocity and sampling period are then
+    reported as NaN, with ``velocity_measured`` False, rather than as a
+    number that looks like a measurement.
+    """
     def fit1(idx, target):
         A = np.stack([np.ones_like(idx), idx], axis=1)
         coef, *_ = np.linalg.lstsq(A, target, rcond=None)
         return coef
     (_cy0, pitch_y) = fit1(py, yt)
     (_cz0, pitch_z) = fit1(pz, zt)
-    A = np.stack([np.ones_like(tick), tick, t0], axis=1)
-    (icept, b_tick, b_t0), *_ = np.linalg.lstsq(A, xt, rcond=None)
+    icept, b_tick, b_t0, measured_v = _fit_drift(tick, t0, xt)
     mm_per_tick = abs(b_tick)
-    velocity = abs(b_t0)
+    velocity = abs(b_t0) if measured_v else float('nan')
     return {'pitch_mm': float(0.5 * (pitch_y + pitch_z)),
             'pitch_y_mm': float(pitch_y), 'pitch_z_mm': float(pitch_z),
             'mm_per_tick': float(mm_per_tick),
             'drift_direction': -1 if b_tick > 0 else 1,
             'drift_velocity_mm_us': float(velocity),
-            'time_step_us': float(mm_per_tick / velocity) if velocity
+            'time_step_us': float(mm_per_tick / velocity) if measured_v
                             else float('nan'),
+            'velocity_measured': bool(measured_v),
+            't0_spread_us': float(np.std(t0)),
             'fit_intercept_mm': float(icept)}
 
 
+def describe_measured_drift(measured):
+    """The measured velocity and sampling period, or why there are none."""
+    if measured.get('velocity_measured', True):
+        return (f"v {measured['drift_velocity_mm_us']:.4f} mm/us, "
+                f"dt {measured['time_step_us']:.4f} us")
+    return (f"v and dt not measurable (t0 spread "
+            f"{measured['t0_spread_us']:.3g} us)")
+
+
 def calibrate_volume(py, pz, tick, t0, xyz_truth, volume_id=0,
-                     x_range=None, reference_tick=None):
+                     x_range=None, reference_tick=None,
+                     drift_velocity_mm_us=None, time_step_us=None):
     """
     Recover one volume's pixel geometry from group centres and truth.
 
@@ -830,6 +890,12 @@ def calibrate_volume(py, pz, tick, t0, xyz_truth, volume_id=0,
     reference_tick : float, optional
         The tick at which a deposit on the anode at Geant4 ``t = 0`` is
         recorded.  ``None`` derives it from *x_range*.
+    drift_velocity_mm_us, time_step_us : float, optional
+        Stated values, used only when the data cannot measure the velocity
+        -- when t0 barely varies, so the t0 slope of x is degenerate with
+        the intercept.  The velocity is preferred; failing that the velocity
+        is the fitted mm per tick over the time step.  With neither, such a
+        batch is refused rather than given a velocity the fit made up.
 
     Returns
     -------
@@ -860,9 +926,36 @@ def calibrate_volume(py, pz, tick, t0, xyz_truth, volume_id=0,
     (cy0, pitch_y), ry = fit1(py, yt)
     (cz0, pitch_z), rz = fit1(pz, zt)
 
-    A = np.stack([np.ones_like(tick), tick, t0], axis=1)
-    (x_anode, b_tick, b_t0), *_ = np.linalg.lstsq(A, xt, rcond=None)
-    rx = xt - A @ np.array([x_anode, b_tick, b_t0])
+    x_anode, b_tick, b_t0, measured_v = _fit_drift(tick, t0, xt)
+    velocity_source = 'fit'
+    if not measured_v:
+        # Only the tick slope is real.  Take the velocity as stated, remove
+        # t0 with it, and refit the intercept and mm per tick without the
+        # degenerate column.
+        t0_spread = float(np.std(t0))
+        if drift_velocity_mm_us is None and time_step_us is None:
+            raise PixelGeometryError(
+                f"volume {volume_id}: t0 barely varies over these {n} groups "
+                f"(spread {t0_spread:.3g} us), so the drift velocity cannot "
+                f"be measured -- only mm per tick ({abs(b_tick):.4f}) can.  "
+                f"State it: set reader.jaxtpc_sensor_path, or "
+                f"reader.drift_velocity_mm_us / reader.readout_time_step_us.")
+        d = -1 if b_tick > 0 else 1
+        A2 = np.stack([np.ones_like(tick), tick], axis=1)
+        if drift_velocity_mm_us is not None:
+            v_stated = float(drift_velocity_mm_us)
+            velocity_source = 'stated velocity'
+            (x_anode, b_tick), *_ = np.linalg.lstsq(
+                A2, xt - d * v_stated * t0, rcond=None)
+        else:
+            # x = c - d*mpt*(tick - t0/dt): one slope, on the t0-free tick.
+            dt_stated = float(time_step_us)
+            velocity_source = 'stated time step'
+            (x_anode, b_tick), *_ = np.linalg.lstsq(
+                np.stack([np.ones_like(tick), tick - t0 / dt_stated], axis=1),
+                xt, rcond=None)
+            v_stated = abs(b_tick) / dt_stated
+        b_t0 = d * v_stated
 
     pitch = 0.5 * (pitch_y + pitch_z)
     if not np.isfinite(pitch) or pitch <= 0:
@@ -949,6 +1042,8 @@ def calibrate_volume(py, pz, tick, t0, xyz_truth, volume_id=0,
         'reference_tick_offset_mm': float((ref - derived_ref) * mm_per_tick),
         'drift_velocity_mm_us': float(velocity),
         'time_step_us': float(dt),
+        'velocity_source': velocity_source,
+        't0_spread_us': float(np.std(t0)),
         'residual_mm': res,
     }
     return geom, report

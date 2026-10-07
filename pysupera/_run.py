@@ -85,6 +85,7 @@ def main(cfg: DictConfig) -> None:
                                      attach_truth_clouds)
     from pysupera.hit_labels import build_hit_labels, check_pixel_labels
     from pysupera.readers.format_jaxtpc import TRUTH_COLUMNS
+    from pysupera.readers.pixel_hits import describe_measured_drift
     from pysupera.io import open_voxmap_writer
     from pysupera.partitioner import ParticlePartitioner
     from pysupera.merge import merge_em_showers
@@ -764,8 +765,7 @@ def main(cfg: DictConfig) -> None:
                 if _m:
                     print(f"             data says  "
                           f"pitch {_m['pitch_mm']:.4f} mm   "
-                          f"v {_m['drift_velocity_mm_us']:.4f} mm/us   "
-                          f"dt {_m['time_step_us']:.4f} us   "
+                          f"{describe_measured_drift(_m)}   "
                           f"drift {_m['drift_direction']:+d}")
                 _r = _g.get('residual_mm') or {}
                 if _r:
