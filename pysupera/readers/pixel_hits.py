@@ -580,6 +580,10 @@ def build_hit_point_cloud(volumes, track_ids_edepsim, *,
 _FIT_TOL_XY_PITCHES = 1.0
 _FIT_TOL_X_MM = 5.0
 
+#: Fewest groups with both a hit centre and truth deposits that a volume's
+#: geometry is checked or fitted on.
+MIN_GROUPS = 8
+
 
 class PixelGeometryError(ValueError):
     """The pixel geometry could not be established from the files."""
@@ -691,7 +695,7 @@ def verify_volume_geometry(geom, py, pz, tick, t0, xyz_truth, volume_id=0):
         Stated values, what the fit measured, and the residuals.
     """
     n = len(py)
-    if n < 8:
+    if n < MIN_GROUPS:
         raise PixelGeometryError(
             f"volume {volume_id}: only {n} group(s) have both a hit centre "
             f"and truth deposits, too few to check the pixel geometry "
@@ -904,7 +908,7 @@ def calibrate_volume(py, pz, tick, t0, xyz_truth, volume_id=0,
         Fitted values and residuals, for logging.
     """
     n = len(py)
-    if n < 8:
+    if n < MIN_GROUPS:
         raise PixelGeometryError(
             f"volume {volume_id}: only {n} group(s) have both a hit centre "
             f"and truth deposits, which is too few to establish the pixel "

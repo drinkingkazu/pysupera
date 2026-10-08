@@ -566,6 +566,10 @@ class JaxtpcHDF5Reader(EventReaderBase):
         # the run, not of the event.  An explicit list skips calibration.
         self._pixel_geoms = pixel_geometry
         self._pixel_report = None
+        # Volumes whose stated geometry is not yet checked against truth:
+        # each is checked on the first event that gives it enough groups.
+        self._pixel_unchecked: set = set()
+        self._pixel_note = None
 
         #: Hit counts for the most recently read event in hit mode.
         self.last_hit_stats: dict | None = None
@@ -1128,24 +1132,30 @@ class JaxtpcHDF5Reader(EventReaderBase):
         exists to measure gets calibrated away instead of measured.  So the
         stated numbers are applied as given and the residual is allowed to
         object.
+
+        Stated constants do not depend on the data, so they are applied
+        from the first event, and each volume is checked on the first event
+        that gives it at least :data:`~.pixel_hits.MIN_GROUPS` groups.  A
+        volume can be empty in an event -- every deposit in it arriving
+        after the readout window closed -- and the run must not stop on it.
+        Until checked, a volume's report entry is ``None``.
         """
         if self._pixel_geoms is not None:
+            self._check_pending_volumes(event_key, seg_volumes)
             return self._pixel_geoms
 
         geoms, note = self._resolve_pixel_geometry(seg_volumes)
-        pairs = [self._group_centre_truth(event_key, sv, v)
-                 for v, sv in enumerate(seg_volumes)]
 
         if geoms is not None:
-            reports = []
-            for v, (geom, (py, pz, tk, t0, cent)) in enumerate(
-                    zip(geoms, pairs)):
-                rep = _px.verify_volume_geometry(geom, py, pz, tk, t0, cent,
-                                                 volume_id=v)
-                rep['source_note'] = note
-                reports.append(rep)
-            self._pixel_geoms, self._pixel_report = geoms, reports
+            self._pixel_geoms = geoms
+            self._pixel_report = [None] * len(geoms)
+            self._pixel_note = note
+            self._pixel_unchecked = set(range(len(geoms)))
+            self._check_pending_volumes(event_key, seg_volumes)
             return geoms
+
+        pairs = [self._group_centre_truth(event_key, sv, v)
+                 for v, sv in enumerate(seg_volumes)]
 
         if not self._geometry_from_fit:
             # Say what is missing *and* what the data says it should be, so
@@ -1202,6 +1212,22 @@ class JaxtpcHDF5Reader(EventReaderBase):
             reports.append(rep)
         self._pixel_geoms, self._pixel_report = geoms, reports
         return geoms
+
+    def _check_pending_volumes(self, event_key, seg_volumes):
+        """Check each still-unchecked volume this event has enough groups in."""
+        for v in sorted(self._pixel_unchecked):
+            if v >= len(seg_volumes):
+                continue
+            py, pz, tk, t0, cent = self._group_centre_truth(
+                event_key, seg_volumes[v], v)
+            if len(py) < _px.MIN_GROUPS:
+                continue
+            rep = _px.verify_volume_geometry(self._pixel_geoms[v], py, pz,
+                                             tk, t0, cent, volume_id=v)
+            rep['source_note'] = self._pixel_note
+            rep['checked_on'] = event_key
+            self._pixel_report[v] = rep
+            self._pixel_unchecked.discard(v)
 
     def _build_hit_event(self, event_key, seg_volumes, track_ids):
         """Point cloud, offsets and per-point group for one event."""
@@ -1555,7 +1581,12 @@ class JaxtpcHDF5Reader(EventReaderBase):
 
     @property
     def pixel_geometry_report(self) -> list | None:
-        """What the geometry calibration found, including its residuals."""
+        """
+        What the geometry calibration found, including its residuals.
+
+        One entry per volume; ``None`` for a stated volume that no event so
+        far has given enough groups to check.
+        """
         return self._pixel_report
 
     @property

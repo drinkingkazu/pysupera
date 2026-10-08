@@ -782,9 +782,22 @@ def main(cfg: DictConfig) -> None:
         # to prevent.  'stated' means applied as given and verified against
         # the truth deposits; 'fitted' means measured from them, which makes
         # the same comparison circular.
+        # Re-read: a volume is checked on the first event that has enough
+        # of its groups, which need not be the first event.
+        _pixel_geom_report = (getattr(store, 'pixel_geometry_report', None)
+                              or _pixel_geom_report)
         if _pixel_geom_report:
             print(f"\n[run] Pixel geometry  ({len(_pixel_geom_report)} volume(s))")
             for _v, _g in enumerate(_pixel_geom_report):
+                if _g is None:
+                    import warnings
+                    from pysupera.readers.pixel_hits import MIN_GROUPS
+                    _why = (f"pixel geometry of volume {_v} was applied but "
+                            f"never checked: no event gave it {MIN_GROUPS} "
+                            f"groups with both hits and truth deposits")
+                    print(f"  volume {_v}  [stated, UNCHECKED]  {_why}")
+                    warnings.warn(_why, UserWarning, stacklevel=2)
+                    continue
                 _m = _g.get('measured') or {}
                 _src = _g.get('source', 'stated')
                 print(f"  volume {_v}  [{_src}]  "
@@ -803,7 +816,9 @@ def main(cfg: DictConfig) -> None:
                 if _r:
                     print(f"             residual   "
                           f"x {_r['x']:.2f}   y {_r['y']:.2f}   z {_r['z']:.2f} mm"
-                          f"   over {_g.get('n_groups', 0):,} groups")
+                          f"   over {_g.get('n_groups', 0):,} groups"
+                          + (f" of {_g['checked_on']}"
+                             if _g.get('checked_on') else ""))
                 _off = _g.get('reference_tick_offset_mm')
                 if _off:
                     print(f"             reference tick sits {_off:+.1f} mm "

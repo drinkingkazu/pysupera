@@ -15,6 +15,7 @@ import pytest
 from pysupera.readers.pixel_hits import (
     ENERGY_FROM,
     HitsFileError,
+    MIN_GROUPS,
     PixelGeometryError,
     VolumePixelGeometry,
     X_FROM,
@@ -376,6 +377,75 @@ def test_verify_measures_the_velocity_when_t0_varies():
     assert rep["measured"]["velocity_measured"]
     assert rep["measured"]["drift_velocity_mm_us"] == pytest.approx(1.6,
                                                                     rel=1e-6)
+
+
+def _reader_with_pairs(geoms, pairs):
+    """
+    A hit-mode reader holding stated *geoms*, unchecked, whose group/truth
+    pairs come from ``pairs[(event_key, volume)]`` instead of files.
+    """
+    from pysupera.readers import JaxtpcHDF5Reader
+    r = JaxtpcHDF5Reader.__new__(JaxtpcHDF5Reader)
+    r._pixel_geoms = list(geoms)
+    r._pixel_report = [None] * len(geoms)
+    r._pixel_note = "stated in the test"
+    r._pixel_unchecked = set(range(len(geoms)))
+    r._group_centre_truth = lambda ek, sv, v: pairs[(ek, v)]
+    return r
+
+
+def _no_groups():
+    z = np.zeros(0)
+    return z, z, z, z, np.zeros((0, 3))
+
+
+def test_a_volume_empty_in_the_first_event_is_checked_on_a_later_one():
+    """
+    Run 1045 event 0: every deposit in volume 0 arrives after the window
+    closes, so it has no hits, while volume 1 has thousands.  The stated
+    geometry does not need data to apply, so the run must carry on and
+    check volume 0 on the first event that gives it groups.
+    """
+    pairs = {("event_000", 0): _no_groups(),
+             ("event_000", 1): _synth_groups(MIRRORED, seed=11),
+             ("event_001", 0): _synth_groups(GEOM, seed=12),
+             ("event_001", 1): _synth_groups(MIRRORED, seed=13)}
+    r = _reader_with_pairs([GEOM, MIRRORED], pairs)
+    segs = [None, None]
+
+    r._check_pending_volumes("event_000", segs)
+    assert r.pixel_geometry_report[0] is None
+    assert r.pixel_geometry_report[1]["checked_on"] == "event_000"
+
+    r._check_pending_volumes("event_001", segs)
+    assert r.pixel_geometry_report[0]["checked_on"] == "event_001"
+    assert r.pixel_geometry_report[0]["residual_mm"]["x"] < 1.0
+    # checked once: event_001 did not re-check volume 1
+    assert r.pixel_geometry_report[1]["checked_on"] == "event_000"
+    assert not r._pixel_unchecked
+
+
+def test_a_deferred_check_still_rejects_a_wrong_geometry():
+    """Deferring the check must not weaken it: it fails on the event it runs."""
+    wrong = VolumePixelGeometry(y_min_mm=-2160.0, z_min_mm=-2160.0,
+                                x_min_mm=-2160.0, x_max_mm=0.0,
+                                drift_direction=-1, pitch_mm=4.32,
+                                drift_velocity_mm_us=1.6, time_step_us=0.4)
+    pairs = {("event_000", 0): _no_groups(),
+             ("event_001", 0): _synth_groups(GEOM, seed=14)}
+    r = _reader_with_pairs([wrong], pairs)
+    r._check_pending_volumes("event_000", [None])
+    with pytest.raises(PixelGeometryError, match="does not reproduce"):
+        r._check_pending_volumes("event_001", [None])
+
+
+def test_a_volume_with_too_few_groups_waits():
+    py, pz, tick, t0, truth = _synth_groups(GEOM, n=MIN_GROUPS - 1, seed=15)
+    r = _reader_with_pairs([GEOM], {("event_000", 0):
+                                    (py, pz, tick, t0, truth)})
+    r._check_pending_volumes("event_000", [None])
+    assert r.pixel_geometry_report == [None]
+    assert r._pixel_unchecked == {0}
 
 
 # ---------------------------------------------------------------------------
