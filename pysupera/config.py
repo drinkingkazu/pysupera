@@ -411,7 +411,7 @@ def build_conditions(cfg: DictConfig) -> list:
 
     conditions = []
 
-    # 1. Photon decay: merge e+/e- children into photon rep unconditionally
+    # 1. Photon decay: merge the conversion pair into the photon rep unconditionally
     #    (topology-only, no proximity); must run early so photon reps have
     #    real point clouds before any spatial condition inspects them.
     if cfg.conditions.get("photon_decay", True):

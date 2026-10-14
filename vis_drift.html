@@ -60,6 +60,9 @@
   <label><input type="checkbox" id="logE" checked> log scale</label>
   <label><input type="checkbox" id="sync" checked> sync cameras</label>
   <label><input type="checkbox" id="offsensor"> off-sensor hits</label>
+  <label>LE
+    <select id="lemode"><option value="all">show all</option><option value="hide">hide LE</option><option value="only">hide non-LE</option></select>
+  </label>
   <label>show &ge; <input type="range" id="thr" min="0" max="99" step="1" value="0" style="width:90px"><span id="thrv" class="k">all</span></label>
   <button id="fit">fit (c)</button>
   <span id="hint" class="k">load the output and its hits subset — hover a point to follow it across both views</span>
@@ -108,7 +111,7 @@ const S = {
   sel:-1, dim:0.03, thrPct:0,
   mode:'inst', hl:'inst',
   cols:null, idRow:null,        // particle columns for the event, id -> row
-  semShow:new Set(),
+  semShow:new Set(), leMode:'all',
   geom:null,                    // per-volume pixel geometry (output attribute)
   ncol:6,
 };
@@ -194,7 +197,11 @@ async function openBytes(buf, tag){ await booted; FS.writeFile(tag, new Uint8Arr
 async function loadOut(buf, name){
   S.out = await openBytes(buf, 'out.h5');
   S.nEvents = Number(val(S.out, 'n_events'));
-  log(`output: format ${val(S.out,'format_version')}, ${S.nEvents} events`);
+  const ver = String(val(S.out, 'format_version'));
+  log(`output: format ${ver}, ${S.nEvents} events`);
+  if(!ver.startsWith('4.')){ S.out = null;
+    return banner(`This output is format ${ver}; this viewer reads 4.x.  Regenerate it with\n` +
+                  `the current run_pysupera (4.0.0 moved LE to the fragment).`); }
   const bad = unreadableFilter(S.out, 'points/flat');
   if(bad){ S.out = null;
     return banner(`This output uses HDF5 filter ${bad}, which the browser cannot decode.\n` +
@@ -244,6 +251,7 @@ document.getElementById('mode').onchange = e => { S.mode = e.target.value; recol
 document.getElementById('hl').onchange   = e => { S.hl = e.target.value; S.sel = -1; buildKeys(); recolour(); };
 document.getElementById('logE').onchange = () => recolour();
 document.getElementById('offsensor').onchange = () => rebuild();
+document.getElementById('lemode').onchange = e => { S.leMode = e.target.value; recolour(); };
 document.getElementById('psize').oninput = e => {
   for(const v of Object.values(V)) if(v && v.cloud){ v.cloud.material.size = +e.target.value;
                                                       v.selCloud.material.size = +e.target.value; }
@@ -271,9 +279,13 @@ function buildParticles(){
   const col = nm => g.keys().includes(nm) ? sl(f,'particles/'+nm, a, b) : null;
   const c = {};
   for(const k of ['id','inst_id','frag_id','interaction_id','pdg','geant4_trackid','inst_sem_type',
-                  'inst_parent_id','inst_pc_start','inst_pc_end','inst_pc_le_start','inst_pc_le_end',
-                  'frag_pc_start','frag_pc_end','frag_pc_le_start','frag_pc_le_end'])
+                  'inst_parent_id','inst_pc_start','inst_pc_end','frag_pc_start','frag_pc_end',
+                  'frag_sem_type','mass'])
     c[k] = col(k);
+  // Kinematics, (rows, 4): [x,y,z,t] mm ns and [px,py,pz,E] MeV, E total.
+  for(const k of ['start_pos','start_mom','first_pos','first_mom','last_pos','last_mom',
+                  'end_pos','end_mom'])
+    c[k] = g.keys().includes(k) ? Float64Array.from(g.get(k).slice([[a, b], [0, 4]])) : null;
   S.cols = c; S.idRow = new Map();
   for(let k = 0; k < c.id.length; k++) S.idRow.set(Number(c.id[k]), k);
 }
@@ -292,16 +304,15 @@ function buildTruth(){
   const c = S.cols;
   const fill = (arr, s, e, v) => { s = Number(s); if(s < 0) return;
     for(let j = Math.max(0, s - pa); j < Math.min(n, Number(e) - pa); j++) arr[j] = v; };
+  // One run per fragment and per instance.  LE belongs to the fragment: a
+  // kLEScatter fragment is a blob, an LE deposit absorbed into a track is
+  // the track's.
   for(let k = 0; k < c.id.length; k++){
     const id = Number(c.id[k]);
-    if(Number(c.inst_id[k]) === id){
-      fill(T.inst, c.inst_pc_start[k], c.inst_pc_end[k], id);
-      fill(T.inst, c.inst_pc_le_start[k], c.inst_pc_le_end[k], id);
-      fill(T.le, c.inst_pc_le_start[k], c.inst_pc_le_end[k], 1);
-    }
+    if(Number(c.inst_id[k]) === id) fill(T.inst, c.inst_pc_start[k], c.inst_pc_end[k], id);
     if(Number(c.frag_id[k]) === id){
       fill(T.frag, c.frag_pc_start[k], c.frag_pc_end[k], id);
-      fill(T.frag, c.frag_pc_le_start[k], c.frag_pc_le_end[k], id);
+      if(Number(c.frag_sem_type[k]) === SEM_LE) fill(T.le, c.frag_pc_start[k], c.frag_pc_end[k], 1);
     }
   }
   S.T = T;
@@ -403,7 +414,9 @@ function applyFilter(){
       thr = a[Math.min(a.length - 1, Math.floor(S.thrPct/100 * a.length))];
     }
     const vis = new Uint8Array(P.n); let kept = 0;
-    for(let i = 0; i < P.n; i++){ const pass = S.semShow.has(semOf(P, i)) && Math.abs(P.e[i]) >= thr;
+    for(let i = 0; i < P.n; i++){ const le = !!P.le[i];
+                                  const pass = S.semShow.has(semOf(P, i)) && Math.abs(P.e[i]) >= thr
+                                    && (S.leMode === 'hide' ? !le : S.leMode === 'only' ? le : true);
                                   vis[i] = pass ? 1 : 0; if(pass) kept++; }
     P.visible = vis; P.thr = thr;
     if(S.thrPct > 0) parts.push(`${P.name} ≥ ${fmt(thr, 3)} (${P.n ? (100*kept/P.n).toFixed(0) : 0}%)`);
@@ -642,9 +655,36 @@ function infoPoint(P, i){
             ['interaction', interOf(P, i) < 0 ? '—' : String(interOf(P, i))],
             ['semantic type', SEM[sem] ? `${SEM[sem]} <span class="k">(${sem})</span>` : '—'],
             ['instance pdg', pdgName(pdgOf(P, i))]);
+  if(S.hl !== 'inter') rows.push(...kinRows(S.hl === 'frag' ? P.frag[i] : P.inst[i]));
   const el = document.getElementById('pinfo');
   el.innerHTML = '<table>' + rows.map(([k, v]) => `<tr><td>${k}</td><td>${v}</td></tr>`).join('') + '</table>';
   el.style.display = 'block';
+}
+
+// The representative's own Geant4 particle: start (creation), end
+// (destruction); then the instance's first / last point, from the steps it
+// collected (instance rows only; none for a shower's last).
+function kinRows(gid){
+  const c = S.cols, k = S.idRow.get(Number(gid));
+  if(k === undefined || !c.start_pos) return [];
+  const q = nm => Array.from(c[nm].subarray(k*4, k*4+4)), m = Number(c.mass[k]);
+  const ke = v => Number.isNaN(v[3]) ? NaN : v[3] - m;
+  const xyz = v => `${fmt(v[0],1)}  ${fmt(v[1],1)}  ${fmt(v[2],1)}`;
+  const sp = q('start_pos'), fp = q('first_pos');
+  const out = [['mass [MeV]', fmt(m, 3)],
+               ['KE start→end', `${fmt(ke(q('start_mom')), 2)} → ${fmt(ke(q('end_mom')), 2)} MeV`],
+               ['start [mm]', xyz(sp)]];
+  out.push(['end [mm]', xyz(q('end_pos'))]);
+  const pe = v => `${fmt(Math.hypot(v[0], v[1], v[2]), 2)} · ${fmt(v[3], 2)} MeV`;
+  const lp = q('last_pos');
+  if(Number.isNaN(fp[0])) out.push(['inst. first', '—']);
+  else {
+    out.push(['inst. first [mm]', `${xyz(fp)}  (+${fmt(Math.hypot(fp[0]-sp[0], fp[1]-sp[1], fp[2]-sp[2]), 1)})`],
+             ['|p| · E first', pe(q('first_mom'))]);
+    if(Number.isNaN(lp[0])) out.push(['inst. last', '— (shower)']);
+    else out.push(['inst. last [mm]', xyz(lp)], ['|p| · E last', pe(q('last_mom'))]);
+  }
+  return out;
 }
 
 // One key drives both panes; that is the link being shown.

@@ -27,7 +27,7 @@ class FakeView:
 
     def __init__(self, points, blocks, interactions=None):
         # blocks: (inst_id, sem_type, interaction_id, start, end[, split])
-        # split defaults to end, i.e. the block carries no absorbed LE points.
+        # split defaults to end, i.e. the block carries no LE fragments.
         self.points = np.asarray(points, dtype=np.float32)
         n = len(blocks)
         self.columns = {
@@ -35,12 +35,11 @@ class FakeView:
             "inst_id":         np.array([b[0] for b in blocks], np.int32),
             "inst_sem_type":   np.array([b[1] for b in blocks], np.int8),
             "interaction_id":  np.array([b[2] for b in blocks], np.int32),
-            # start/end bound the non-LE run, le_start/le_end the LE run;
-            # they are adjacent, so end == le_start.
+            # three fenceposts: non-LE in [start, le_start), LE in
+            # [le_start, end).
             "inst_pc_start":    np.array([b[3] for b in blocks], np.int64),
-            "inst_pc_end":      np.array([_split(b) for b in blocks], np.int64),
             "inst_pc_le_start": np.array([_split(b) for b in blocks], np.int64),
-            "inst_pc_le_end":   np.array([b[4] for b in blocks], np.int64),
+            "inst_pc_end":      np.array([b[4] for b in blocks], np.int64),
         }
         self.is_instance = np.ones(n, bool)
         self.interactions = interactions or {}
@@ -135,8 +134,9 @@ class TestTimeTieBreak:
 
 class TestLowEnergyScatters:
     """
-    LE-ness is positional: points in the ``inst_pc_le_*`` run are deposits the
-    instance absorbed, and must be labelled LE regardless of the host's class.
+    LE-ness is positional: points in ``[inst_pc_le_start, inst_pc_end)`` are
+    the LE fragments grouped into the instance, and must be labelled LE
+    regardless of the host's class.
     These pass ``include_le=True``; the default is covered below.
     """
 
@@ -160,7 +160,7 @@ class TestLowEnergyScatters:
             [ST.kShower.value, ST.kLEScatter.value])
 
     def test_le_loses_a_contested_voxel_to_its_host(self):
-        # same cell reached by the shower's own point and an absorbed LE one,
+        # same cell reached by the shower's own point and an LE fragment's,
         # the LE arriving first so only priority can decide it
         v = FakeView([pt(0, 0, 0, 9.0, 1.0), pt(0, 0, 0, 0.0, 1.0)],
                      [(10, ST.kShower.value, 0, 0, 2, 1)])
@@ -216,7 +216,7 @@ class TestIncludeLeFlag:
             assert len(ev[k]) == n
 
     def test_a_shared_voxel_loses_only_the_le_energy(self):
-        # shower and absorbed LE in the same cell: the row survives, but
+        # shower and an LE fragment in the same cell: the row survives, but
         # without the LE contribution
         v = FakeView([pt(0, 0, 0, 1.0, 3.0), pt(0, 0, 0, 2.0, 4.0)],
                      [(10, ST.kShower.value, 0, 0, 2, 1)])

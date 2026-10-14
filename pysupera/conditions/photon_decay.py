@@ -3,7 +3,7 @@ from typing import Dict, List, Tuple, TYPE_CHECKING
 
 from .base import PartitionConditionBase
 from ..diagnostics import MergeOutcome
-from ..utils import SemanticType
+from ..utils import InteractionType, SemanticType
 
 if TYPE_CHECKING:
     from ..partitioner import ParticlePartitioner
@@ -27,20 +27,32 @@ def _is_own_fragment(child, parent) -> bool:
         return False
     cg = getattr(child, "geant4_id", None)
     pg = getattr(parent, "geant4_id", None)
-    return cg is not None and pg is not None and int(cg) == int(pg)   # electron and positron
+    return cg is not None and pg is not None and int(cg) == int(pg)
+
+
+def _is_pair_product(p) -> bool:
+    """
+    True when *p* is an electron or positron a photon converted into.
+
+    Read from the process that created it (``kConversion``), not from
+    ``pdg`` alone: a photon's Compton electrons and its photoelectron are
+    also PDG 11 children of a photon, but they are not the shower.
+    """
+    return (int(p.pdg) in _DECAY_PRODUCTS
+            and int(getattr(p, "_interaction_type", -1))
+            == InteractionType.kConversion.value)
 
 
 class PhotonDecay(PartitionConditionBase):
     """
-    Merge the charged decay products of a photon (PDG 22) into the photon partition.
+    Merge the pair a photon (PDG 22) converted into into the photon partition.
 
-    A photon may decay into an electron (PDG 11) and a positron (PDG -11).
-    The photon itself typically carries an **empty** point cloud; its spatial
-    extent is represented entirely by the clouds of its decay products.
+    A photon may convert into an electron (PDG 11) and a positron (PDG -11).
+    The photon itself carries **no** deposits of its own at the conversion;
+    its spatial extent from there on is the clouds of its pair.
 
-    This condition recognises such photon-decay topologies and merges all
-    PDG ±11 children of a photon particle into the photon's partition so
-    that:
+    This condition merges the ``kConversion`` children of a photon -- and
+    only those -- into the photon's partition so that:
 
     * The photon is the **surviving representative** of the merged partition.
     * The photon's ``point_cloud`` grows to include every point from every
@@ -49,6 +61,14 @@ class PhotonDecay(PartitionConditionBase):
     Because the photon has no spatial hits of its own, proximity checks are
     meaningless here.  The merge is driven purely by the parent-child
     relationship in the particle tree.
+
+    A photon's Compton electrons and its photoelectron are left alone.  A
+    shower begins at the pair production; a Compton electron is a separate
+    particle, made where the photon scattered, before any conversion.  It is
+    usually a small isolated blob, and merging it here made it part of a
+    shower *fragment*, so it lost its LE label.  Whether it belongs to a
+    shower *instance* is decided by genealogy in
+    :func:`~pysupera.merge.merge_em_showers`.
 
     A photon that *does* carry hits -- Geant4 deposits argon atomic-relaxation
     energy at a photoabsorption vertex, so most photons carry one such point --
@@ -65,7 +85,8 @@ class PhotonDecay(PartitionConditionBase):
     1. :meth:`get_unconditional_merges` is called on every convergence pass.
     2. For each photon representative, iterate its direct children in
        ``partitioner.children_map``.
-    3. For each qualifying child (PDG ±11), if it belongs to a different
+    3. For each qualifying child (a ``kConversion`` e±, or a split-off
+       piece of the photon itself), if it belongs to a different
        partition, emit ``(child_rep_id, photon_rep_id)`` for a no-proximity
        merge.
     4. :meth:`get_rep_candidates` and :meth:`get_candidates` both return
@@ -77,9 +98,7 @@ class PhotonDecay(PartitionConditionBase):
     conversion.  The condition handles all of them in one pass.
 
     The condition does not restrict the photon to having *exactly* two
-    children, so it also handles radiative corrections and other
-    configurations that produce more than two PDG ±11 children from a
-    single photon.
+    conversion children.
     """
 
     @property
@@ -88,7 +107,7 @@ class PhotonDecay(PartitionConditionBase):
 
     @property
     def description(self) -> str:
-        return "Photon (PDG 22) → e⁺e⁻ decay: merge charged children into photon partition"
+        return "Photon (PDG 22) → e⁺e⁻ conversion: merge the pair into the photon partition"
 
     # ------------------------------------------------------------------
     # Unconditional (topology-only) merge — the main entry point
@@ -99,8 +118,9 @@ class PhotonDecay(PartitionConditionBase):
             partitioner: 'ParticlePartitioner',
             rep_lookup: Dict[int, 'Particle']) -> List[Tuple[int, int]]:
         """
-        Return directed pairs ``(child_rep_id, photon_rep_id)`` for all
-        PDG ±11 children of photon representatives, plus any PDG 22 child
+        Return directed pairs ``(child_rep_id, photon_rep_id)`` for the
+        pair (``kConversion`` e±) of every photon representative, plus any
+        PDG 22 child
         that is a defragmentation split-off of the photon itself (see
         :func:`_is_own_fragment`).
 
@@ -123,7 +143,7 @@ class PhotonDecay(PartitionConditionBase):
         """
         pairs: List[Tuple[int, int]] = []
 
-        # Group PDG±11 particles present in the particle list by their
+        # Group the conversion pairs present in the particle list by their
         # photon parent_id.  Used both to produce merge pairs and to record
         # sibling-level diagnostics so that get_decisions_for_pair(e-, e+)
         # returns a PhotonDecay entry explaining what happened.
@@ -131,7 +151,7 @@ class PhotonDecay(PartitionConditionBase):
         for p in partitioner.particles:
             if p.parent_pdg != _PHOTON_PDG:
                 continue
-            if p.pdg in _DECAY_PRODUCTS:
+            if _is_pair_product(p):
                 photon_children[p.parent_id].append(p)
             elif _is_own_fragment(p, partitioner.particle_lookup.get(p.parent_id)):
                 # A piece of the photon itself.  Without this it could only
@@ -160,7 +180,10 @@ class PhotonDecay(PartitionConditionBase):
                 # the pairs ensures that CombineLEScatters and AbsorbLEScatter
                 # (which run later in the same convergence pass) see the photon
                 # as kShower and leave it alone, rather than absorbing it.
-                if photon_rep.sem_type == SemanticType.kLEScatter:
+                # A photon with only pieces of itself to collect did not
+                # convert, so there is no shower to promote it to.
+                if (photon_rep.sem_type == SemanticType.kLEScatter
+                        and any(_is_pair_product(c) for c in children)):
                     photon_rep.sem_type = SemanticType.kShower
                 for child in children:
                     child_rep = rep_lookup.get(child.id)

@@ -637,6 +637,61 @@ def test_every_segment_arrives_with_its_step_values_and_group():
     assert (np.abs(flat[:, 7]) <= np.pi + 1e-3).all() and (flat[:, 8] > 0).all()
 
 
+def test_the_reader_hands_over_its_steps_for_the_instance_kinematics():
+    """
+    The reader gives the step records, the particle row behind each, which
+    the readout saw, and each one's group -- not first/last itself: those
+    describe an instance and are made once instances exist.
+    """
+    from pysupera.readers import JaxtpcHDF5Reader
+    with JaxtpcHDF5Reader(**hit_kwargs(truth_segments=True)) as r:
+        assert r.kinematics_steps == "visible"
+        r[0]
+        st, kin = r.last_steps, r.last_kinematics
+        steps = r._edepsim_file[r._step_key][0]
+        seen = r._visible_steps(steps, "event_000",
+                                r._load_seg_volumes("event_000"))
+        parts = r._edepsim_file[r._part_key][0]
+    assert "first_pos" not in kin and "start_mom" in kin
+    assert len(st["steps"]) == len(steps)
+    np.testing.assert_array_equal(st["counted"], seen)
+    assert 0 < seen.sum() < len(seen)
+    own = st["owner"]
+    assert (own >= 0).all()
+    np.testing.assert_array_equal(parts["track_id"][own], steps["track_id"])
+    # every step the readout saw has a group; one outside every volume none
+    assert (st["group"][seen] >= 0).all()
+
+
+def test_instance_first_and_last_come_from_steps_the_readout_saw(tmp_path):
+    """
+    first_* / last_* sit on instance rows only, each half a step from the
+    midpoint of a step the readout saw; a shower has no last point.
+    """
+    from pysupera.readers import JaxtpcHDF5Reader
+    from pysupera.io_v3 import read_events_v3
+    edep, step, hits = (str(x) for x in _P)
+    out = _run_to(tmp_path, "jaxtpc_pixel", edep, step, hits,
+                  f"reader.jaxtpc_sensor_path={_sensor()}")
+    with JaxtpcHDF5Reader(**hit_kwargs(truth_segments=True)) as r:
+        r[0]
+        steps, seen = r.last_steps["steps"], r.last_steps["counted"]
+    mid = np.c_[steps["x"], steps["y"], steps["z"]].astype(np.float64)[seen]
+    half = steps["dx"][seen].astype(np.float64) / 2.0
+    with read_events_v3(out) as st:
+        c = st[0].columns
+    inst = c["inst_id"] == c["id"]
+    has = ~np.isnan(c["first_pos"][:, 0])
+    assert has.any() and not (has & ~inst).any()
+    shower = inst & (c["inst_sem_type"] == 1)
+    assert np.isnan(c["last_pos"][shower]).all()
+    assert (~np.isnan(c["last_pos"][has & ~shower, 0])).all()
+    for col in ("first_pos", "last_pos"):
+        for pos in c[col][has & (col == "first_pos" or ~shower)][:100]:
+            d = np.linalg.norm(mid - pos[:3], axis=1)
+            assert np.abs(d - half).min() < 1e-3
+
+
 def test_without_truth_segments_the_reader_reads_none(hit_reader):
     hit_reader[0]
     assert hit_reader.last_truth_segments is None

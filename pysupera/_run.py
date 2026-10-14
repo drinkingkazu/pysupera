@@ -103,13 +103,15 @@ def main(cfg: DictConfig) -> None:
     from pysupera.readers.pixel_hits import describe_measured_drift
     from pysupera.io import open_voxmap_writer
     from pysupera.partitioner import ParticlePartitioner
-    from pysupera.merge import merge_em_showers
+    from pysupera.merge import (merge_em_showers, find_split_pieces,
+                                relabel_split_pieces, attach_split_pieces)
+    from pysupera.kinematics import step_particles, instance_kinematics
     from pysupera.config import build_conditions, build_preprocessor, build_merge_processor, build_voxelizer, build_reader, configure
     from pysupera.preproc import _voxelize_point_cloud
     from pysupera.utils import (resolve_orphans, validate_interaction_ids,
                                 validate_ancestor_ids,
                                 select_traceable_instances)
-    from pysupera.layout import build_layout, snapshot_groups
+    from pysupera.layout import build_layout, snapshot_groups, fragment_le
 
     configure(cfg)  # set module-level defaults (e.g. min_pc_size) before any Particle is created
 
@@ -289,6 +291,9 @@ def main(cfg: DictConfig) -> None:
                 'hit_x_from':   cfg.reader.get('hit_x_from', None) if _hit_points else None,
                 'hit_energy':   cfg.reader.get('hit_energy', None) if _hit_points else None,
                 'readout_type': _readout,
+                # Which steps an instance's first_* / last_* may come from:
+                # 'visible' (seen by the readout) or 'all'.
+                'kinematics_steps': getattr(store, 'kinematics_steps', None),
                 # What a points/flat row is: a voxel of this size, or a
                 # deposit (store=points).
                 'store': _store,
@@ -534,6 +539,13 @@ def main(cfg: DictConfig) -> None:
                     {id(r): r for r in partitioner.rep_lookup.values()}.values()
                 )
 
+                # A piece defragmentation cut off a track, standing alone, is
+                # still part of that track: relabel its fragment before the
+                # snapshot, so it is not LE, and join it to the track's
+                # instance after step 2.
+                _pieces = find_split_pieces(fragments, particles)
+                relabel_split_pieces(_pieces)
+
                 # Capture fragment membership NOW.  merge_em_showers returns
                 # the surviving representatives themselves as the instances --
                 # every instance object is also a fragment object -- and
@@ -544,7 +556,8 @@ def main(cfg: DictConfig) -> None:
 
                 # ── Step-2 EM shower instance merger ───────────────────────
                 _t = time.perf_counter()
-                instances = merge_em_showers(fragments)
+                instances = attach_split_pieces(merge_em_showers(fragments),
+                                                _pieces)
                 _ev_t['em_merge'] = time.perf_counter() - _t
                 profile['merge_em_showers'] += _ev_t['em_merge']
 
@@ -666,9 +679,23 @@ def main(cfg: DictConfig) -> None:
                     _keep.update(np.unique(_d['fragment_id']).tolist())
                     _keep.update(np.unique(_d['instance_id']).tolist())
                 _keep.discard(-1)
+                # first_* / last_* per instance, from the steps whose
+                # deposits it collected.
+                _inst_kin = None
+                _st = getattr(store, 'last_steps', None)
+                _tk = getattr(store, 'last_kinematics', None)
+                if _st is not None and _tk is not None:
+                    _spid = step_particles(
+                        len(_st['steps']), particles,
+                        group=_st.get('group'), group_owner=_owner)
+                    _inst_kin = instance_kinematics(
+                        _inst_groups, particles, _st['steps'], _st['owner'],
+                        _spid, _tk, counted=_st.get('counted'))
                 _layout = build_layout(particles, _frag_groups, _inst_groups,
                                        vertices=getattr(store, 'last_vertices', None),
-                                       keep=_keep)
+                                       keep=_keep,
+                                       kinematics=_tk,
+                                       inst_kinematics=_inst_kin)
                 writer.append_event(_layout)
                 if _labels is not None:
                     writer.append_hit_labels(_labels)
@@ -683,8 +710,8 @@ def main(cfg: DictConfig) -> None:
                     # left out entirely -- it follows from the fragment.
                     _frag_of = {int(m): int(g.rep_id)
                                 for g in _frag_groups for m in g.member_ids}
-                    _le_of = {int(p.id): (p.sem_type is _le_type)
-                              for p in particles}
+                    # LE per fragment, as in points/flat and hit_labels.
+                    _le_of = fragment_le(particles, _frag_groups)
                     writer.append_group_owners(
                         remap_owners(_owner, _frag_of),
                         le_flags(_owner, _le_of),

@@ -204,8 +204,7 @@ def instance_of_groups(view, frag_owner):
 
     inst = np.flatnonzero(view.is_instance)
     lo = np.asarray(c["inst_pc_start"])[inst]
-    hi = np.maximum(np.asarray(c["inst_pc_le_end"])[inst],
-                    np.asarray(c["inst_pc_end"])[inst])
+    hi = np.asarray(c["inst_pc_end"])[inst]
     keep = lo >= 0
     inst, lo, hi = inst[keep], lo[keep], hi[keep]
     order = np.argsort(lo)
@@ -219,8 +218,6 @@ def instance_of_groups(view, frag_owner):
             continue
         p = int(c["frag_pc_start"][k])
         if p < 0:
-            p = int(c["frag_pc_le_start"][k])
-        if p < 0:
             continue
         j = int(np.searchsorted(lo, p, side="right")) - 1
         if 0 <= j < len(lo) and p < hi[j]:
@@ -232,12 +229,14 @@ def le_flags(owner, is_le_of):
     """
     Per-group low-energy flag, from the particle that owns the group.
 
-    A group's deposits all belong to one particle, so LE-ness is exact at
-    this level -- unlike the instance, which normally mixes an LE and a
-    non-LE side.  Without this the 2D view could only guess, and would have
-    to mask by the host instance, which is a different question.
+    A group's deposits all belong to one particle, and so to one fragment,
+    so LE-ness is exact at this level -- unlike the instance, which normally
+    mixes an LE and a non-LE side.  Without this the 2D view could only
+    guess, and would have to mask by the host instance, which is a different
+    question.
 
-    *is_le_of* is ``{particle_id: bool}``.  Unclaimed groups come out 0.
+    *is_le_of* is ``{particle_id: bool}``, decided by the particle's fragment
+    (:func:`pysupera.layout.fragment_le`).  Unclaimed groups come out 0.
     """
     out = np.zeros(len(owner), dtype=np.int8)
     for g in np.flatnonzero(owner != NO_OWNER):

@@ -236,6 +236,12 @@ output's `hit_labels`. It finds planes structurally and copies `config`, so
 it needs no flag to tell wire from pixel. `--centres-only` keeps just the
 group centres, for a much smaller file when the per-hit rows are not needed.
 
+The viewers read format 4.x (and `vis_force.html` also 2.x), and refuse a 3.x
+output with a note to regenerate it. They take LE from the fragment, as the
+format does, and their hover panels show the selected row's kinematics: mass,
+kinetic energy at creation and destruction, the start and end positions, and
+on an instance row the instance's first and last point with `|p|` and `E`.
+
 #### `vis_force.html` — EDepSim only
 
 One 3-D cloud of `points/flat`. Colour by energy, time, interaction id,
@@ -266,7 +272,7 @@ voxel's range in `points/flat` and the hit's `instance_id` / `fragment_id` in
 |---|---|
 | **highlight** | instance, fragment or interaction — what "the object under the cursor" means |
 | **others** | opacity of everything not selected |
-| **hide LE** | drops low-energy voxels and hits from every view, so the picker cannot select them |
+| **LE** | show all, hide LE, or hide non-LE: drops the chosen voxels and hits from every view, so the picker cannot select them |
 | **point info** | position, t, dE, dX, θ, φ, \|p\| and labels for a voxel; volume, plane, wire, tick, charge and labels for a hit |
 | **c** | fit the 3-D view |
 
@@ -303,7 +309,8 @@ independently of the colour.
 | fragment / instance / interaction id | a stable hash, the same in both panes |
 | particle type (PDG) | the instance's PDG, fixed hues for the six commonest species |
 
-The semantic-type strip filters classes in and out of both panes, and a
+The semantic-type strip filters classes in and out of both panes, the
+**LE** selector shows all points, hides LE or hides non-LE, and a
 **show ≥** slider per pane hides the faintest points by percentile, showing
 the absolute value it lands on. By default only on-sensor hits are drawn —
 the ones the model sees; **off-sensor hits** adds the rest, which carry no
@@ -502,7 +509,7 @@ defragmentation and the extent classification see. See
 
 #### Defragmentation
 
-A particle's point cloud may be *fragmented* — split into spatially disconnected clusters that should logically belong to the same particle.  The defragmenter runs a connected-components algorithm (eps-ball radius = `distance_threshold`) on each particle's point cloud independently, then detaches small disconnected fragments (size ≤ `min_pc_size`) as new `kLEScatter` particles.  By default only `kShower`, `kDelta`, `kMichel` and `kLEScatter` particles are examined (`preprocessor.sem_types`); tracks are left whole.
+A particle's point cloud may be *fragmented* — split into spatially disconnected clusters that should logically belong to the same particle.  The defragmenter runs a connected-components algorithm (eps-ball radius = `distance_threshold`) on each particle's point cloud independently, then detaches small disconnected fragments (size ≤ `min_pc_size`) as new `kLEScatter` particles.  By default only `kShower`, `kDelta`, `kMichel` and `kLEScatter` particles are examined (`preprocessor.sem_types`); tracks are left whole.  A detached piece of a `kTrack`, `kMichel` or `kDelta` particle that touches nothing joins its particle's instance and is not LE (its fragment takes the particle's fragment type); one that proximity absorbed elsewhere stays there.
 
 Enable with:
 
@@ -595,7 +602,41 @@ with read_events("output.h5") as store:
 ## Output File Format
 
 `run_pysupera` writes a single HDF5 file. This section describes format
-**3.3.0**, recorded in the scalar dataset `format_version`.
+**4.0.0**, recorded in the scalar dataset `format_version`.
+
+4.0.0 changed two things, and 3.x files are no longer read — regenerate them:
+
+- **LE is decided per fragment.** A point is LE when its fragment is a
+  `kLEScatter` fragment: a blob with no trajectory. A low-energy scatter
+  that `AbsorbLEScatter` merged into a track or shower fragment is part of
+  that trajectory and is *not* LE, although its own `sem_type` stays
+  `kLEScatter`. An LE fragment grouped into an instance through parentage
+  stays LE. This applies to `points/flat`, `hit_labels/*/is_le` and
+  `groups/is_le` alike.
+- **A shower starts at the pair production.** `PhotonDecay` merges only the
+  e⁺e⁻ a photon converted into, not its Compton electrons or photoelectron,
+  which stay their own particles. Those join a shower *instance* only when
+  their photon is itself inside a shower; a top-level photon's are their own
+  instances. LE fragments can join a shower instance but never head one.
+  Together these make proximity the only way an LE particle enters a non-LE
+  fragment, which is what lets a fragment be wholly LE or not. On the sample
+  data LE is 22–29% of points and 6–8% of the energy (3.3.0: 35–43% of
+  points, most of it Compton blobs merged into photon fragments).
+- **Low-energy pieces go where they came from.** `AbsorbLEScatter` absorbs an
+  LE particle touching several things into its own ancestor when that is one
+  of them, so a delta ray goes to its track. A stand-alone piece that
+  defragmentation cut off a `kTrack`, `kMichel` or `kDelta` particle joins
+  that particle's instance and is not LE.
+- **Kinematics.** Every row carries its Geant4 particle's `mass` and
+  creation and destruction position and 4-momentum; every instance row also
+  its instance's first and last point, made from the deposits it collected.
+  All float64 (see [Kinematics](#kinematics)).
+
+With LE per fragment a fragment is one run, so `frag_pc_le_start/end` are
+gone, and an instance is three fenceposts, `inst_pc_start ≤
+inst_pc_le_start ≤ inst_pc_end`, so `inst_pc_le_end` is gone and
+**`inst_pc_end` now ends the whole instance** (in 3.x it ended the non-LE
+run).
 
 3.3.0 reshaped JAXTPC output. `points/flat` now holds the true energy
 deposits behind the hits (see [What the output stores](#what-the-output-stores-jaxtpc-input)),
@@ -603,16 +644,15 @@ with direction and momentum, and names its columns in `points/columns`; the
 hits stay in the JAXTPC hits file, labelled per hit in `hit_labels/`.
 `truth/`, `points/hit_index` and `points/true_x_shift` are gone, and fragment
 rows name their instance (`frag_inst_id`).
-3.1.0 renamed columns for a consistent `<level>_` prefix, gave instances the
-same two-range point layout as fragments, and added the true Geant4 parent.
-Readers accept 3.0.0 files transparently.  3.0.0 replaced the three parallel
+3.1.0 renamed columns for a consistent `<level>_` prefix and added the true
+Geant4 parent.  3.0.0 replaced the three parallel
 particle tables of 2.x with **one** table and
 stores each point **once**. On a two-event file that is 6.4 MiB → 1.7 MiB.
 
 ### Layout
 
 ```
-format_version   scalar str   "3.3.0"
+format_version   scalar str   "4.0.0"
 n_events         scalar int64
 events/offsets   (n_events+1,) int64   particle rows per event
 points/offsets   (n_events+1,) int64   point rows per event
@@ -620,6 +660,7 @@ inter/offsets    (n_events+1,) int64   interaction rows per event
 points/flat      (N, C) float32        one row per voxel (or deposit)
 points/columns   (C,) str              its column names
 particles/<col>  (M,)
+particles/<kin>  (M, 4) float64       kinematics; see below
 inter/<col>      (K,)
 groups/          JAXTPC group -> owning fragment            } JAXTPC
 hit_labels/volume{V}/plane{P}/  per hit of that plane       } input
@@ -658,14 +699,13 @@ interaction  >  instance  >  is_LE  >  fragment  >  particle
 Three consequences follow, and between them they replace everything 2.x needed
 per-point group labels for:
 
-1. **An instance's points are one contiguous block**, split into a non-LE part
-   followed by an LE part. All three useful queries are single slices.
-2. **A fragment's points are two runs** — its non-LE side and its LE side —
-   because other fragments' non-LE points lie between them. Each side is
-   always exactly *one* run, never more, so two ranges describe a fragment
-   completely.
+1. **An instance's points are one contiguous block**, its non-LE fragments
+   followed by its LE fragments. All three useful queries are single slices.
+2. **A fragment's points are one run.** A fragment is wholly LE or wholly
+   not, so it sits entirely on one side of its instance's split.
 3. **LE-ness is positional**, so no per-point label is stored. A point is LE
-   precisely when its index falls in its instance's `inst_pc_le_*` range.
+   precisely when its fragment's `frag_sem_type` is `kLEScatter` — inside a
+   written instance, when its index is in `[inst_pc_le_start, inst_pc_end)`.
 
 The ordering is chosen for the query panoptic-segmentation training issues most
 often — "the non-LE voxels of instance X" — which is a plain slice rather than
@@ -707,20 +747,21 @@ which say which *particle* deposited a point:
 ```python
 frag = v.group_of_points("frag")              # fragment id per point, -1 if none
 inst = v.group_of_points("inst")              # instance id per point
+le   = v.is_le_point()                        # bool per point
 ```
 
 Equivalently, by hand:
 
 ```python
-non_le = v.points[v["inst_pc_start"][r]    : v["inst_pc_end"][r]]
-le     = v.points[v["inst_pc_le_start"][r] : v["inst_pc_le_end"][r]]
+non_le = v.points[v["inst_pc_start"][r]    : v["inst_pc_le_start"][r]]
+le     = v.points[v["inst_pc_le_start"][r] : v["inst_pc_end"][r]]
+whole  = v.points[v["inst_pc_start"][r]    : v["inst_pc_end"][r]]
 
-frag_nle    = v.points[v["frag_pc_start"][r]    : v["frag_pc_end"][r]]
-frag_le     = v.points[v["frag_pc_le_start"][r] : v["frag_pc_le_end"][r]]
+frag   = v.points[v["frag_pc_start"][r]    : v["frag_pc_end"][r]]
 ```
 
-`-1` marks a side with no points. `points_of(r, "frag")` concatenates the two
-runs; every other combination is a single slice.
+`-1` marks a group with no points; an empty side of an instance is two equal
+fenceposts.
 
 ### Which particles are stored
 
@@ -753,22 +794,79 @@ have rows, and no point is unreachable from some stored row.
 | `pc_start`, `pc_end` | int64 | this particle's own points |
 | `frag_id` | int32 | representative's `id`; `== id` marks a fragment, `-1` none |
 | `frag_sem_type` | int8 | the fragment's classification |
-| `frag_pc_start/end` | int64 | the fragment's non-LE points |
-| `frag_pc_le_start/end` | int64 | the fragment's LE points |
+| `frag_pc_start/end` | int64 | the fragment's points; LE iff `frag_sem_type` is `kLEScatter` |
 | `frag_merge_count` | int32 | Geant4 particles merged into the fragment |
 | `frag_parent_id` | int32 | nearest ancestor fragment; `== id` if none |
 | `frag_inst_id` | int32 | on a fragment row, the instance it belongs to; -1 elsewhere or when that instance is not written |
 | `inst_id` | int32 | representative's `id`; `== id` marks an instance |
 | `inst_sem_type` | int8 | the instance's classification |
-| `inst_pc_start/end` | int64 | the instance's non-LE points |
-| `inst_pc_le_start/end` | int64 | the instance's LE points (adjacent: `inst_pc_end == inst_pc_le_start`) |
+| `inst_pc_start`, `inst_pc_le_start`, `inst_pc_end` | int64 | the instance's points: non-LE in `[start, le_start)`, LE in `[le_start, end)` |
 | `inst_merge_count` | int32 | Geant4 particles merged into the instance |
 | `inst_parent_id` | int32 | nearest ancestor instance; `== id` if none |
+| `mass` | float64 | rest mass [MeV/c²] |
+| `start_pos`, `start_mom` | float64 (M, 4) | at creation |
+| `first_pos`, `first_mom` | float64 (M, 4) | instance rows: the start of the instance's first counted step |
+| `last_pos`, `last_mom` | float64 (M, 4) | instance rows: the end of its last counted step; NaN for a shower |
+| `end_pos`, `end_mom` | float64 (M, 4) | at destruction |
 
 A particle carries up to three classifications — its own, its fragment's and
-its instance's — because merging reclassifies. Note that LE barely survives to
-the group levels: `absorb_le_scatter` folds low-energy scatter into whatever
-touches it, so ~31% of *points* are LE while almost no *instance* is.
+its instance's — because merging reclassifies. A `kLEScatter` particle that
+`absorb_le_scatter` folded into a track keeps `sem_type == kLEScatter`, but
+its points are the track fragment's and not LE.
+
+### Kinematics
+
+`*_pos` is `[x, y, z, t]` in mm and ns; `*_mom` is `[px, py, pz, E]` in MeV
+with **E the total energy**, so KE is `E − mass`. NaN where unknown.
+
+**`mass`, `start_*`, `end_*`** describe the row's own Geant4 particle, joined
+on `geant4_trackid`: the pieces defragmentation splits off one track all
+carry that track's values. They come from `particle/geant4` (`x…ke`,
+`end_x…end_ke`), with one correction: Geant4 records a converting photon's
+end momentum as zero (its state after it was killed), so `end_mom` is set to
+its momentum just before converting — the start momentum less what its
+Compton electrons carried off, energy likewise. That is exact up to binding
+energy; Rayleigh scattering leaves no secondary and is not accounted for.
+
+**`first_*`, `last_*`** describe an *instance* — what a model is asked to
+reconstruct, as drawn — and are on instance rows only (NaN elsewhere). They
+are made after the instances exist, from the deposits the instance collected
+([`pysupera.kinematics`](pysupera/kinematics.py)):
+
+- Each Geant4 step goes to the particle holding its deposit: through the
+  voxel map with plain EDepSim, through its segment's group with JAXTPC —
+  where the truth cloud puts it. So steps follow their deposits through
+  defragmentation, absorption and shower merging, as the points do.
+- Only *counted* steps are used — the root attribute `kinematics_steps`:
+  `visible` with JAXTPC (the step's group left an entry on a readout plane),
+  `all` with plain EDepSim — and of those only the steps of a Geant4 particle
+  that has a non-LE member in the instance. A blob absorbed from an
+  unrelated particle is part of the picture but not of the trajectory, and
+  can be later than all of it. A photon's conversion pair counts as non-LE
+  however small its clouds: it is the shower's start. An instance with no
+  non-LE member, or whose non-LE members left no counted step, uses all its
+  steps.
+- `first` is the start of the earliest such step, `last` the end of the
+  latest. A step record holds its **midpoint** (on the sample data a
+  particle's first step sits half a `dx` from its creation point: median
+  residual 0.0005 mm against 0.097 mm for the start-of-step reading), so the
+  position moves `dx/2` along the step's direction, as if it were straight,
+  and `t` by the matching `dx/2 / (βc)`. The momentum is the step's own `|p|`
+  along its direction, with the mass of the particle that made the step — so
+  `first_mom`'s E can be below the row's own `mass`.
+- A **`kShower`** instance has no well-defined last point: `last_*` is NaN.
+  When a photon heads it and its pair made the first counted step,
+  `first_mom` is the pair's summed creation momentum: the photon's energy
+  exactly, and its direction up to the nucleus's recoil (median 0.5 MeV). It
+  then differs from the photon's `end_mom` by that recoil. When the readout
+  missed the pair, the first point is on a later product and `first_mom` is
+  that step's.
+- `first_pos` can be far from `start_pos`: a photon deposits only once it
+  converts, and a particle the readout did not see at first is first seen
+  later.
+
+All float64, although the input is float32, so that `E − mass` keeps a slow
+nucleus's kinetic energy: a float32 E for ⁴⁰Ar resolves only ~2 keV.
 
 ### Interaction columns
 
@@ -1001,7 +1099,7 @@ with the same index:
 hit_labels/volume{V}/plane{P}/        attrs: source ("U", "V", "Y" or "Pixel")
     fragment_id   int32   the fragment row the hit belongs to; -1 untraced
     instance_id   int32   the instance row; -1 untraced
-    is_le         bool    the hit's particle is kLEScatter
+    is_le         bool    the hit's fragment is a kLEScatter fragment
     on_sensor     bool    pixel only: its pixel is in the sensor image
     offsets       int64   per-event fenceposts
 ```
@@ -1225,7 +1323,8 @@ it is aligned with the hits file and needs no join. `groups/` is the
 group-level view behind it, kept because it is small and answers questions
 about groups directly. A hit is the projection of a JAXTPC *group*, and
 `groups/` records the fragment that owns each group, plus one bit saying
-whether that group is low-energy:
+whether that group is low-energy — whether its fragment is a `kLEScatter`
+fragment:
 
 ```python
 with read_events_v3("out.h5") as store:
@@ -1379,7 +1478,7 @@ Records every merge decision in memory. Not written to the output file.
 
 ## Training Data (PyTorch)
 
-`pysupera.torchdata` turns a 3.x file into batches for panoptic-segmentation
+`pysupera.torchdata` turns a 4.x file into batches for panoptic-segmentation
 training. Install the extra first:
 
 ```bash
@@ -1432,8 +1531,8 @@ another instance's.
 
 ### Low-energy scatters — `include_le`
 
-LE deposits are roughly a third of all points. They are **excluded by
-default**:
+LE points — those of `kLEScatter` fragments, blobs with no trajectory — are
+**excluded by default**:
 
 ```python
 loader = make_dataloader("out.h5", include_le=True)   # keep them
@@ -1441,15 +1540,24 @@ loader = make_dataloader("out.h5", include_le=True)   # keep them
 
 The flag governs the voxel data as a whole — input coordinates, energy, and all
 three label arrays — so the model never sees a point that the labels do not
-describe, and an excluded point contributes no energy either. On a sample
-event, dropping LE removes 30% of the voxels and 13% of the energy.
+describe, and an excluded point contributes no energy either. Since 4.0.0 a
+low-energy deposit absorbed into a track or shower is that track's or
+shower's and is kept. Over three sample events the flag removes 22–29% of
+the voxels and 6–8% of the energy: the blobs with no trajectory — Compton and
+photoelectron blobs, scattered recoils — that touched nothing (3.3.0, which
+also counted absorbed deposits and Compton blobs merged into photon
+fragments, removed about 30% and 13%).
 
-A point counts as LE when its label is `kLEScatter`, which covers both an LE
-deposit absorbed into some other instance (LE-ness is positional — see
-[Point ordering](#point-ordering-and-why-it-matters)) and a point of an
-instance that is itself LE. The instance and interaction labels of an absorbed
-LE point remain those of its host, so it stays attributed to the shower or
-track that absorbed it.
+A point counts as LE when it lies in an instance's LE run — the LE fragments
+grouped into it, `[inst_pc_le_start, inst_pc_end)` (see
+[Point ordering](#point-ordering-and-why-it-matters)) — and is labelled
+`kLEScatter` whatever its host is. Its instance and interaction labels remain
+the host's, so it stays attributed to the shower or track it was grouped
+with.
+
+`instances` carries every particle column of the instance rows, the
+kinematics included (`mass`, and the `(n, 4)` `start_pos` … `end_mom`; see
+[Kinematics](#kinematics)).
 
 ### Distributed training
 
@@ -1792,9 +1900,9 @@ Only the touching subset proceeds to `post_filter`, and only the final `merge_pa
 
 ### `PhotonDecay`
 
-**Purpose:** Merge the ±11 (e⁺/e⁻) decay products of a photon (PDG 22) into the photon's partition.
+**Purpose:** Merge the e⁺e⁻ pair a photon (PDG 22) converted into (`kConversion`) into the photon's partition, and pieces defragmentation cut off the photon itself.  A photon's Compton electrons and photoelectron are left alone: a shower starts at the pair production, and whether they belong to a shower *instance* is decided by genealogy in `merge_em_showers` (only when their photon is itself inside a shower).  The photon is promoted from `kLEScatter` to `kShower` only when it converts.
 
-**Mechanism:** Purely topology-based (`get_unconditional_merges`).  A photon typically has an empty point cloud; its spatial extent is entirely represented by its children.  No proximity check is performed.
+**Mechanism:** Purely topology-based (`get_unconditional_merges`).  A photon has no deposits of its own at the conversion; its spatial extent from there on is its pair's.  No proximity check is performed.
 
 **Merge direction:** child (e⁺/e⁻) → parent (photon).  The photon representative survives and its `point_cloud` grows to include all child points.
 
@@ -1840,7 +1948,7 @@ Only the touching subset proceeds to `post_filter`, and only the final `merge_pa
 
 **Candidate filter:** All pairs between `kLEScatter` representatives and non-`kLEScatter` representatives.
 
-**Post-filter:** One merge per `kLEScatter` — if multiple non-LE neighbours touch the same LE partition, only the first passing pair is kept.
+**Post-filter:** One merge per `kLEScatter` — if multiple non-LE neighbours touch the same LE partition, the one holding its nearest ancestor outside it is kept when it is among them (a delta ray goes to its track, not to a shower crossing it), otherwise the first passing pair.
 
 **Merge direction:** `kLEScatter` representative → non-`kLEScatter` representative.
 
@@ -1885,7 +1993,7 @@ Diagnostics add a per-pair record overhead.  With diagnostics disabled (the defa
 
 5. **Point cloud columns** — Columns 0–2 are always treated as x, y, z.  Additional columns (time, energy deposit, dEdx, etc.) are carried through the pipeline unchanged but are not used by any proximity or condition logic except for the energy tie-break in `CombineLEScatters` (column index 4, `PointFeature.energy`).
 
-6. **`kLEScatter` ordering** — `AbsorbLEScatter` takes the *first* touching non-LE neighbour in the order candidates are iterated, which depends on the ordering of `rep_lookup`.  This is deterministic within a single run but may vary across Python versions or dict iteration orders in unusual environments.
+6. **`kLEScatter` ordering** — when an LE partition's own ancestor is not among its touching neighbours, `AbsorbLEScatter` takes the *first* touching non-LE neighbour in the order candidates are iterated, which depends on the ordering of `rep_lookup`.  This is deterministic within a single run but may vary across Python versions or dict iteration orders in unusual environments.
 
 7. **Convergence** — The pass loop terminates when no new merges occur in a complete pass.  The loop is capped at `max_passes=10` as a safety guard.  In practice, 1–2 passes are sufficient for typical LArTPC events.
 

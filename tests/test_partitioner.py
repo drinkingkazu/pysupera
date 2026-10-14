@@ -9,7 +9,7 @@ from pysupera.conditions.absorb_le_scatter import AbsorbLEScatter
 from pysupera.utils import SemanticType
 from tests.conftest import (
     make_particle, cloud, make_partitioner,
-    PT_PRIMARY, PT_TRACK, PT_IONIZATION, PT_COMPTON, PT_PHOTON,
+    PT_PRIMARY, PT_TRACK, PT_IONIZATION, PT_COMPTON, PT_PHOTON, PT_CONVERSION,
 )
 
 
@@ -172,7 +172,7 @@ class TestFullPipeline:
         photon   = make_particle(1, PT_PHOTON, pdg=22,
                                   pc=np.zeros((0, 3), dtype=np.float32),
                                   parent_id=1, ancestor_id=1)
-        electron = make_particle(2, PT_PRIMARY, pdg=11, parent_pdg=22,
+        electron = make_particle(2, PT_CONVERSION, pdg=11, parent_pdg=22,
                                   parent_id=1, ancestor_id=1)
         _, parts = self._run_pipeline([photon, electron])
         # After PhotonDecay, they should be in 1 partition

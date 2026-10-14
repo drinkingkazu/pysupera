@@ -8,8 +8,9 @@ hits and the labels with the same index -- no reordering, no join.
 
 Each entry gets the pysupera fragment and instance it belongs to, as the
 representative particle ids that head them in the output's ``particles``
-table, and whether its particle is a low-energy scatter.  Where a hit cannot
-be traced to a particle the ids are -1.
+table, and whether it is LE -- whether its fragment is a ``kLEScatter``
+fragment (see :mod:`pysupera.layout`; a low-energy scatter absorbed into a
+track is not).  Where a hit cannot be traced to a particle the ids are -1.
 
 How a hit is traced depends on the readout:
 
@@ -26,9 +27,7 @@ from __future__ import annotations
 
 import numpy as np
 
-from .utils import SemanticType as _ST
-
-_LE = _ST.kLEScatter
+from .layout import fragment_le
 
 
 def _lookups(particles, frag_groups, inst_groups):
@@ -42,8 +41,8 @@ def _lookups(particles, frag_groups, inst_groups):
         frag[np.asarray(g.member_ids, dtype=np.int64)] = int(g.rep_id)
     for g in inst_groups:
         inst[np.asarray(g.member_ids, dtype=np.int64)] = int(g.rep_id)
-    for p in particles:
-        le[int(p.id)] = p.sem_type is _LE
+    for pid, v in fragment_le(particles, frag_groups).items():
+        le[pid] = v
     return frag, inst, le, n
 
 

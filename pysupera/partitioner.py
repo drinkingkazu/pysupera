@@ -770,6 +770,10 @@ class ParticlePartitioner:
         rep_lookup: Dict[int, Particle] = {
             p.id: reps[self.id_to_idx[p.id]] for p in self.particles
         }
+        # Published now, not only at the end, so a condition's post_filter
+        # can ask which partition a particle currently sits in.  The same
+        # dict is updated in place by every merge below.
+        self.rep_lookup = rep_lookup
 
         # rep_members: id(rep) → list of original particle IDs in that partition.
         # Allows O(|partition|) rep_lookup update instead of O(n) full scan.

@@ -12,11 +12,12 @@ TouchingEMShower
     whose point clouds are within the distance threshold.
 AbsorbLEScatter
     Absorb each kLEScatter particle into at most one touching non-kLEScatter
-    neighbour.
+    neighbour -- its own ancestor's partition when that is one of them.
 PhotonDecay
-    Merge PDG ±11 children of a photon (PDG 22) into the photon's
-    partition without a proximity check.  The photon becomes the
-    surviving representative.
+    Merge the e+e- pair a photon (PDG 22) converted into into the photon's
+    partition without a proximity check; Compton electrons and
+    photoelectrons are left alone.  The photon becomes the surviving
+    representative.
 
 Examples
 --------

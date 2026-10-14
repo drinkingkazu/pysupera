@@ -10,6 +10,7 @@ from pysupera.utils import SemanticType
 from tests.conftest import (
     make_particle, cloud,
     PT_PRIMARY, PT_TRACK, PT_IONIZATION, PT_COMPTON, PT_PHOTON, PT_DELTA,
+    PT_CONVERSION, PT_PHOTO_ELEC,
 )
 
 
@@ -41,7 +42,7 @@ class TestPhotonDecay:
         photon = make_particle(1, PT_PHOTON, pdg=22,
                                pc=np.zeros((0, 3), dtype=np.float32),
                                parent_id=1, ancestor_id=1)
-        electron = make_particle(2, PT_PRIMARY, pdg=11, parent_pdg=22,
+        electron = make_particle(2, PT_CONVERSION, pdg=11, parent_pdg=22,
                                   parent_id=1, ancestor_id=1,
                                   offset=(0, 0, 0))
         prt = _part(photon, electron)
@@ -52,7 +53,7 @@ class TestPhotonDecay:
         photon = make_particle(1, PT_PHOTON, pdg=22,
                                pc=np.zeros((0, 3), dtype=np.float32),
                                parent_id=1, ancestor_id=1)
-        positron = make_particle(2, PT_PRIMARY, pdg=-11, parent_pdg=22,
+        positron = make_particle(2, PT_CONVERSION, pdg=-11, parent_pdg=22,
                                   parent_id=1, ancestor_id=1,
                                   offset=(0.1, 0, 0))
         prt = _part(photon, positron)
@@ -63,15 +64,50 @@ class TestPhotonDecay:
         photon = make_particle(1, PT_PHOTON, pdg=22,
                                pc=np.zeros((0, 3), dtype=np.float32),
                                parent_id=1, ancestor_id=1)
-        electron = make_particle(2, PT_PRIMARY, pdg=11, parent_pdg=22,
+        electron = make_particle(2, PT_CONVERSION, pdg=11, parent_pdg=22,
                                   parent_id=1, ancestor_id=1)
-        positron = make_particle(3, PT_PRIMARY, pdg=-11, parent_pdg=22,
+        positron = make_particle(3, PT_CONVERSION, pdg=-11, parent_pdg=22,
                                   parent_id=1, ancestor_id=1,
                                   offset=(0.2, 0, 0))
         prt = _part(photon, electron, positron)
         parts = prt.partition(PhotonDecay(), verbose=False)
         assert _same_partition(parts, 1, 2)
         assert _same_partition(parts, 1, 3)
+
+    def test_compton_electron_stays_its_own_particle(self):
+        """A shower begins at the pair production: a Compton electron is not
+        merged into its photon, however close or far."""
+        photon = make_particle(1, PT_PHOTON, pdg=22,
+                               pc=np.zeros((0, 3), dtype=np.float32),
+                               parent_id=1, ancestor_id=1)
+        compton = make_particle(2, PT_COMPTON, pdg=11, parent_pdg=22,
+                                parent_id=1, ancestor_id=1, n_pts=2)
+        photo = make_particle(3, PT_PHOTO_ELEC, pdg=11, parent_pdg=22,
+                              parent_id=1, ancestor_id=1, n_pts=2,
+                              offset=(30, 0, 0))
+        photon.sem_type = SemanticType.kLEScatter   # a tiny photon blob
+        prt = _part(photon, compton, photo)
+        parts = prt.partition(PhotonDecay(), verbose=False)
+        assert not _same_partition(parts, 1, 2)
+        assert not _same_partition(parts, 1, 3)
+        # no pair, no shower: the photon is not promoted
+        assert prt.rep_lookup[1].sem_type == SemanticType.kLEScatter
+
+    def test_conversion_promotes_the_photon_and_leaves_compton_out(self):
+        photon = make_particle(1, PT_PHOTON, pdg=22,
+                               pc=np.zeros((0, 3), dtype=np.float32),
+                               parent_id=1, ancestor_id=1)
+        compton = make_particle(2, PT_COMPTON, pdg=11, parent_pdg=22,
+                                parent_id=1, ancestor_id=1, n_pts=2,
+                                offset=(80, 0, 0))
+        pair = make_particle(3, PT_CONVERSION, pdg=11, parent_pdg=22,
+                             parent_id=1, ancestor_id=1, n_pts=20)
+        photon.sem_type = SemanticType.kLEScatter
+        prt = _part(photon, compton, pair)
+        parts = prt.partition_combined([PhotonDecay()], verbose=False)
+        assert _same_partition(parts, 1, 3)
+        assert not _same_partition(parts, 1, 2)
+        assert prt.rep_lookup[1].sem_type == SemanticType.kShower
 
     def test_non_photon_parent_no_merge(self):
         # parent is a track (parent_pdg=13, not 22) → no PhotonDecay merge

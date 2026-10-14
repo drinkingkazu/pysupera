@@ -1201,22 +1201,14 @@ function countInteractions(f32){
   return s.size;
 }
 
-// 3.0.0 -> 3.1.0 column renames.  The viewer reads the raw HDF5, so it has to
-// accept both spellings itself.
+//: SemanticType.kLEScatter
+const LE_SEM=5;
+
+// Older spellings of columns the 2.x read paths look up.
 const V3_ALIAS = {
   geant4_trackid:   'geant4_id',
-  frag_sem_type:    'sem_type_frag',
-  inst_sem_type:    'sem_type_inst',
   frag_parent_id:   'parent_frag_id',
   inst_parent_id:   'parent_inst_id',
-  frag_pc_start:    'frag_non_le_start',
-  frag_pc_end:      'frag_non_le_end',
-  frag_pc_le_start: 'frag_le_start',
-  frag_pc_le_end:   'frag_le_end',
-  // 3.0.0 split one index where 3.1.0 has two adjacent ranges
-  inst_pc_end:      'inst_pc_split',
-  inst_pc_le_start: 'inst_pc_split',
-  inst_pc_le_end:   'inst_pc_end',
 };
 function v3Name(grp, n){
   if(grp.keys().includes(n)) return n;
@@ -1237,8 +1229,8 @@ function clearObjects(){
 }
 
 
-// ── Format 3.0.0 cloud reconstruction ──────────────────────────────────────
-// 3.0.0 stores each point once as (x, y, z, t, dE, dX) and keeps the group
+// ── Format 4.x cloud reconstruction ────────────────────────────────────────
+// 4.x stores each point once as (x, y, z, t, dE, dX) and keeps the group
 // labels per *particle* rather than per point.  The rendering code below was
 // written against the 2.x event clouds -- (x,y,z,t,e,interaction,ancestor,
 // frag,inst) per point -- so rather than rewrite it, rebuild that view here
@@ -1255,38 +1247,36 @@ function v3BuildCloud(evIdx, wantLE){
   const nPts=pb-pa;
   if(nPts<=0) return new Float32Array(0);
   const pg=hf.get('particles');
-  const col=n=>pg.get(v3Name(pg,n)).slice([[a,b]]);
+  const col=n=>pg.get(n).slice([[a,b]]);
   const id=col('id'), ancestor=col('ancestor_id');
   const fragId=col('frag_id'), instId=col('inst_id');
-  const fS=col('frag_pc_start'), fE=col('frag_pc_end');
-  const fLS=col('frag_pc_le_start'), fLE=col('frag_pc_le_end');
-  const iS=col('inst_pc_start'), iSP=col('inst_pc_le_start'), iE=col('inst_pc_le_end');
+  const fS=col('frag_pc_start'), fE=col('frag_pc_end'), fSem=col('frag_sem_type');
+  const iS=col('inst_pc_start'), iE=col('inst_pc_end');
   const pts=hf.get('points').get('flat').slice([[pa,pb],[0,6]]);
 
   const lblInt=new Float32Array(nPts).fill(-1), lblAnc=new Float32Array(nPts).fill(-1);
   const lblFrag=new Float32Array(nPts).fill(-1), lblInst=new Float32Array(nPts).fill(-1);
-  // LE-ness is positional: each instance block is non-LE points
-  // [inst_pc_start, inst_pc_end) followed by LE points
-  // [inst_pc_le_start, inst_pc_le_end), and the two are adjacent.  No
-  // per-point label is stored, and none is needed.
+  // LE belongs to the fragment: a kLEScatter fragment is a blob with no
+  // trajectory, and an LE deposit absorbed into a track is the track's.  So
+  // a fragment is one run, wholly LE or not; inside an instance the LE
+  // fragments follow the rest, from inst_pc_le_start.  No per-point label
+  // is stored, and none is needed.
   const isLE=new Uint8Array(nPts);
   const n=id.length;
   for(let k=0;k<n;k++){
     if(Number(instId[k])!==Number(id[k])) continue;
-    const a=Number(iS[k])-pa, sp=Number(iSP[k])-pa, e=Number(iE[k])-pa;
+    const a=Number(iS[k])-pa, e=Number(iE[k])-pa;
+    if(a<0) continue;
     const v=Number(instId[k]);
-    for(let j=a;j<e;j++){ lblInst[j]=v; if(j>=sp) isLE[j]=1; }
+    for(let j=a;j<e;j++) lblInst[j]=v;
   }
-  // A fragment is two runs -- its non-LE side and its LE side -- because the
-  // other fragments' non-LE points lie between them.
   for(let k=0;k<n;k++){
     if(Number(fragId[k])!==Number(id[k])) continue;
     const f=Number(fragId[k]), an=Number(ancestor[k]);
-    const runs=[[Number(fS[k]),Number(fE[k])],[Number(fLS[k]),Number(fLE[k])]];
-    for(const [rs,re] of runs){
-      if(rs<0) continue;
-      for(let j=rs-pa;j<re-pa;j++){ lblFrag[j]=f; lblAnc[j]=an; }
-    }
+    const rs=Number(fS[k]), re=Number(fE[k]);
+    if(rs<0) continue;
+    const le=Number(fSem[k])===LE_SEM;
+    for(let j=rs-pa;j<re-pa;j++){ lblFrag[j]=f; lblAnc[j]=an; if(le) isLE[j]=1; }
   }
   // interaction_id from the interactions table: authoritative and complete
   if(hf.keys().includes('inter')){
@@ -1776,13 +1766,13 @@ function readParticleSlice(evIdx){
 // every frag_parent_id is -1, so fragment fields must not be presented as if
 // they were merely missing for this particle.
 let _FRAG_LEVEL=false;
-//: true when the open file is format 3.x (one particles table,
+//: true when the open file is format 4.x (one particles table,
 //: one point array).  2.x files keep the old read paths.
 let FMT3=false;
 function probeFragLevel(){
   _FRAG_LEVEL=false;
   if(!hf) return false;
-  // 3.x: one particles table; a fragment level exists when some row heads a
+  // 4.x: one particles table; a fragment level exists when some row heads a
   // fragment (frag_id == id).
   if(FMT3){
     try{
@@ -1803,7 +1793,7 @@ function probeFragLevel(){
 }
 
 
-// Instance graph for 3.0.0: instances are the rows where inst_id == id, and
+// Instance graph for 4.x: instances are the rows where inst_id == id, and
 // inst_parent_id already names the parent instance's particle id, so no
 // genealogy walk is needed here.
 function v3InstanceGraph(evIdx){
@@ -1816,6 +1806,19 @@ function v3InstanceGraph(evIdx){
   const intId=col('interaction_id'), sem=col('inst_sem_type');
   const mcount=col('inst_merge_count');
   const iS=col('inst_pc_start'), iE=col('inst_pc_end');
+  // The representative's own Geant4 particle (creation, destruction) and the
+  // instance's first / last point, as (rows, 4) [x,y,z,t] mm ns and
+  // [px,py,pz,E] MeV.
+  const pk=pg.keys(), v4=n=>pk.includes(n)?Float64Array.from(pg.get(n).slice([[a,b],[0,4]])):null;
+  const mass=pk.includes('mass')?col('mass'):null;
+  const K={sp:v4('start_pos'),sm:v4('start_mom'),fp:v4('first_pos'),fm:v4('first_mom'),
+           lp:v4('last_pos'),lm:v4('last_mom'),ep:v4('end_pos'),em:v4('end_mom')};
+  const kinOf=k=>{
+    if(!mass||!K.sp) return null;
+    const q=a=>Array.from(a.subarray(k*4,k*4+4));
+    return {mass:Number(mass[k]),sp:q(K.sp),sm:q(K.sm),fp:q(K.fp),fm:q(K.fm),
+            lp:q(K.lp),lm:q(K.lm),ep:q(K.ep),em:q(K.em)};
+  };
 
   const nodes=[], rowOf=new Map();
   for(let k=0;k<id.length;k++){
@@ -1826,7 +1829,8 @@ function v3InstanceGraph(evIdx){
       parentPdg:Number(ppdg[k]), intId:Number(intId[k]),
       semType:Number(sem[k]), fragId:-1,
       members:Math.max(1,Number(mcount[k])),
-      ptCount:Number(iE[k])-Number(iS[k]),
+      ptCount:Number(iS[k])>=0?Number(iE[k])-Number(iS[k]):0,
+      kin:kinOf(k),
       eSum:null,x:0,y:0,vx:0,vy:0});
   }
   const edges=[], seen=new Set();
@@ -1982,10 +1986,25 @@ function _showGraphTip(ev,nd){
     (_FRAG_LEVEL?`Frag: ${nd.fragId>=0?nd.fragId:'\u2014'}&emsp;`:``)+
     `Int.ID: ${nd.intId>=0?nd.intId:'\u2014'}<br>`+
     `Energy: ${nd.eSum!=null?nd.eSum.toExponential(2):'\u2014'}<br>`+
-    `Points: ${nd.ptCount>0?nd.ptCount.toLocaleString():'<i style="opacity:.55">none &mdash; merged/absorbed</i>'}&emsp;Members: ${nd.members}`;
+    `Points: ${nd.ptCount>0?nd.ptCount.toLocaleString():'<i style="opacity:.55">none &mdash; merged/absorbed</i>'}&emsp;Members: ${nd.members}`+
+    _kinTip(nd.kin);
   _tt.style.left=(ev.clientX+16)+'px';
   _tt.style.top=(ev.clientY-12)+'px';
   _tt.style.display='block';
+}
+// Kinematics lines for a node's tooltip; empty for files that lack them.
+function _kinTip(k){
+  if(!k) return '';
+  const f=(x,d)=>Number.isNaN(x)?'\u2014':x.toFixed(d);
+  const ke=m=>m[3]-k.mass, xyz=p=>`${f(p[0],1)}, ${f(p[1],1)}, ${f(p[2],1)}`;
+  const d=Math.hypot(k.fp[0]-k.sp[0],k.fp[1]-k.sp[1],k.fp[2]-k.sp[2]);
+  const pe=m=>`|p| ${f(Math.hypot(m[0],m[1],m[2]),2)}, E ${f(m[3],2)} MeV`;
+  return `<br>mass ${f(k.mass,3)} MeV&emsp;KE ${f(ke(k.sm),2)} \u2192 ${f(ke(k.em),2)} MeV<br>`+
+    `start (${xyz(k.sp)}) mm<br>end (${xyz(k.ep)})<br>`+
+    (Number.isNaN(k.fp[0])?`inst. first: <i style="opacity:.55">none</i>`
+      :`inst. first (${xyz(k.fp)}) +${f(d,1)} mm, ${pe(k.fm)}<br>`+
+       (Number.isNaN(k.lp[0])?`inst. last: <i style="opacity:.55">none (shower)</i>`
+         :`inst. last (${xyz(k.lp)}), ${pe(k.lm)}`));
 }
 function _hideGraphTip(){ document.getElementById('graph-tooltip').style.display='none'; }
 function _showLockedBar(nd){
@@ -2737,6 +2756,12 @@ async function openBuf(name, buf){
     console.log('[h5] file keys:', keys);
     if(!keys.includes('n_events')) throw new Error('Missing /n_events — not a pysupera file?');
     FMT3=keys.includes('points')&&!keys.includes('non_le_cloud');
+    if(FMT3){
+      let v=''; try{ v=String(hf.get('format_version').value); }catch(e){}
+      if(!v.startsWith('4.'))
+        throw new Error('format '+v+': this viewer reads 4.x (and 2.x).  Regenerate it with the '+
+                        'current run_pysupera -- 4.0.0 moved LE to the fragment.');
+    }
     if(!FMT3&&!keys.includes('non_le_cloud'))
       throw new Error('Missing /non_le_cloud and /points — not a pysupera output?');
     nEvents=h5scalar(hf.get('n_events'));

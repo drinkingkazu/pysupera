@@ -1,5 +1,5 @@
 """
-PyTorch data pipeline for panoptic segmentation on pysupera 3.0.0 output.
+PyTorch data pipeline for panoptic segmentation on pysupera 4.0.0 output.
 
 Provides a :class:`Dataset` over events, a collate that keeps a batch as a
 *list* of events (point clouds differ in length, so nothing is padded or
@@ -28,14 +28,16 @@ Winner selection, in order:
 
 Low-energy scatters
 -------------------
-LE-ness is a property of a *point*, not of its instance: an instance's block
-holds its own points in ``[inst_pc_start, inst_pc_end)`` and the LE deposits
-absorbed into it in ``[inst_pc_le_start, inst_pc_le_end)``.  The two runs are
-adjacent, so ``inst_pc_end == inst_pc_le_start``.  A point in the second
-run is labelled ``kLEScatter`` whatever its host instance is, which is what
-makes it the lowest-priority contribution to a contested voxel.  Its *instance*
-label is still the host's, so an LE deposit stays attributed to the shower or
-track that absorbed it.
+LE-ness is a property of a *fragment*, not of its instance: a point is LE
+when its fragment is a ``kLEScatter`` blob, one with no trajectory.  (A
+low-energy scatter absorbed into a track or shower fragment by proximity is
+part of that trajectory, and is labelled with it.)  An instance's block holds
+its non-LE fragments in ``[inst_pc_start, inst_pc_le_start)`` and the LE
+fragments grouped into it in ``[inst_pc_le_start, inst_pc_end)``.  A point in
+the second run is labelled ``kLEScatter`` whatever its host instance is, which
+is what makes it the lowest-priority contribution to a contested voxel.  Its
+*instance* label is still the host's, so an LE blob stays attributed to the
+shower or track it was grouped with.
 
 LE deposits are **excluded by default** (``include_le=False``): they are around
 a third of the points and are usually noise to a segmentation model.  The flag
@@ -55,7 +57,11 @@ Labels
 ``voxel_sem``, ``voxel_instance`` and ``voxel_interaction`` are the three
 panoptic targets, one per row of ``points``.  ``instances`` and ``interactions``
 are the object-level tables read straight from the file; an interaction's id is
-its row index, which is what ``voxel_interaction`` holds.
+its row index, which is what ``voxel_interaction`` holds.  ``instances`` carries
+every particle column of the instance rows, the kinematics included:
+``mass`` and the ``(n, 4)`` ``start_pos`` / ``start_mom`` ... ``end_mom``, of
+which ``first_*`` / ``last_*`` are the instance's own first and last point
+(``last_*`` NaN for a shower).
 """
 
 from __future__ import annotations
@@ -112,7 +118,7 @@ def build_event(view, include_le: bool = False) -> dict:
     Parameters
     ----------
     view : EventView
-        One event from a format 3.x file.
+        One event from a format 4.x file.
     include_le : bool
         Keep low-energy-scatter points.  Off by default; see the module
         docstring.  Applies to the input points and to every label, so the
@@ -123,7 +129,7 @@ def build_event(view, include_le: bool = False) -> dict:
     dict
         ``points``            (V, 4) float32 -- x, y, z, E, one row per voxel
         ``voxel_sem``         (V,) int16   winner's class; ``kLEScatter`` for
-                                        an absorbed low-energy deposit
+                                        a point of an LE fragment
         ``voxel_instance``    (V,) int32   winning instance's particle ``id``
         ``voxel_interaction`` (V,) int32   that instance's ``interaction_id``
         ``instances``         dict of arrays, one entry per instance row
@@ -143,20 +149,16 @@ def build_event(view, include_le: bool = False) -> dict:
     p_intr = np.full(n, NO_LABEL, dtype=np.int32)
     le_code = SemanticType.kLEScatter.value
     for r in inst_rows:
-        # Two adjacent runs: the instance's own points, then the LE deposits
-        # absorbed into it.  Either side may be empty (-1).
-        nle_a, nle_b = int(c["inst_pc_start"][r]), int(c["inst_pc_end"][r])
-        le_a, le_b = int(c["inst_pc_le_start"][r]), int(c["inst_pc_le_end"][r])
-        a = nle_a if nle_a >= 0 else le_a
-        b = le_b if le_b >= 0 else nle_b
+        # Two adjacent runs: the non-LE fragments, then the LE fragments.
+        # Either may be empty; the whole instance is empty when start < 0.
+        a, s, b = (int(c["inst_pc_start"][r]), int(c["inst_pc_le_start"][r]),
+                   int(c["inst_pc_end"][r]))
         if a < 0 or b <= a:
             continue
         p_inst[a:b] = int(c["id"][r])
         p_intr[a:b] = int(c["interaction_id"][r])
-        if nle_a >= 0 and nle_b > nle_a:
-            p_sem[nle_a:nle_b] = int(c["inst_sem_type"][r])
-        if le_a >= 0 and le_b > le_a:
-            p_sem[le_a:le_b] = le_code
+        p_sem[a:s] = int(c["inst_sem_type"][r])
+        p_sem[s:b] = le_code
 
     # ---- drop low-energy scatters -----------------------------------------
     # Done before merging so an excluded point contributes no energy either.
@@ -228,7 +230,7 @@ def _arrays(table: dict) -> dict:
 
 class PysuperaEvents(Dataset):
     """
-    One pysupera 3.0.0 file as a map-style dataset of events.
+    One pysupera 4.0.0 file as a map-style dataset of events.
 
     The HDF5 handle is opened lazily *per worker*: h5py handles cannot cross a
     fork, so opening in ``__init__`` breaks silently under
@@ -237,7 +239,7 @@ class PysuperaEvents(Dataset):
     Parameters
     ----------
     path : str
-        A format 3.x output file.
+        A format 4.x output file.
     include_le : bool
         Keep low-energy-scatter points.  Off by default.
     transform : callable or None

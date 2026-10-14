@@ -74,8 +74,10 @@ class AbsorbLEScatter(PartitionConditionBase):
         """
         Allow each ``kLEScatter`` particle to merge with at most one partner.
 
-        Groups *touching_pairs* by their ``kLEScatter`` member and keeps only
-        the first touching non-``kLEScatter`` neighbour for each group.
+        Groups *touching_pairs* by their ``kLEScatter`` member and keeps one
+        touching non-``kLEScatter`` neighbour for each group: the partition
+        of its own ancestor when that one touches (see
+        :meth:`_home_rep_id`), otherwise the first.
         Surplus candidates are discarded; when diagnostics are enabled each
         rejection is recorded with reason ``ALREADY_MERGED_WITH_OTHER``.
 
@@ -217,8 +219,16 @@ class AbsorbLEScatter(PartitionConditionBase):
         """
         Keep at most one touching partner per ``kLEScatter`` particle.
 
-        Groups pairs by their ``kLEScatter`` member, selects the first pair
-        in each group, and records diagnostic rejections for the remainder.
+        Groups pairs by their ``kLEScatter`` member and selects, in each
+        group, the pair whose partner is the particle's genealogical home
+        (:meth:`_home_rep_id`) when it is among them, else the first pair.
+        Records diagnostic rejections for the remainder.
+
+        The preference matters for delta rays: one is born on its track and
+        so touches it, but it often touches something else as well -- a
+        larger delta, a shower crossing the track -- and the first pair is
+        whichever the proximity search happened to list first.  Choosing
+        among the partners it touches pulls nothing in from a distance.
 
         Parameters
         ----------
@@ -248,6 +258,13 @@ class AbsorbLEScatter(PartitionConditionBase):
 
         for sem5_id, pairs in sem5_merges.items():
             selected_pair = pairs[0]
+            if len(pairs) > 1:
+                home = self._home_rep_id(partitioner, sem5_id)
+                for pair in pairs:
+                    partner = pair[0] if pair[0] != sem5_id else pair[1]
+                    if partner == home:
+                        selected_pair = pair
+                        break
             selected.append(selected_pair)
 
             if partitioner.diagnostics.enabled and len(pairs) > 1:
@@ -255,7 +272,9 @@ class AbsorbLEScatter(PartitionConditionBase):
                     selected_pair[0] if selected_pair[0] != sem5_id
                     else selected_pair[1]
                 )
-                for pair in pairs[1:]:
+                for pair in pairs:
+                    if pair == selected_pair:
+                        continue
                     rejected_partner_id = pair[0] if pair[0] != sem5_id else pair[1]
                     partitioner.diagnostics.record(
                         pair[0], pair[1],
@@ -267,3 +286,34 @@ class AbsorbLEScatter(PartitionConditionBase):
                     )
 
         return selected
+
+    @staticmethod
+    def _home_rep_id(partitioner: 'ParticlePartitioner', le_id: int):
+        """
+        The partition the ``kLEScatter`` partition *le_id* came from.
+
+        Walks the parent chain of the particle *le_id* and returns the
+        representative id of the first ancestor that sits in a different
+        partition -- a delta ray's track, say.  Ancestors already merged
+        into the same LE partition are skipped.  None when the chain ends
+        first.
+        """
+        lookup = partitioner.particle_lookup
+        reps = getattr(partitioner, "rep_lookup", None) or {}
+
+        def rep_of(pid):
+            r = reps.get(pid)
+            return r.id if r is not None else pid
+
+        own = rep_of(le_id)
+        cur, seen = lookup.get(le_id), set()
+        while cur is not None and cur.id not in seen:
+            seen.add(cur.id)
+            par = cur.parent_id
+            if par is None or par == cur.id or par not in lookup:
+                return None
+            home = rep_of(par)
+            if home != own:
+                return home
+            cur = lookup[par]
+        return None

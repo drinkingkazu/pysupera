@@ -37,7 +37,9 @@
   </label>
   <label>point size <input type="range" id="psize" min="1" max="8" step="0.5" value="2.5" style="width:80px"></label>
   <label>others <input type="range" id="dim" min="0" max="1" step="0.02" value="0.12" style="width:80px"><span id="dimv" class="k">0.12</span></label>
-  <label><input type="checkbox" id="hidele"> hide LE</label>
+  <label>LE
+    <select id="lemode"><option value="all">show all</option><option value="hide">hide LE</option><option value="only">hide non-LE</option></select>
+  </label>
   <label><input type="checkbox" id="info" checked> point info</label>
   <button id="fit">fit view (c)</button>
   <span id="hint" class="k">load the output and its hits subset — hover a voxel or a hit</span>
@@ -75,7 +77,7 @@ import {OrbitControls} from 'three/addons/controls/OrbitControls.js';
 const S = {
   out:null, hit:null, ev:0, level:'inst', nEvents:0,
   pts:null, feat:null, owner:null, isLE:null,  // voxels (visible only)
-  hideLE:false, planes:[], sel:-1, dim:0.12,
+  leMode:'all', planes:[], sel:-1, dim:0.12,
   interOf:new Map(),            // instance id -> interaction id
   instOfFrag:new Map(),         // fragment id -> instance id
   ncol:6,                       // points/flat columns
@@ -115,6 +117,10 @@ function attr(f, path, name){
 }
 
 const LEVEL_NAME = {inst:'instance', frag:'fragment', inter:'interaction'};
+//: SemanticType.kLEScatter
+const LE_SEM = 5;
+// Whether a point or hit with this LE flag passes the LE selector.
+const leShown = le => S.leMode === 'hide' ? !le : S.leMode === 'only' ? !!le : true;
 
 // Stable colour per owner id: the same function colours voxels and hits, so a
 // colour means the same object on both sides.
@@ -147,8 +153,13 @@ async function openBytes(buf, tag){
 async function loadOut(buf, name){
   S.out = await openBytes(buf, 'out.h5');
   S.nEvents = Number(val(S.out, 'n_events'));
-  const ver = val(S.out, 'format_version');
+  const ver = String(val(S.out, 'format_version'));
   log(`output: format ${ver}, ${S.nEvents} events`);
+  if(!ver.startsWith('4.')){
+    S.out = null;
+    return banner(`This output is format ${ver}; this viewer reads 4.x.  Regenerate it with\n` +
+                  `the current run_pysupera (4.0.0 moved LE to the fragment).`);
+  }
   const bad = unreadableFilter(S.out, 'points/flat');
   if(bad){
     S.out = null;
@@ -158,7 +169,7 @@ async function loadOut(buf, name){
   if(String(attr(S.out, '/', 'readout_type')) === 'pixel')
     return banner('This is a pixel-readout output.  Open it in vis_drift.html instead.');
   if(!has(S.out, 'hit_labels'))
-    banner('This output has no hit_labels/ (format 3.3.0 JAXTPC runs write them), so\n' +
+    banner('This output has no hit_labels/ (JAXTPC runs write them), so\n' +
            'the hits cannot be labelled.  The 3D view still works.');
   else banner('');
   const sel = document.getElementById('ev'); sel.innerHTML = '';
@@ -218,7 +229,7 @@ document.getElementById('dim').oninput = e => {
   document.getElementById('dimv').textContent = S.dim.toFixed(2);
   paintCloud(); for(const p of S.planes) paintPlane(p);
 };
-document.getElementById('hidele').onchange = e => { S.hideLE = e.target.checked; rebuild(); };
+document.getElementById('lemode').onchange = e => { S.leMode = e.target.value; rebuild(); };
 document.getElementById('info').onchange = e => {
   if(!e.target.checked) document.getElementById('pinfo').style.display = 'none';
 };
@@ -239,13 +250,14 @@ function buildVoxels(){
   const id = col('id'), iid = col('inst_id'), fid = col('frag_id'), itr = col('interaction_id');
   const fin = col('frag_inst_id');
 
-  // instance -> interaction, fragment -> instance (stated since 3.3.0)
+  // instance -> interaction, fragment -> instance
   S.interOf = new Map(); S.instOfFrag = new Map();
   for(let k = 0; k < id.length; k++){
     const i = Number(id[k]);
     if(Number(iid[k]) === i) S.interOf.set(i, Number(itr[k]));
     if(fin && Number(fid[k]) === i && Number(fin[k]) >= 0) S.instOfFrag.set(i, Number(fin[k]));
   }
+  loadKinematics(a, b, id, col);
   if(n <= 0){
     S.pts = new Float32Array(0); S.feat = new Float32Array(0);
     S.owner = new Int32Array(0); S.isLE = new Uint8Array(0); return;
@@ -259,27 +271,26 @@ function buildVoxels(){
       if(le) isLE[j] = 1;
     }
   };
-  const is0 = col('inst_pc_start'), ie0 = col('inst_pc_end');
-  const is1 = col('inst_pc_le_start'), ie1 = col('inst_pc_le_end');
+  // LE belongs to the fragment: a kLEScatter fragment is a blob, and an LE
+  // deposit absorbed into a track is the track's.  One run per fragment.
+  const fs = col('frag_pc_start'), fe = col('frag_pc_end'), fsem = col('frag_sem_type');
   for(let k = 0; k < id.length; k++){
-    if(Number(iid[k]) !== Number(id[k])) continue;
-    fill(is1[k], ie1[k], null, true);                     // LE is positional
-    if(S.level === 'frag') continue;
-    const v = S.level === 'inter' ? (S.interOf.get(Number(id[k])) ?? -1) : Number(id[k]);
-    fill(is0[k], ie0[k], v, false); fill(is1[k], ie1[k], v, false);
+    if(Number(fid[k]) !== Number(id[k])) continue;
+    fill(fs[k], fe[k], S.level === 'frag' ? Number(id[k]) : null,
+         Number(fsem[k]) === LE_SEM);
   }
-  if(S.level === 'frag'){
-    const fs0 = col('frag_pc_start'), fe0 = col('frag_pc_end');
-    const fs1 = col('frag_pc_le_start'), fe1 = col('frag_pc_le_end');
+  if(S.level !== 'frag'){
+    const is0 = col('inst_pc_start'), ie0 = col('inst_pc_end');
     for(let k = 0; k < id.length; k++){
-      if(Number(fid[k]) !== Number(id[k])) continue;
-      fill(fs0[k], fe0[k], Number(id[k]), false); fill(fs1[k], fe1[k], Number(id[k]), false);
+      if(Number(iid[k]) !== Number(id[k])) continue;
+      const v = S.level === 'inter' ? (S.interOf.get(Number(id[k])) ?? -1) : Number(id[k]);
+      fill(is0[k], ie0[k], v, false);
     }
   }
-  // Drop LE rows here rather than at draw time, so the picker cannot select
+  // Drop LE (or non-LE) rows here rather than at draw time, so the picker cannot select
   // something the user asked not to see.
   const keep = [];
-  for(let j = 0; j < n; j++) if(!(S.hideLE && isLE[j])) keep.push(j);
+  for(let j = 0; j < n; j++) if(leShown(isLE[j])) keep.push(j);
   const m = keep.length, C = S.ncol;
   const f2 = new Float32Array(m * C), o2 = new Int32Array(m), l2 = new Uint8Array(m), p3 = new Float32Array(m * 3);
   for(let i = 0; i < m; i++){
@@ -323,7 +334,7 @@ function buildPlanes(){
       continue;
     }
     const n = wire.length, keep = [];
-    for(let h = 0; h < n; h++) if(!(S.hideLE && Number(le[h]))) keep.push(h);
+    for(let h = 0; h < n; h++) if(leShown(Number(le[h]))) keep.push(h);
     const m = keep.length;
     const p = {vol, plane, source, n:m, wire:new Int16Array(m), tick:new Int16Array(m),
                q:new Float32Array(m), owner:new Int32Array(m), frag:new Int32Array(m),
@@ -544,8 +555,51 @@ function infoVoxel(i){
                 ['t [µs]', fmt(f[o+3], 2)], ['dE [MeV]', fmt(f[o+4], 4)], ['dX [cm]', fmt(f[o+5], 4)]];
   if(C >= 9) rows.push(['θ φ [rad]', `${fmt(f[o+6], 3)}  ${fmt(f[o+7], 3)}`], ['|p| [MeV/c]', fmt(f[o+8], 2)]);
   rows.push(['LE', S.isLE[i] ? 'yes' : 'no'], [LEVEL_NAME[S.level], S.owner[i] < 0 ? '—' : String(S.owner[i])]);
+  if(S.level !== 'inter') rows.push(...kinRows(S.owner[i]));
   showInfo(rows);
 }
+// ------------------------------------------------------------ kinematics --
+// Per stored row, the representative's own Geant4 particle: start (creation),
+// first / last visible step, end (destruction).  [x,y,z,t] mm ns and
+// [px,py,pz,E] MeV, E total; absent from files before 4.0.0.
+function loadKinematics(a, b, id, col){
+  S.kin = new Map();
+  const g = S.out.get('particles'), names = g.keys();
+  if(!names.includes('start_pos')) return;
+  const v4 = nm => Float64Array.from(g.get(nm).slice([[a, b], [0, 4]]));
+  const K = {}; for(const nm of ['start_pos','start_mom','first_pos','first_mom',
+                                 'last_pos','last_mom','end_pos','end_mom']) K[nm] = v4(nm);
+  const mass = col('mass'), pdg = col('pdg');
+  for(let k = 0; k < id.length; k++){
+    const r = {pdg: Number(pdg[k]), mass: Number(mass[k])};
+    for(const nm in K) r[nm] = Array.from(K[nm].subarray(k*4, k*4+4));
+    S.kin.set(Number(id[k]), r);
+  }
+}
+function kinRows(gid){
+  const r = S.kin && S.kin.get(Number(gid));
+  if(!r) return [];
+  const ke = m => Number.isNaN(m[3]) ? NaN : m[3] - r.mass;
+  const xyz = q => `${fmt(q[0],1)}  ${fmt(q[1],1)}  ${fmt(q[2],1)}`;
+  const dist = (p, q) => Math.hypot(p[0]-q[0], p[1]-q[1], p[2]-q[2]);
+  const out = [['pdg · mass', `${r.pdg} · ${fmt(r.mass, 3)} MeV`],
+               ['KE start→end', `${fmt(ke(r.start_mom), 2)} → ${fmt(ke(r.end_mom), 2)} MeV`],
+               ['start [mm]', xyz(r.start_pos)]];
+  out.push(['end [mm]', xyz(r.end_pos)]);
+  // first / last belong to the instance (its own steps, the readout saw);
+  // their momentum is of the particle that made the step.  A shower has no
+  // last point.
+  const pe = m => `${fmt(Math.hypot(m[0], m[1], m[2]), 2)} · ${fmt(m[3], 2)} MeV`;
+  if(Number.isNaN(r.first_pos[0])) out.push(['inst. first', '—']);
+  else {
+    out.push(['inst. first [mm]', `${xyz(r.first_pos)}  (+${fmt(dist(r.first_pos, r.start_pos), 1)})`],
+             ['|p| · E first', pe(r.first_mom)]);
+    if(Number.isNaN(r.last_pos[0])) out.push(['inst. last', '— (shower)']);
+    else out.push(['inst. last [mm]', xyz(r.last_pos)], ['|p| · E last', pe(r.last_mom)]);
+  }
+  return out;
+}
+
 function infoHit(p, i){
   showInfo([['hit', `volume ${p.vol} · ${p.source} · #${p.src[i].toLocaleString()}`],
             ['wire', String(p.wire[i])], ['tick', String(p.tick[i])],
@@ -553,7 +607,8 @@ function infoHit(p, i){
             ['fragment', p.frag[i] < 0 ? '—' : String(p.frag[i])],
             ['instance', p.inst[i] < 0 ? '—' : String(p.inst[i])],
             ['interaction', p.inst[i] >= 0 && S.interOf.has(p.inst[i]) ? String(S.interOf.get(p.inst[i])) : '—'],
-            ['LE', p.le[i] ? 'yes' : 'no']]);
+            ['LE', p.le[i] ? 'yes' : 'no'],
+            ...(S.level === 'inter' ? [] : kinRows(S.level === 'frag' ? p.frag[i] : p.inst[i]))]);
 }
 
 // ------------------------------------------------------------- selection --

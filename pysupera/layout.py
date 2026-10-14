@@ -1,16 +1,33 @@
 """
-Layout computation for the 3.0.0 on-disk format.
+Layout computation for the 4.0.0 on-disk format.
 
-Format 3.0.0 replaces the three parallel particle tables of 2.x with a single
-``particles`` table plus one flat point array.  A particle row carries its own
-identity and, when it represents a group, that group's columns as well:
+One ``particles`` table plus one flat point array.  A particle row carries its
+own identity and kinematics and, when it represents a group, that group's
+columns as well:
 
     frag_id / inst_id    the *particle id of the group's representative*.
                          A representative therefore satisfies ``frag_id == id``,
                          which is how the levels are enumerated.  ``-1`` means
                          the particle heads no group at that level.
-    *_pc_start/end       the group's slice of the point array
+    frag_pc_start/end    the fragment's slice of the point array
+    inst_pc_start / inst_pc_le_start / inst_pc_end
+                         the instance's slice, non-LE points first: non-LE in
+                         [start, le_start), LE in [le_start, end)
     *_merge_count        Geant4 particles merged into the group
+
+LE is a property of the *fragment*: a point is LE when the fragment holding
+it is a ``kLEScatter`` fragment -- a blob with no trajectory.  A low-energy
+scatter absorbed into a non-LE fragment by proximity has become part of a
+trajectory and is not LE, whatever its own ``sem_type`` says.  So a fragment
+is wholly LE or wholly not, and one range describes it.  This holds because
+proximity is the only way stage 1 puts an LE particle into a non-LE
+fragment: PhotonDecay takes a photon's conversion pair only, not its Compton
+electrons or photoelectron.  LE fragments that join an instance by genealogy
+-- the Compton blobs of a photon inside a shower -- stay LE.
+
+Kinematics: ``mass``, ``start_*`` and ``end_*`` are the row's own Geant4
+particle's.  ``first_*`` and ``last_*`` describe an *instance* and are on
+instance rows only; see :mod:`pysupera.kinematics`.
 
 This module does the part that has to be right before any bytes are written:
 deciding which particles to store, what order the points go in, and what those
@@ -18,7 +35,7 @@ ranges are.  It is deliberately free of HDF5 so it can be tested directly.
 
 Two invariants it establishes
 -----------------------------
-*Nesting.*  Points are ordered by ``(interaction, instance, fragment,
+*Nesting.*  Points are ordered by ``(interaction, instance, LE, fragment,
 particle)``.  Because instances partition into fragments and fragments into
 particles, every level's points are then a single contiguous slice, so one
 ``(start, end)`` pair per level suffices and no per-point group labels are
@@ -47,6 +64,34 @@ from .utils import SemanticType as _ST
 #: Low-energy scatter.  Sorting on this splits each instance into a non-LE
 #: block followed by an LE block; see build_layout.
 _LE_SEM = _ST.kLEScatter
+
+#: Kinematic columns, each (rows, 4) float64.
+KINEMATICS_COLUMNS = ("start_pos", "start_mom", "first_pos", "first_mom",
+                      "last_pos", "last_mom", "end_pos", "end_mom")
+
+#: The ones joined from the row's Geant4 particle; see
+#: :func:`pysupera.readers.format_edepsim_h5.particle_kinematics`.
+TRACK_KINEMATICS_COLUMNS = ("start_pos", "start_mom", "end_pos", "end_mom")
+
+#: The ones an instance row takes from its instance; see
+#: :func:`pysupera.kinematics.instance_kinematics`.
+INSTANCE_KINEMATICS_COLUMNS = ("first_pos", "first_mom", "last_pos",
+                               "last_mom")
+
+
+def fragment_le(particles, frag_groups):
+    """
+    ``{particle_id: bool}``: whether the particle's points are LE.
+
+    Decided by the fragment the particle ended up in, not by the particle:
+    see the module docstring.  A particle in no fragment falls back to its
+    own ``sem_type``.
+    """
+    le_frag = {g.rep_id: g.sem_type == _LE_SEM.value for g in frag_groups}
+    frag_of = _group_of(frag_groups)
+    return {int(p.id): (le_frag[frag_of[int(p.id)]] if int(p.id) in frag_of
+                        else p.sem_type is _LE_SEM)
+            for p in particles}
 
 
 #: A group's identity captured at a point in time: which particle represents
@@ -135,7 +180,8 @@ def _group_ranges(offsets, pos, frag_groups, inst_groups, is_le):
     unwritten instance's fragments sorts under its own id, so counting it
     would stretch the range over whatever particles sit in between -- rows
     the group does not own.  A group with no rows at all gets (-1, -1).
-    Returns ``(frag_rng, inst_rng, frag_nle, frag_le, inst_split)``.
+    Returns ``(frag_rng, inst_rng, inst_split)``; ``inst_split`` is where an
+    instance's LE run starts, its end when it has none.
     """
     def _span(members):
         """Range covering *members*' rows, or (-1, -1) when they have none."""
@@ -146,36 +192,23 @@ def _group_ranges(offsets, pos, frag_groups, inst_groups, is_le):
         lo, hi = min(idx), max(idx)
         return (int(offsets[lo]), int(offsets[hi + 1]))
 
-    def whole(groups):
-        rng = {}
-        for g in groups:
-            r = _span(g.member_ids)
-            rng[g.rep_id] = (0, 0) if r == (-1, -1) else r
-        return rng
-
-    frag_rng = whole(frag_groups)
-    inst_rng = whole(inst_groups)
-
-    # Each side of a group is a single run under this ordering, so two pairs
-    # describe a fragment completely -- never three.
-    frag_nle = {g.rep_id: _span([m for m in g.member_ids if not is_le[m]])
-                for g in frag_groups}
-    frag_le  = {g.rep_id: _span([m for m in g.member_ids if is_le[m]])
-                for g in frag_groups}
+    frag_rng = {g.rep_id: _span(g.member_ids) for g in frag_groups}
+    inst_rng = {g.rep_id: _span(g.member_ids) for g in inst_groups}
     # Where the LE block starts inside an instance; == its end when the
-    # instance has no LE rows at all.
+    # instance has no LE rows at all, and -1 when it has no rows.
     inst_split = {}
     for g in inst_groups:
+        s, e = inst_rng[g.rep_id]
         le_span = _span([m for m in g.member_ids if is_le[m]])
-        inst_split[g.rep_id] = (inst_rng[g.rep_id][1] if le_span[0] < 0
+        inst_split[g.rep_id] = (-1 if s < 0 else e if le_span[0] < 0
                                 else le_span[0])
     _check_ranges(offsets, pos, frag_groups, inst_groups, is_le,
-                  frag_nle, frag_le, inst_rng, inst_split)
-    return frag_rng, inst_rng, frag_nle, frag_le, inst_split
+                  frag_rng, inst_rng, inst_split)
+    return frag_rng, inst_rng, inst_split
 
 
 def _check_ranges(offsets, pos, frag_groups, inst_groups, is_le,
-                  frag_nle, frag_le, inst_rng, inst_split):
+                  frag_rng, inst_rng, inst_split):
     """
     Raise unless every range holds exactly its own members' rows.
 
@@ -186,24 +219,29 @@ def _check_ranges(offsets, pos, frag_groups, inst_groups, is_le,
     with the members' own counts catches every such case, and costs one
     pass over data already in hand.
     """
-    def own(members, le):
+    def own(members, le=None):
         return sum(int(offsets[pos[m] + 1] - offsets[pos[m]])
-                   for m in members if m in pos and is_le[m] is le)
+                   for m in members
+                   if m in pos and (le is None or is_le[m] is le))
 
     def width(r):
         return r[1] - r[0] if r[0] >= 0 else 0
 
     for g in frag_groups:
-        for le, r in ((False, frag_nle[g.rep_id]), (True, frag_le[g.rep_id])):
-            if width(r) != own(g.member_ids, le):
-                raise LayoutError(
-                    f"fragment {g.rep_id}: {'LE' if le else 'non-LE'} range "
-                    f"{r} holds {width(r)} rows but its members own "
-                    f"{own(g.member_ids, le)} -- they are not contiguous in "
-                    f"the storage order.")
+        sides = {is_le[m] for m in g.member_ids if m in is_le}
+        if len(sides) > 1:
+            raise LayoutError(
+                f"fragment {g.rep_id} mixes LE and non-LE members, but LE is "
+                f"decided per fragment.")
+        r = frag_rng[g.rep_id]
+        if width(r) != own(g.member_ids):
+            raise LayoutError(
+                f"fragment {g.rep_id}: range {r} holds {width(r)} rows but "
+                f"its members own {own(g.member_ids)} -- they are not "
+                f"contiguous in the storage order.")
     for g in inst_groups:
         (s, e), sp = inst_rng[g.rep_id], inst_split[g.rep_id]
-        got = ((sp - s, e - sp) if e > s else (0, 0))
+        got = ((sp - s, e - sp) if s >= 0 else (0, 0))
         want = (own(g.member_ids, False), own(g.member_ids, True))
         if got != want:
             raise LayoutError(
@@ -213,7 +251,7 @@ def _check_ranges(offsets, pos, frag_groups, inst_groups, is_le,
 
 
 def build_layout(particles, frag_groups, inst_groups, vertices=None,
-                 keep=()):
+                 keep=(), kinematics=None, inst_kinematics=None):
     """
     Decide storage order, row selection and group ranges for one event.
 
@@ -237,6 +275,17 @@ def build_layout(particles, frag_groups, inst_groups, vertices=None,
     keep : iterable of int
         Particle ids that must get a row whatever their points -- the
         fragments and instances something else refers to (hit_labels).
+    kinematics : dict or None
+        The reader's ``last_kinematics``: ``mass`` and every
+        :data:`TRACK_KINEMATICS_COLUMNS` entry per input particle, joined to
+        the rows on ``geant4_trackid``.  The pieces defragmentation splits
+        off a track share its Geant4 particle, and so these.  Rows it does
+        not cover -- and every row when it is None -- get NaN.
+    inst_kinematics : dict or None
+        ``{instance rep id: {name: (4,)}}`` for the
+        :data:`INSTANCE_KINEMATICS_COLUMNS`, from
+        :func:`pysupera.kinematics.instance_kinematics`.  Only instance rows
+        take them; every other row gets NaN.
 
     Returns
     -------
@@ -247,14 +296,14 @@ def build_layout(particles, frag_groups, inst_groups, vertices=None,
     inst_of = _group_of(inst_groups)
     kept_inst_ids = {g.rep_id for g in inst_groups}
 
-    # ---- ordering: interaction > instance > fragment > particle ----------
+    # ---- ordering: interaction > instance > LE > fragment > particle ------
     # LE-ness sorts *between* instance and fragment, so each instance becomes
     # a non-LE block followed by an LE block.  That makes "the non-LE points of
     # this instance" -- the query panoptic training issues most -- a single
     # contiguous slice instead of a mask, and removes the need for any
     # per-point label: LE-ness is implied by position relative to the split.
-    # The cost is that a fragment's points become two runs rather than one.
-    is_le = {int(p.id): (p.sem_type is _LE_SEM) for p in particles}
+    # LE is decided per fragment, so a fragment stays one run.
+    is_le = fragment_le(particles, frag_groups)
 
     # Points belong to the interaction of the group that owns them, not of
     # the particle that deposited them.  The two differ only when a
@@ -280,7 +329,7 @@ def build_layout(particles, frag_groups, inst_groups, vertices=None,
     pos = {int(p.id): k for k, p in enumerate(order)}
 
     pc_offsets = _offsets(order, "point_cloud")
-    frag_rng, inst_rng, frag_nle, frag_le, inst_split = _group_ranges(
+    frag_rng, inst_rng, inst_split = _group_ranges(
         pc_offsets, pos, frag_groups, inst_groups, is_le)
 
     frag_count = {g.rep_id: len(g.member_ids) for g in frag_groups}
@@ -372,22 +421,45 @@ def build_layout(particles, frag_groups, inst_groups, vertices=None,
         # group columns: valid where *_id == id
         "frag_id":          col(lambda i: i if i in frag_ids else -1),
         "frag_sem_type":    col(lambda i: sem(i, frag_sem), np.int8),
-        "frag_pc_start":    col(lambda i: frag_nle.get(i, (-1, -1))[0], np.int64),
-        "frag_pc_end":      col(lambda i: frag_nle.get(i, (-1, -1))[1], np.int64),
-        "frag_pc_le_start": col(lambda i: frag_le.get(i, (-1, -1))[0], np.int64),
-        "frag_pc_le_end":   col(lambda i: frag_le.get(i, (-1, -1))[1], np.int64),
+        # One run: the fragment is wholly LE (frag_sem_type kLEScatter) or not.
+        "frag_pc_start":    col(lambda i: frag_rng.get(i, (-1, -1))[0], np.int64),
+        "frag_pc_end":      col(lambda i: frag_rng.get(i, (-1, -1))[1], np.int64),
         "frag_merge_count": col(lambda i: frag_count.get(i, -1)),
         "inst_id":          col(lambda i: i if i in kept_inst_ids else -1),
         "inst_sem_type":    col(lambda i: sem(i, inst_sem), np.int8),
-        # Non-LE run then LE run.  They are adjacent here, so
-        # inst_pc_end == inst_pc_le_start; the pair is spelled out anyway so
-        # instance and fragment level read identically.
-        "inst_pc_start":    col(lambda i: inst_rng.get(i, (-1, -1))[0]),
-        "inst_pc_end":      col(lambda i: inst_split.get(i, -1), np.int64),
+        # Three fenceposts: non-LE in [start, le_start), LE in [le_start, end).
+        "inst_pc_start":    col(lambda i: inst_rng.get(i, (-1, -1))[0], np.int64),
         "inst_pc_le_start": col(lambda i: inst_split.get(i, -1), np.int64),
-        "inst_pc_le_end":   col(lambda i: inst_rng.get(i, (-1, -1))[1]),
+        "inst_pc_end":      col(lambda i: inst_rng.get(i, (-1, -1))[1], np.int64),
         "inst_merge_count": col(lambda i: inst_count.get(i, -1)),
     }
+
+    # ---- kinematics ----------------------------------------------------------
+    # start/end per Geant4 particle, so every piece of a split track carries
+    # its track's; first/last per instance, on instance rows.
+    n_rows = len(rows)
+    columns["mass"] = np.full(n_rows, np.nan, dtype=np.float64)
+    for name in KINEMATICS_COLUMNS:
+        columns[name] = np.full((n_rows, 4), np.nan, dtype=np.float64)
+    if kinematics is not None and n_rows:
+        k_of = {int(t): k for k, t in enumerate(kinematics["geant4_trackid"])}
+        src = np.fromiter(
+            (k_of.get(int(getattr(by_id[int(order[r].id)], "geant4_id",
+                                  order[r].id)), -1) for r in rows),
+            dtype=np.int64, count=n_rows)
+        hit = src >= 0
+        columns["mass"][hit] = np.asarray(kinematics["mass"],
+                                          dtype=np.float64)[src[hit]]
+        for name in TRACK_KINEMATICS_COLUMNS:
+            columns[name][hit] = np.asarray(kinematics[name],
+                                            dtype=np.float64)[src[hit]]
+    if inst_kinematics:
+        for k, rid in enumerate(row_ids):
+            ik = inst_kinematics.get(rid) if rid in kept_inst_ids else None
+            if ik is None:
+                continue
+            for name in INSTANCE_KINEMATICS_COLUMNS:
+                columns[name][k] = ik[name]
     # The instance a fragment belongs to, stated rather than left to be
     # inferred from where its points sit: hit_labels names fragments and
     # instances, and a reader should not need the point ranges to join them.

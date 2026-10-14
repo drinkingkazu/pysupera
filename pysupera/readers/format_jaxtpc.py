@@ -102,6 +102,7 @@ from .format_edepsim_h5 import (
     _get_interaction_type,
     _get_ancestor_id,
     _to_index_space,
+    particle_kinematics,
 )
 from ..data import Particle
 from ..utils import PointFeature
@@ -597,6 +598,10 @@ class JaxtpcHDF5Reader(EventReaderBase):
         self.last_truth_segments = None
         self._step_key = step_key
         self._want_truth = bool(truth_segments)
+        #: Which steps first_* / last_* are taken from.
+        self.kinematics_steps = "visible"
+        self.last_kinematics = None
+        self.last_steps = None
 
         self._edepsim_path = edepsim_path
         self._seg_path     = seg_path
@@ -666,6 +671,9 @@ class JaxtpcHDF5Reader(EventReaderBase):
         #: vertices of the most recently read event, for the interactions table
         self.last_vertices = verts
         parts = self._edepsim_file[self._part_key][index]
+        # The EDepSim steps: the truth cloud is read from them, and the
+        # first/last-step kinematics.
+        steps = self._edepsim_file[self._step_key][index]
 
         # ── Step 2: load per-volume segment data from the JAXTPC seg file ─
         # Each volume dict contains positions_mm (N,3), de, dx, t0_us, …
@@ -698,7 +706,7 @@ class JaxtpcHDF5Reader(EventReaderBase):
             self.last_n_groups = _hstats['n_groups']
             self.last_deposit_volume_offsets = []
             self.last_truth_segments = (
-                self._truth_segments(index, event_key, seg_volumes, _g_offs)
+                self._truth_segments(steps, event_key, seg_volumes, _g_offs)
                 if self._want_truth else None)
             self.last_planes = self._plane_entries(event_key, _g_offs,
                                                    self._on_sensor)
@@ -747,6 +755,11 @@ class JaxtpcHDF5Reader(EventReaderBase):
 
         _ids, _par, _root, _g4 = _to_index_space(parts, _get_ancestor_id(parts))
 
+        #: per-particle kinematics of the event just read, in *parts* order
+        #: (see particle_kinematics), plus ``geant4_trackid`` to join on
+        self.last_kinematics = dict(particle_kinematics(parts),
+                                    geant4_trackid=_g4)
+
         # ── Deposit provenance for this event ────────────────────────────
         # deposit_to_group is per volume; concatenate it onto the same
         # event-global index the point clouds now carry, and do the same for
@@ -757,11 +770,23 @@ class JaxtpcHDF5Reader(EventReaderBase):
                 self._load_deposit_groups(event_key, seg_volumes)
             self.last_deposit_volume_offsets = volume_offsets
             self.last_truth_segments = (
-                self._truth_segments(index, event_key, seg_volumes,
+                self._truth_segments(steps, event_key, seg_volumes,
                                      self.last_group_volume_offsets)
                 if self._want_truth else None)
             self.last_planes = self._plane_entries(
                 event_key, self.last_group_volume_offsets, None)
+
+        #: The event's steps, for the instance first/last kinematics
+        #: (pysupera.kinematics): the records, the *parts* row that made
+        #: each, which count (the readout saw them), and each one's
+        #: event-global group -- a step goes to the particle owning its
+        #: group, as its segment does in the truth cloud.
+        self.last_steps = dict(
+            steps=steps,
+            owner=self._step_owner(steps, parts),
+            counted=self._visible_steps(steps, event_key, seg_volumes),
+            group=self._step_groups(steps, event_key, seg_volumes,
+                                    self.last_group_volume_offsets))
 
         _particles = Particle.from_flat_arrays(
             ids                 = _ids,
@@ -889,29 +914,22 @@ class JaxtpcHDF5Reader(EventReaderBase):
                         f"config.{k} is {va!r} in {self._sensor_path} and "
                         f"{vb!r} in {self._inst_path}.")
 
-    def _truth_segments(self, index, event_key, seg_volumes, g_offs):
+    def _matched_steps(self, steps, event_key, seg_volumes):
         """
-        Every segment of the event, with its event-global group.
+        Yield ``(v, vol_group, seg_to_group_key, idx)`` per volume: the
+        EDepSim step behind each of the volume's segments, as indices into
+        *steps*.
 
-        The values come from the EDepSim step each segment was made from, at
-        full precision: the seg file stores positions on a 0.3 mm grid and
-        the rest as float16.
         JAXTPC splits the step list into volumes by position and keeps the
         order within each, so segment k of volume v is the k-th step lying
         in volume v.  That is checked, not assumed: the counts must agree
         and the positions must match to the seg file's quantisation.
-
-        Columns: :data:`TRUTH_COLUMNS` -- x, y, z [mm], t [us], dE [MeV],
-        dX [cm], theta, phi [rad] (theta from the z axis, the convention the
-        steps follow), |p| [MeV/c].
         """
-        steps = self._edepsim_file[self._step_key][index]
         pos = np.c_[steps['x'], steps['y'], steps['z']].astype(np.float32)
         # JAXTPC's volume test, in its own arithmetic: float32 cm, half-open.
         cm = pos / np.float32(10.0)
         ranges = self._volume_ranges()
         ev = self._inst_file[event_key]
-        flats, groups = [], []
         for v, sv in enumerate(seg_volumes):
             n = int(sv.get('n_actual', 0) or 0)
             vg = ev.get(f'volume_{v}')
@@ -938,9 +956,29 @@ class JaxtpcHDF5Reader(EventReaderBase):
                     f"{event_key}/volume_{v}: segments sit up to {off:.2f} mm "
                     f"from the EDepSim steps matched to them, beyond the seg "
                     f"file's 0.3 mm quantisation -- not the same steps.")
+            yield v, vg, key, idx
+
+    def _truth_segments(self, steps, event_key, seg_volumes, g_offs):
+        """
+        Every segment of the event, with its event-global group.
+
+        The values come from the EDepSim step each segment was made from, at
+        full precision: the seg file stores positions on a 0.3 mm grid and
+        the rest as float16.  See :meth:`_matched_steps` for the matching.
+
+        Columns: :data:`TRUTH_COLUMNS` -- x, y, z [mm], t [us], dE [MeV],
+        dX [cm], theta, phi [rad] (theta from the z axis, the convention the
+        steps follow), |p| [MeV/c].
+        """
+        flats, groups = [], []
+        for v, vg, key, idx in self._matched_steps(steps, event_key,
+                                                   seg_volumes):
+            n = len(idx)
             st = steps[idx]
             f = np.empty((n, len(TRUTH_COLUMNS)), dtype=np.float32)
-            f[:, 0:3] = pos[idx]
+            f[:, 0] = st['x']
+            f[:, 1] = st['y']
+            f[:, 2] = st['z']
             f[:, 3] = st['t'] / 1000.0                    # ns -> us
             f[:, 4] = st['de']
             f[:, 5] = st['dx'] / 10.0                     # mm -> cm
@@ -954,6 +992,52 @@ class JaxtpcHDF5Reader(EventReaderBase):
             return (np.zeros((0, len(TRUTH_COLUMNS)), dtype=np.float32),
                     np.zeros(0, dtype=np.int64))
         return np.concatenate(flats), np.concatenate(groups)
+
+    def _visible_steps(self, steps, event_key, seg_volumes):
+        """
+        Per EDepSim step, whether the readout saw it: its segment's group
+        left an entry on some readout plane of its volume -- the same test
+        the deposit-mode visibility pass applies.  Steps outside every
+        volume were never simulated by JAXTPC and count as unseen.
+        """
+        import h5py
+        seen = np.zeros(len(steps), dtype=bool)
+        for v, vg, key, idx in self._matched_steps(steps, event_key,
+                                                   seg_volumes):
+            active = [vg[k]['group_ids'][:] for k in vg
+                      if isinstance(vg[k], h5py.Group) and 'group_ids' in vg[k]]
+            if not active:
+                continue
+            g = vg[key][:len(idx)]
+            seen[idx[np.isin(g, np.unique(np.concatenate(active)))]] = True
+        return seen
+
+    def _step_owner(self, steps, parts):
+        """Per EDepSim step, the row of *parts* that made it; -1 for none."""
+        if 'track_id' not in (steps.dtype.names or ()):
+            raise KeyError(
+                f"{self._step_key} has no track_id field, so a step cannot "
+                f"be given to its particle for the first/last-step "
+                f"kinematics.")
+        tids = np.asarray(parts['track_id'], dtype=np.int64)
+        st = np.asarray(steps['track_id'], dtype=np.int64)
+        if not len(tids):
+            return np.full(len(st), -1, dtype=np.int64)
+        order = np.argsort(tids, kind='stable')
+        k = np.clip(np.searchsorted(tids[order], st), 0, len(tids) - 1)
+        return np.where(tids[order][k] == st, order[k], -1)
+
+    def _step_groups(self, steps, event_key, seg_volumes, g_offs):
+        """
+        Per EDepSim step, the event-global group of its segment; -1 for a
+        step outside every volume.  See :meth:`_matched_steps`.
+        """
+        out = np.full(len(steps), -1, dtype=np.int64)
+        for v, vg, key, idx in self._matched_steps(steps, event_key,
+                                                   seg_volumes):
+            out[idx] = (vg[key][:len(idx)].astype(np.int64)
+                        + int(g_offs[v] if v < len(g_offs) else 0))
+        return out
 
     def _plane_entries(self, event_key, g_offs, on_sensor):
         """

@@ -1,5 +1,5 @@
 """
-Round-trip tests for the 3.0.0 format.
+Round-trip tests for the 4.0.0 format.
 
 These check the two properties the schema exists to provide: that every level's
 points are a single contiguous slice, and that a stored particle's genealogy
@@ -113,20 +113,19 @@ class TestGroupSemantics:
             assert len(v.points_of(r, "inst", le=True)) == e - sp
             assert len(v.points_of(r, "inst")) == e - a
 
-    def test_fragment_sides_sit_inside_their_instance(self, tmp_path):
+    def test_fragments_sit_inside_their_instance(self, tmp_path):
         path = write(tmp_path)
         with read_events_v3(path) as s:
             v = s[0]
         inst = {int(v["id"][r]): r for r in np.flatnonzero(v.is_instance)}
         for r in np.flatnonzero(v.is_fragment):
-            ir = inst.get(int(v["inst_id"][r]))
+            ir = inst.get(int(v["frag_inst_id"][r]))
             if ir is None:
                 continue
             lo, hi = int(v["inst_pc_start"][ir]), int(v["inst_pc_end"][ir])
-            for pre in ("frag_pc", "frag_pc_le"):
-                a, b = int(v[f"{pre}_start"][r]), int(v[f"{pre}_end"][r])
-                if a >= 0:
-                    assert lo <= a <= b <= hi
+            a, b = int(v["frag_pc_start"][r]), int(v["frag_pc_end"][r])
+            if a >= 0:
+                assert lo <= a <= b <= hi
 
     def test_instance_points_cover_every_member(self, tmp_path):
         parts, frags, insts = chain_event()
@@ -211,8 +210,16 @@ class TestErrors:
         from pysupera import write_events
         old = str(tmp_path / "old.h5")
         write_events(old, [[make_particle(0, PT_TRACK)]])
-        with pytest.raises(ValueError, match="not 3.x"):
+        with pytest.raises(ValueError, match="not 4.x"):
             EventStoreV3(old)
+
+    def test_rejects_3x_file_and_says_to_regenerate(self, tmp_path):
+        path = write(tmp_path)
+        with h5py.File(path, "a") as f:
+            del f["format_version"]
+            f.create_dataset("format_version", data="3.3.0")
+        with pytest.raises(ValueError, match="Regenerate"):
+            EventStoreV3(path)
 
     def test_event_index_out_of_range(self, tmp_path):
         path = write(tmp_path)
@@ -233,10 +240,9 @@ class TestPointCoverage:
             v = s[0]
         covered = np.zeros(len(v.points), bool)
         for k in np.flatnonzero(v.is_fragment):
-            for pre in ("frag_pc", "frag_pc_le"):
-                a, b = int(v[f"{pre}_start"][k]), int(v[f"{pre}_end"][k])
-                if a >= 0:
-                    covered[a:b] = True
+            a, b = int(v["frag_pc_start"][k]), int(v["frag_pc_end"][k])
+            if a >= 0:
+                covered[a:b] = True
         assert covered.all(), f"{(~covered).sum()} points unreachable"
 
 
@@ -378,7 +384,7 @@ class TestRangesHoldOnlyOwnRows:
         assert 1 not in cols
         k = cols[2]
         c = lay.columns
-        assert (c["frag_pc_le_start"][k], c["frag_pc_le_end"][k]) == (0, 5)
+        assert (c["frag_pc_start"][k], c["frag_pc_end"][k]) == (0, 5)
 
     def test_a_cross_interaction_absorption_is_stored_with_the_absorber(self):
         """
@@ -400,9 +406,11 @@ class TestRangesHoldOnlyOwnRows:
         col, row = lay.columns, {int(i): k for k, i in
                                  enumerate(lay.columns["id"])}
         rb = row[1]
-        # a's points are b's: inside b's instance (LE side) and fragment
-        assert col["inst_pc_le_end"][rb] - col["inst_pc_le_start"][rb] == 2
-        assert col["frag_pc_le_end"][rb] - col["frag_pc_le_start"][rb] == 2
+        # a's points are b's: inside b's fragment, and -- b's fragment being
+        # a track -- on the non-LE side of b's instance
+        assert col["frag_pc_end"][rb] - col["frag_pc_start"][rb] == 5
+        assert col["inst_pc_le_start"][rb] - col["inst_pc_start"][rb] == 5
+        assert col["inst_pc_end"][rb] == col["inst_pc_le_start"][rb]
         # the absorbed particle's row keeps interaction 0, beside c's
         assert 2 in row
         inter = lay.interactions
@@ -605,3 +613,166 @@ class TestColumnsAndHitLabels:
         ids = lambda lay: {int(i) for i in lay.columns["id"]}
         assert 0 not in ids(build_layout(parts, frags, insts))
         assert 0 in ids(build_layout(parts, frags, insts, keep={0}))
+
+
+class TestLeIsDecidedPerFragment:
+    """
+    A point is LE when its fragment is a kLEScatter blob.  A low-energy
+    scatter absorbed into a track by proximity is part of the track's
+    trajectory and is not; an LE fragment that only joined an instance
+    through parentage still is.
+    """
+
+    @staticmethod
+    def event():
+        from pysupera.utils import SemanticType as ST
+        # track 1 absorbed LE particle 2 (one fragment, non-LE); LE blob 3
+        # stands alone as a fragment and is grouped into 1's instance
+        t1 = make_particle(1, PT_TRACK, n_pts=3, interaction_id=0)
+        a2 = make_particle(2, PT_TRACK, n_pts=2, interaction_id=0,
+                           parent_id=1, ancestor_id=1)
+        b3 = make_particle(3, PT_TRACK, n_pts=4, interaction_id=0,
+                           parent_id=1, ancestor_id=1)
+        t1.sem_type = ST.kTrack
+        a2.sem_type = b3.sem_type = ST.kLEScatter
+        t1.member_ids, b3.member_ids = [1, 2], [3]
+        frags = snapshot_groups([t1, b3])
+        t1.member_ids = [1, 2, 3]
+        insts = snapshot_groups([t1])
+        return [t1, a2, b3], frags, insts
+
+    def test_absorbed_le_is_not_le_but_an_le_fragment_is(self):
+        from pysupera.layout import fragment_le
+        parts, frags, _ = self.event()
+        assert fragment_le(parts, frags) == {1: False, 2: False, 3: True}
+
+    def test_the_instance_split_holds_only_le_fragments(self, tmp_path):
+        parts, frags, insts = self.event()
+        path = write(tmp_path, events=[(parts, frags, insts)])
+        with read_events_v3(path) as s:
+            v = s[0]
+        r = int(np.flatnonzero(v.is_instance)[0])
+        a, sp, e = (int(v["inst_pc_start"][r]), int(v["inst_pc_le_start"][r]),
+                    int(v["inst_pc_end"][r]))
+        assert (sp - a, e - sp) == (5, 4)        # 1 + absorbed 2, then blob 3
+        assert v.is_le_point().sum() == 4
+        row = {int(i): k for k, i in enumerate(v["id"])}
+        assert len(v.points_of(row[1], "frag")) == 5
+        assert len(v.points_of(row[1], "frag", le=True)) == 0
+        assert len(v.points_of(row[3], "frag", le=True)) == 4
+
+    def test_a_particles_own_sem_type_is_kept(self, tmp_path):
+        from pysupera.utils import SemanticType as ST
+        parts, frags, insts = self.event()
+        lay = build_layout(parts, frags, insts, keep={2})
+        c = lay.columns
+        row = {int(i): k for k, i in enumerate(c["id"])}
+        assert c["sem_type"][row[2]] == ST.kLEScatter.value
+
+    def test_hit_labels_follow_the_fragment(self):
+        from pysupera.hit_labels import build_hit_labels
+        parts, frags, insts = self.event()
+        planes = [{"volume": 0, "plane": 0, "source": "U",
+                   "group": np.array([0, 1, 2], dtype=np.int64)}]
+        owner = np.array([1, 2, 3], dtype=np.int32)    # group -> particle
+        lab = build_hit_labels(planes, parts, frags, insts, owner=owner)[0]
+        assert lab["is_le"].tolist() == [False, False, True]
+        assert lab["fragment_id"].tolist() == [1, 1, 3]
+
+    def test_a_fragment_mixing_sides_is_refused(self):
+        from pysupera.layout import _check_ranges, LayoutError, Group
+        frags = [Group(1, [1, 2], 0)]
+        with pytest.raises(LayoutError, match="mixes"):
+            _check_ranges(np.array([0, 1, 2]), {1: 0, 2: 1}, frags, [],
+                          {1: False, 2: True}, {1: (0, 2)}, {}, {})
+
+
+class TestKinematics:
+
+    @staticmethod
+    def records():
+        """Two particles; the second makes two steps along +z."""
+        P = np.zeros(3, dtype=[(c, "f4") for c in (
+            "x", "y", "z", "t", "px", "py", "pz", "ke", "end_x", "end_y",
+            "end_z", "end_t", "end_px", "end_py", "end_pz", "end_ke", "mass")]
+            + [("track_id", "i4")])
+        P["track_id"] = [5, 7, 9]
+        P["mass"] = [0.511, 105.658, 0.0]
+        P["ke"] = [1.0, 200.0, 2.0]
+        P["pz"][1] = 290.0
+        P["end_ke"][1] = 3.0
+        S = np.zeros(3, dtype=[(c, "f4") for c in (
+            "x", "y", "z", "t", "theta", "phi", "p", "dx")])
+        S["z"] = [10.0, 10.5, 50.0]
+        S["t"] = [1.0, 1.1, 2.0]
+        S["dx"] = [0.4, 0.6, 1.0]
+        S["p"] = [290.0, 289.0, 2.0]
+        owner = np.array([1, 1, 2])
+        return P, S, owner
+
+    def test_step_ends_are_half_a_step_from_the_midpoint(self):
+        from pysupera.readers.format_edepsim_h5 import step_ends
+        P, S, owner = self.records()
+        mass = np.asarray(P["mass"], dtype=np.float64)[owner]
+        pos, mom = step_ends(S, [0, 1, 2], mass, -1.0)
+        assert pos[0, 2] == pytest.approx(10.0 - 0.2)
+        # time moves by dx/2 at the step's speed
+        e = np.hypot(290.0, 105.658)
+        assert pos[0, 3] == pytest.approx(
+            1.0 - 0.2 / (290.0 / e * 299.792458), rel=1e-6)
+        assert mom[0].tolist() == pytest.approx([0, 0, 290.0, e], rel=1e-6)
+        # a massless particle still has E = |p|
+        assert mom[2, 3] == pytest.approx(2.0)
+        pos, _ = step_ends(S, [1], mass[1:2], 1.0)
+        assert pos[0, 2] == pytest.approx(10.5 + 0.3)
+
+    def test_creation_and_destruction_energy_is_total(self):
+        from pysupera.readers.format_edepsim_h5 import particle_kinematics
+        P, _, _ = self.records()
+        k = particle_kinematics(P)
+        assert k["start_mom"][1, 3] == pytest.approx(305.658, rel=1e-6)
+        assert k["end_mom"][1, 3] == pytest.approx(108.658, rel=1e-6)
+        assert "first_pos" not in k            # made per instance, later
+
+    def test_layout_joins_on_the_track_and_writes_float64(self, tmp_path):
+        from pysupera.readers.format_edepsim_h5 import particle_kinematics
+        from pysupera.layout import KINEMATICS_COLUMNS
+        P, _, _ = self.records()
+        kin = dict(particle_kinematics(P), geant4_trackid=P["track_id"])
+        parts, frags, insts = chain_event()
+        g4 = {0: 5, 1: 7, 2: 7, 3: 99}         # 2 is a split piece of 7
+        for p in parts:
+            p.geant4_id = g4[int(p.id)]
+        first = np.array([1.0, 2.0, 3.0, 4.0])
+        ik = {1: {"first_pos": first, "first_mom": first + 10,
+                  "last_pos": first + 20, "last_mom": first + 30}}
+        path = str(tmp_path / "kin.h5")
+        with open_writer_v3(path) as w:
+            w.append_event(build_layout(parts, frags, insts, keep={2},
+                                        kinematics=kin, inst_kinematics=ik))
+        with h5py.File(path) as f:
+            for c in KINEMATICS_COLUMNS:
+                assert f[f"particles/{c}"].dtype == np.float64
+                assert f[f"particles/{c}"].shape[1:] == (4,)
+            assert f["particles/mass"].dtype == np.float64
+        with read_events_v3(path) as s:
+            v = s[0]
+        row = {int(i): k for k, i in enumerate(v["id"])}
+        np.testing.assert_array_equal(v["start_mom"][row[1]],
+                                      kin["start_mom"][1])
+        # the split piece shares its track's Geant4 values
+        np.testing.assert_array_equal(v["end_pos"][row[2]],
+                                      kin["end_pos"][1])
+        assert v["mass"][row[0]] == pytest.approx(0.511, rel=1e-6)
+        assert np.isnan(v["start_pos"][row[3]]).all()   # unknown track
+        # first/last on the instance row only
+        np.testing.assert_array_equal(v["first_pos"][row[1]], first)
+        np.testing.assert_array_equal(v["last_mom"][row[1]], first + 30)
+        for i in (0, 2, 3):
+            assert np.isnan(v["first_pos"][row[i]]).all()
+
+    def test_without_kinematics_the_columns_are_nan(self, tmp_path):
+        with read_events_v3(write(tmp_path)) as s:
+            v = s[0]
+        assert v["start_pos"].shape == (len(v), 4)
+        assert np.isnan(v["start_pos"]).all() and np.isnan(v["mass"]).all()

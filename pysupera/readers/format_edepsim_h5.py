@@ -207,6 +207,142 @@ _DEFAULT_ELECTRON_ENERGY_THRESHOLD = 0.05   # MeV
 
 
 # ---------------------------------------------------------------------------
+# Particle kinematics
+# ---------------------------------------------------------------------------
+
+#: Speed of light in mm/ns, the units of the step records.
+_C_MM_PER_NS = 299.792458
+
+#: Per-particle kinematic arrays, each (N, 4) float64: positions are
+#: ``[x, y, z, t]`` (mm, ns) and momenta ``[px, py, pz, E]`` (MeV), E total.
+#: ``start_*`` / ``end_*`` describe the Geant4 particle and come from here;
+#: ``first_*`` / ``last_*`` describe a reconstructed instance and are made
+#: later, from the steps it collected (:mod:`pysupera.kinematics`).
+KINEMATICS_FIELDS = ("start_pos", "start_mom", "first_pos", "first_mom",
+                     "last_pos", "last_mom", "end_pos", "end_mom")
+
+#: The fields :func:`particle_kinematics` fills.
+TRACK_KINEMATICS_FIELDS = ("start_pos", "start_mom", "end_pos", "end_mom")
+
+
+def particle_kinematics(parts):
+    """
+    Creation and destruction kinematics of every Geant4 particle.
+
+    ``start_*`` / ``end_*`` come from the particle record, with one
+    correction: Geant4 records a photon that converts with zero momentum at
+    its end -- the state after it was killed.  Its ``end_mom`` is set to
+    its momentum just before converting instead: the start momentum less
+    what its Compton electrons carried off, energy the same way.  Compton
+    scattering is two-body, so this is exact up to the electron's binding
+    energy; Rayleigh scattering, which leaves no secondary, is invisible to
+    it.
+
+    Parameters
+    ----------
+    parts : structured ndarray
+        The event's particle records (``particle/geant4``).
+
+    Returns
+    -------
+    dict
+        ``mass`` (N,) float64 and every name in
+        :data:`TRACK_KINEMATICS_FIELDS`, (N, 4) float64.
+    """
+    f8 = lambda name: np.asarray(parts[name], dtype=np.float64)
+    mass = f8("mass")
+    out = {"mass": mass}
+    for pre, key in (("start", ""), ("end", "end_")):
+        out[f"{pre}_pos"] = np.stack([f8(key + c) for c in ("x", "y", "z", "t")], 1)
+        out[f"{pre}_mom"] = np.stack([f8(key + c) for c in ("px", "py", "pz")]
+                                     + [f8(key + "ke") + mass], 1)
+
+    names = parts.dtype.names or ()
+    if not {"proc_end", "subproc_end", "proc_start", "subproc_start",
+            "track_id", "parent_track_id"} <= set(names):
+        return out
+    em = int(G4ProcessType.kProcessElectromagnetic)
+    pdg = np.asarray(parts["pdg"])
+    conv = np.flatnonzero(
+        (pdg == 22) & (np.asarray(parts["proc_end"]) == em)
+        & (np.asarray(parts["subproc_end"])
+           == int(G4ProcessSubtype.kSubtypeEMGammaConversion)))
+    if not len(conv):
+        return out
+    compt = ((np.asarray(parts["proc_start"]) == em)
+             & (np.asarray(parts["subproc_start"])
+                == int(G4ProcessSubtype.kSubtypeEMComptonScattering)))
+    tid = np.asarray(parts["track_id"], dtype=np.int64)
+    ptid = np.asarray(parts["parent_track_id"], dtype=np.int64)
+    row = {int(t): k for k, t in enumerate(tid)}
+    lost = np.zeros((len(parts), 4))
+    ke = f8("ke")
+    for c in np.flatnonzero(compt):
+        k = row.get(int(ptid[c]))
+        if k is not None:
+            lost[k, :3] += out["start_mom"][c, :3]
+            lost[k, 3] += ke[c]
+    out["end_mom"][conv] = out["start_mom"][conv] - lost[conv]
+    return out
+
+
+def step_ends(steps, idx, mass, sign):
+    """
+    Where and with what momentum step(s) *idx* begin (*sign* -1) or end (+1).
+
+    A step record holds its *midpoint* -- measured, a particle's first step
+    sits half a ``dx`` from its creation point -- so an end is reached by
+    moving ``dx/2`` along the step's direction, as if the step were
+    straight, and the time by the matching ``dx/2 / (beta c)``.  The
+    momentum is the step's own ``p`` along that direction (theta from the z
+    axis), with ``E = sqrt(p^2 + m^2)``; it is not moved.
+
+    Parameters
+    ----------
+    steps : structured ndarray
+        Step records: x, y, z [mm], t [ns], theta, phi [rad], p [MeV/c],
+        dx [mm].
+    idx : ndarray of int
+        Which steps.
+    mass : ndarray of float
+        The mass of the particle that made each of them [MeV].
+    sign : float
+        -1 for the start of the step, +1 for its end.
+
+    Returns
+    -------
+    pos, mom : ndarray, (len(idx), 4) float64
+        ``[x, y, z, t]`` and ``[px, py, pz, E]``.
+    """
+    s = steps[np.asarray(idx, dtype=np.int64)]
+    th = np.asarray(s["theta"], dtype=np.float64)
+    ph = np.asarray(s["phi"], dtype=np.float64)
+    d = np.stack([np.sin(th) * np.cos(ph), np.sin(th) * np.sin(ph),
+                  np.cos(th)], 1)
+    p = np.asarray(s["p"], dtype=np.float64)
+    m = np.asarray(mass, dtype=np.float64)
+    e = np.sqrt(p * p + m * m)
+    half = 0.5 * np.asarray(s["dx"], dtype=np.float64)
+    beta = np.divide(p, e, out=np.zeros_like(p), where=e > 0)
+    dt = np.divide(half, beta * _C_MM_PER_NS, out=np.zeros_like(p),
+                   where=beta > 0)
+    pos = np.stack([np.asarray(s[c], dtype=np.float64)
+                    for c in ("x", "y", "z", "t")], 1)
+    pos[:, :3] += sign * half[:, None] * d
+    pos[:, 3] += sign * dt
+    return pos, np.c_[p[:, None] * d, e]
+
+
+def step_owner_from_ass(ass, n_parts, n_steps):
+    """Per step, the particle whose ``[start, end)`` slice holds it; -1 for none."""
+    owner = np.full(n_steps, -1, dtype=np.int64)
+    for i in range(min(n_parts, len(ass))):
+        a, b = int(ass["start"][i]), int(ass["end"][i])
+        owner[a:b] = i
+    return owner
+
+
+# ---------------------------------------------------------------------------
 # Internal helper functions
 # ---------------------------------------------------------------------------
 
@@ -621,6 +757,10 @@ class EDepSimHDF5Reader(EventReaderBase):
         # Cell size classification measures a cloud's extent in; see
         # pysupera.utils.count_extent for why rows will not do.
         self._voxel_size  = voxel_size
+        #: Which steps first_* / last_* are taken from.
+        self.kinematics_steps = "all"
+        self.last_kinematics = None
+        self.last_steps = None
         self._file        = h5py.File(path, "r")
         self._n_events    = len(self._file[self._part_key])
 
@@ -675,6 +815,20 @@ class EDepSimHDF5Reader(EventReaderBase):
 
 
         _ids, _par, _root, _g4 = _to_index_space(parts, _get_ancestor_id(parts))
+
+        #: per-particle kinematics of the event just read, in *parts* order
+        #: (see particle_kinematics), plus ``geant4_trackid`` to join on
+        self.last_kinematics = dict(particle_kinematics(parts),
+                                    geant4_trackid=_g4)
+        #: The event's steps, for the instance first/last kinematics
+        #: (pysupera.kinematics): the records, the *parts* row that made
+        #: each, and which count -- here all of them, there being no readout.
+        #: A step goes to the particle whose voxels hold it: a point's id is
+        #: its step index.
+        self.last_steps = dict(
+            steps=steps,
+            owner=step_owner_from_ass(ass, num_parts, len(steps)),
+            counted=None, group=None)
 
         return Particle.from_flat_arrays(
             ids                  = _ids,
