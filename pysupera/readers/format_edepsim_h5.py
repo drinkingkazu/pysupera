@@ -203,6 +203,7 @@ _DEFAULT_VERTEX_KEY   = "vertex/geant4"
 _DEFAULT_PARTICLE_KEY = "particle/geant4"
 _DEFAULT_STEP_KEY     = "pstep/lar_vol"
 _DEFAULT_ASS_KEY      = "ass/particle_pstep_lar_vol"
+_DEFAULT_PRIMARY_KEY  = "primary/geant4"
 _DEFAULT_ELECTRON_ENERGY_THRESHOLD = 0.05   # MeV
 
 
@@ -585,8 +586,81 @@ def _get_interaction_id(parts: np.ndarray, verts: np.ndarray) -> np.ndarray:
     return interaction_ids
 
 
+def read_primaries(h5file, key: str, index: int):
+    """
+    Track ids of the particles the generator made in event *index*.
+
+    Returns None when the file has no *key* table, so the caller can fall
+    back on :func:`primary_mask`'s parent-less rule.
+    """
+    if key not in h5file:
+        return None
+    return np.asarray(h5file[key][index]["track_id"], dtype=np.int64)
+
+
+def primary_mask(parts: np.ndarray, primary_track_ids=None):
+    """
+    Which rows of *parts* are generator primaries, and where the two
+    descriptions of a primary disagree.
+
+    A primary is a particle of the generator's own list (the primary table,
+    *primary_track_ids*).  Geant4 gives exactly those particles
+    ``parent_track_id == -1``, so the two are checked against each other.
+    Without the table the parent-less rows are taken for the primaries.
+
+    Returns
+    -------
+    mask : ndarray of bool, shape (N,)
+    check : dict or None
+        None without the table; otherwise three arrays of track ids, empty
+        when everything agrees -- ``parentless_not_primary`` (parent -1 but
+        not in the table), ``primary_with_parent`` (in the table but with a
+        parent) and ``primary_not_in_particles`` (in the table, absent from
+        *parts*).
+    """
+    tid = np.asarray(parts["track_id"], dtype=np.int64)
+    parentless = np.asarray(parts["parent_track_id"]) == -1
+    if primary_track_ids is None:
+        return parentless, None
+    prim = np.asarray(primary_track_ids, dtype=np.int64)
+    mask = np.isin(tid, prim)
+    return mask, dict(
+        parentless_not_primary=tid[parentless & ~mask],
+        primary_with_parent=tid[mask & ~parentless],
+        primary_not_in_particles=np.setdiff1d(prim, tid),
+    )
+
+
+#: What each kind of :func:`primary_mask` disagreement means, after "track N".
+PRIMARY_CHECK_TEXT = {
+    "parentless_not_primary": "with parent_track_id -1 but not in the "
+                              "primary table",
+    "primary_with_parent": "in the primary table but with a parent",
+    "primary_not_in_particles": "in the primary table but not among the "
+                                "particles",
+}
+
+
+def describe_primary_check(check) -> str:
+    """One line naming each disagreement in a :func:`primary_mask` check."""
+    parts = []
+    for k, text in PRIMARY_CHECK_TEXT.items():
+        ids = check[k]
+        if len(ids):
+            shown = ", ".join(str(int(i)) for i in ids[:5])
+            more = f", ... ({len(ids)})" if len(ids) > 5 else ""
+            parts.append(f"track {shown}{more} {text}")
+    return "; ".join(parts)
+
+
+def primary_check_failed(check) -> bool:
+    """Whether a :func:`primary_mask` check found any disagreement."""
+    return check is not None and any(len(v) for v in check.values())
+
+
 def _get_interaction_type(parts: np.ndarray,
-                          electron_energy_threshold: float = 0.05
+                          electron_energy_threshold: float = 0.05,
+                          is_primary=None,
                           ) -> np.ndarray:
     """
     Derive the pysupera :class:`~pysupera.utils.InteractionType` integer
@@ -605,6 +679,13 @@ def _get_interaction_type(parts: np.ndarray,
         Kinetic-energy threshold (MeV) separating kCompton-like low-energy
         electrons from kOtherShower-like higher-energy electrons when no
         cleaner process classification is available.
+    is_primary : ndarray of bool or None, optional
+        Which particles are generator primaries (:func:`primary_mask`).
+        A primary is ``kPrimary`` -- never LE, whatever its size -- unless
+        it is a neutron or a nucleus.  Its ``proc_start`` and
+        ``subproc_start`` are not read: Geant4 records no creator process
+        for a primary, and the fields hold whatever the converter wrote.
+        None takes the particles with ``parent_track_id == -1``.
 
     Returns
     -------
@@ -621,6 +702,9 @@ def _get_interaction_type(parts: np.ndarray,
     subproc_start = parts["subproc_start"]
     ke            = parts["ke"]
     parent_pdg    = _get_parent_pdg(parts)
+    if is_primary is None:
+        is_primary = primary_mask(parts)[0]
+    is_primary = np.asarray(is_primary, dtype=bool)
 
     parent_locs  = _search_parents(track_id, parent_tid)
     parent_valid = parent_locs != -1
@@ -648,7 +732,7 @@ def _get_interaction_type(parts: np.ndarray,
     conditions = [
         pdg == 2112,
         pdg > 1_000_000_000,
-        track_id == parent_tid,
+        is_primary,
         pdg == 22,
         # EM electrons — ordered from most specific to least specific
         is_electron & (proc_start == EM) & (subproc_start == PE),
@@ -715,6 +799,10 @@ class EDepSimHDF5Reader(EventReaderBase):
     ass_key : str, optional
         HDF5 dataset key for the particle-to-step association arrays.
         Default: ``"ass/particle_pstep_lar_vol"``.
+    primary_key : str, optional
+        HDF5 dataset key for the per-event generator primaries, which decide
+        ``kPrimary``.  Default: ``"primary/geant4"``.  A file without it
+        falls back on ``parent_track_id == -1``.
     electron_energy_threshold : float, optional
         Kinetic-energy threshold (MeV) used by the interaction-type
         classifier to separate low-energy from high-energy electrons when
@@ -740,6 +828,7 @@ class EDepSimHDF5Reader(EventReaderBase):
         *,
         vertex_key:   str = _DEFAULT_VERTEX_KEY,
         particle_key: str = _DEFAULT_PARTICLE_KEY,
+        primary_key: str  = _DEFAULT_PRIMARY_KEY,
         step_key: str     = _DEFAULT_STEP_KEY,
         ass_key: str      = _DEFAULT_ASS_KEY,
         electron_energy_threshold: float = _DEFAULT_ELECTRON_ENERGY_THRESHOLD,
@@ -750,6 +839,10 @@ class EDepSimHDF5Reader(EventReaderBase):
         self._path        = path
         self._vertex_key  = vertex_key
         self._part_key    = particle_key
+        self._primary_key = primary_key
+        #: The primary-table check of the event just read
+        #: (:func:`primary_mask`); None when the file has no primary table.
+        self.last_primary_check = None
         self._step_key    = step_key
         self._ass_key     = ass_key
         self._e_thresh    = electron_energy_threshold
@@ -806,7 +899,9 @@ class EDepSimHDF5Reader(EventReaderBase):
         ass   = self._file[self._ass_key][index]
 
         num_parts = len(parts)
-        itype     = _get_interaction_type(parts, self._e_thresh)
+        is_primary, self.last_primary_check = primary_mask(
+            parts, read_primaries(self._file, self._primary_key, index))
+        itype     = _get_interaction_type(parts, self._e_thresh, is_primary)
         int_ids   = _get_interaction_id(parts,verts)
         offsets   = np.column_stack([
             ass["start"][:num_parts],
@@ -895,6 +990,8 @@ class EDepSimHDF5Reader(EventReaderBase):
                                               _DEFAULT_STEP_KEY)),
             ass_key                   = str(r.get("ass_key",
                                               _DEFAULT_ASS_KEY)),
+            primary_key               = str(r.get("primary_key",
+                                              _DEFAULT_PRIMARY_KEY)),
             electron_energy_threshold = float(r.get(
                                               "electron_energy_threshold",
                                               _DEFAULT_ELECTRON_ENERGY_THRESHOLD)),

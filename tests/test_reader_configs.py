@@ -25,8 +25,8 @@ pytest.importorskip("h5py")
 READERS = ("edepsim_h5", "jaxtpc_wire", "jaxtpc_pixel")
 
 #: Keys the base defines and every variant must therefore inherit.
-SHARED_KEYS = ("format", "particle_key", "vertex_key", "step_key",
-               "ass_key", "electron_energy_threshold")
+SHARED_KEYS = ("format", "particle_key", "vertex_key", "primary_key",
+               "step_key", "ass_key", "electron_energy_threshold")
 
 
 def _cfg(name, *extra):

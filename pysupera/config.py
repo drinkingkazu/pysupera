@@ -578,6 +578,8 @@ def build_reader(cfg: DictConfig):
                                                 "vertex/geant4")),
                 particle_key              = str(cfg.reader.get("particle_key",
                                                 "particle/geant4")),
+                primary_key               = str(cfg.reader.get("primary_key",
+                                                "primary/geant4")),
                 electron_energy_threshold = float(cfg.reader.get(
                                                 "electron_energy_threshold", 0.05)),
                 min_pc_size               = int(cfg.particle.get("min_pc_size", -1)),
@@ -621,6 +623,8 @@ def build_reader(cfg: DictConfig):
                                              "vertex/geant4")),
             particle_key              = str(cfg.reader.get("particle_key",
                                              "particle/geant4")),
+            primary_key               = str(cfg.reader.get("primary_key",
+                                             "primary/geant4")),
             step_key                  = str(cfg.reader.get("step_key",
                                              "pstep/lar_vol")),
             ass_key                   = str(cfg.reader.get("ass_key",

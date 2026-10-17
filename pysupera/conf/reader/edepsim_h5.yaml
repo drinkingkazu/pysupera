@@ -35,6 +35,11 @@ particle_key: particle/geant4
 # Expected fields: x, y, z, t, interaction_id
 vertex_key: vertex/geant4
 
+# Per-event structured array of the generator's primaries.  A particle in it
+# is kPrimary, so never LE; it is cross-checked against parent_track_id == -1.
+# Expected fields: track_id.  A file without it falls back on that rule.
+primary_key: primary/geant4
+
 # Flat per-event energy-deposit step array (the point cloud).
 # Columns 0-2 must be x, y, z.  Not used in JAXTPC mode.
 step_key: pstep/lar_vol

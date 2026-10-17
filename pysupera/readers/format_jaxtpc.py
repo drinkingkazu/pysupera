@@ -94,6 +94,7 @@ except ImportError:
 
 from .base import EventReaderBase
 from .format_edepsim_h5 import (
+    _DEFAULT_PRIMARY_KEY,
     _DEFAULT_VERTEX_KEY,
     _DEFAULT_PARTICLE_KEY,
     _DEFAULT_ELECTRON_ENERGY_THRESHOLD,
@@ -103,6 +104,8 @@ from .format_edepsim_h5 import (
     _get_ancestor_id,
     _to_index_space,
     particle_kinematics,
+    primary_mask,
+    read_primaries,
 )
 from ..data import Particle
 from ..utils import PointFeature
@@ -472,6 +475,10 @@ class JaxtpcHDF5Reader(EventReaderBase):
     particle_key : str, optional
         HDF5 dataset key for per-event particle arrays in *edepsim_path*.
         Default: ``"particle/geant4"``.
+    primary_key : str, optional
+        HDF5 dataset key for the per-event generator primaries in
+        *edepsim_path*, which decide ``kPrimary``.  Default:
+        ``"primary/geant4"``; without it, ``parent_track_id == -1``.
     electron_energy_threshold : float, optional
         Kinetic-energy threshold (MeV) for the interaction-type classifier
         (forwarded to :func:`~.format_edepsim_h5._get_interaction_type`).
@@ -504,6 +511,7 @@ class JaxtpcHDF5Reader(EventReaderBase):
         *,
         vertex_key: str   = _DEFAULT_VERTEX_KEY,
         particle_key: str = _DEFAULT_PARTICLE_KEY,
+        primary_key: str  = _DEFAULT_PRIMARY_KEY,
         electron_energy_threshold: float = _DEFAULT_ELECTRON_ENERGY_THRESHOLD,
         min_pc_size: int | None = None,
         voxel_size: float | None = None,
@@ -608,6 +616,10 @@ class JaxtpcHDF5Reader(EventReaderBase):
         self._inst_path    = inst_path
         self._vertex_key   = vertex_key
         self._part_key     = particle_key
+        self._primary_key  = primary_key
+        #: The primary-table check of the event just read
+        #: (:func:`~.format_edepsim_h5.primary_mask`); None without the table.
+        self.last_primary_check = None
         self._e_thresh     = electron_energy_threshold
         self._min_pc_size  = min_pc_size
         # Cell size classification measures a cloud's extent in; see
@@ -749,7 +761,9 @@ class JaxtpcHDF5Reader(EventReaderBase):
             self.last_hit_stats = None
 
         # ── Step 5: derive per-particle scalar labels from EDepSim data ───
-        itype   = _get_interaction_type(parts, self._e_thresh)
+        is_primary, self.last_primary_check = primary_mask(
+            parts, read_primaries(self._edepsim_file, self._primary_key, index))
+        itype   = _get_interaction_type(parts, self._e_thresh, is_primary)
         int_ids = _get_interaction_id(parts, verts)
 
 
@@ -1586,6 +1600,7 @@ class JaxtpcHDF5Reader(EventReaderBase):
             inst_path                 = str(r.jaxtpc_inst_path),
             vertex_key                = str(r.get("vertex_key",   _DEFAULT_VERTEX_KEY)),
             particle_key              = str(r.get("particle_key", _DEFAULT_PARTICLE_KEY)),
+            primary_key               = str(r.get("primary_key",  _DEFAULT_PRIMARY_KEY)),
             electron_energy_threshold = float(r.get(
                                             "electron_energy_threshold",
                                             _DEFAULT_ELECTRON_ENERGY_THRESHOLD)),
