@@ -20,6 +20,13 @@ particle:
 # defragmentation measures the pixel grid instead of the physics.
 distance_threshold: 6.2
 
+# A delta ray that never gets this far (mm) from its track is merged into
+# it (see config.yaml).  Hand-scanned on event 0 of sdf_data_03: every delta
+# ray called hidden got at most 7.3 mm from its muon, every visible one at
+# least 9.0 mm.  About two pixels.  Truth deposits resolve delta rays the
+# hits do not, so wire and edepsim leave it off.
+delta_min_standoff: 8
+
 # A group's hits can straddle a fragment split here -- the readout leaves
 # gaps the deposit cloud does not have -- so the invariant the groups/ table
 # rests on does not hold and the run resolves by majority instead.

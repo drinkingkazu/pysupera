@@ -151,7 +151,10 @@ def instance_kinematics(inst_groups, particles, steps, step_owner, step_pid,
             if p is None:
                 continue
             g4 = int(getattr(p, "geant4_id", m))
-            if p.sem_type is not _LE or g4 in pair:
+            # A delta ray merged into its track is part of the track's
+            # picture, not of its trajectory.
+            if ((p.sem_type is not _LE
+                 and not getattr(p, "buried_in_track", False)) or g4 in pair):
                 allowed.append(rid * span + g4 + 1)
                 has_track.add(rid)
 

@@ -104,7 +104,9 @@ def main(cfg: DictConfig) -> None:
     from pysupera.io import open_voxmap_writer
     from pysupera.partitioner import ParticlePartitioner
     from pysupera.merge import (merge_em_showers, find_split_pieces,
-                                relabel_split_pieces, attach_split_pieces)
+                                relabel_split_pieces, attach_split_pieces,
+                                find_buried_deltas, merge_buried_deltas,
+                                find_absorbed_deltas, relabel_absorbed_deltas)
     from pysupera.kinematics import step_particles, instance_kinematics
     from pysupera.config import build_conditions, build_preprocessor, build_merge_processor, build_voxelizer, build_reader, configure
     from pysupera.preproc import _voxelize_point_cloud
@@ -216,6 +218,8 @@ def main(cfg: DictConfig) -> None:
         'pc_size_max':    [],   # int  : largest non-zero PC in event
         'pc_size_mean':   [],   # float: mean non-zero PC size in event
         'n_partitions':   [],   # int: final partition count after partition_combined
+        'n_buried_deltas': [], # int: delta-ray fragments merged into their track
+        'n_absorbed_deltas': [], # int: LE delta rays in their track, written as kDelta
     }
     # JAXTPC visibility counts; stays empty unless the reader supplies them.
     mask_stats: dict = defaultdict(list)
@@ -270,6 +274,12 @@ def main(cfg: DictConfig) -> None:
         print(f"[run] {_n_available} events in input file, processing {_n_to_process}")
 
         _drop_le_scatter = bool(cfg.get('drop_le_scatter', False))
+        _delta_standoff = float(cfg.get('delta_min_standoff', 0) or 0)
+        from pysupera.config import _classify_voxel_size
+        _delta_voxel = _classify_voxel_size(cfg)
+        if _delta_standoff > 0:
+            print(f"[run] delta rays    : merged into their track unless "
+                  f"{_delta_standoff:g} mm or more from it")
         # Used by drop_le_scatter output filtering.
         from pysupera.utils import SemanticType as _ST
         _le_type = _ST.kLEScatter
@@ -578,6 +588,12 @@ def main(cfg: DictConfig) -> None:
                 _pieces = find_split_pieces(fragments, particles)
                 relabel_split_pieces(_pieces)
 
+                # A delta ray its track hides: its points join the track's
+                # fragment; the particle stays kDelta with its own points.
+                _buried = find_buried_deltas(fragments, particles, _delta_standoff,
+                                             _delta_voxel)
+                fragments = merge_buried_deltas(fragments, _buried, particles)
+                stats['n_buried_deltas'].append(len(_buried))
 
                 # Capture fragment membership NOW.  merge_em_showers returns
                 # the surviving representatives themselves as the instances --
@@ -586,6 +602,11 @@ def main(cfg: DictConfig) -> None:
                 # fragment membership afterwards silently attributes most
                 # particles to the wrong fragment.
                 _frag_groups = snapshot_groups(fragments)
+                # Delta rays the size rule made LE and proximity put in their
+                # track: written like the buried ones, as kDelta rows.  Found
+                # now, on the clouds step 1 grouped; relabelled before the
+                # layout, after everything that reads LE off the particle.
+                _absorbed = find_absorbed_deltas(_frag_groups, particles)
 
                 # ── Step-2 EM shower instance merger ───────────────────────
                 _t = time.perf_counter()
@@ -712,6 +733,12 @@ def main(cfg: DictConfig) -> None:
                     _keep.update(np.unique(_d['fragment_id']).tolist())
                     _keep.update(np.unique(_d['instance_id']).tolist())
                 _keep.discard(-1)
+                # A delta ray merged into its track keeps its own row, as
+                # kDelta, however it got there.
+                _keep.update(int(_f.id) for _f, _h, _n in _buried)
+                relabel_absorbed_deltas(_absorbed)
+                _keep.update(int(_p.id) for _p in _absorbed)
+                stats['n_absorbed_deltas'].append(len(_absorbed))
                 # first_* / last_* per instance, from the steps whose
                 # deposits it collected.
                 _inst_kin = None
@@ -810,6 +837,11 @@ def main(cfg: DictConfig) -> None:
         print(f"  {_SEP}")
         lo, mu, hi = _agg(stats['n_partitions'])
         print(f"  {'Partitions (final)':<{_W}} {int(lo):>10,} {mu:>10.1f} {int(hi):>10,}")
+        if _delta_standoff > 0:
+            lo, mu, hi = _agg(stats['n_buried_deltas'])
+            print(f"  {'Delta rays into track':<{_W}} {int(lo):>10,} {mu:>10.1f} {int(hi):>10,}")
+        lo, mu, hi = _agg(stats['n_absorbed_deltas'])
+        print(f"  {'LE delta rays in track':<{_W}} {int(lo):>10,} {mu:>10.1f} {int(hi):>10,}")
 
         # ── JAXTPC readout visibility (only when the reader reported it) ───
         if mask_stats.get('n_total'):

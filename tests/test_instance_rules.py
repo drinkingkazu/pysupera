@@ -15,8 +15,10 @@ import pytest
 from pysupera.conditions.absorb_le_scatter import AbsorbLEScatter
 from pysupera.kinematics import instance_kinematics, step_particles
 from pysupera.layout import Group, fragment_le, snapshot_groups
-from pysupera.merge import (attach_split_pieces, find_split_pieces,
-                            merge_em_showers, relabel_split_pieces)
+from pysupera.merge import (attach_split_pieces, find_absorbed_deltas,
+                            find_buried_deltas, find_split_pieces,
+                            merge_buried_deltas, merge_em_showers,
+                            relabel_absorbed_deltas, relabel_split_pieces)
 from pysupera.utils import SemanticType as ST
 from tests.conftest import (
     make_particle, make_partitioner,
@@ -153,6 +155,162 @@ class TestDeltaRayGoesToItsTrack:
         prt = make_partitioner(list(self.particles()), D=5.0)
         prt.partition_combined([AbsorbLEScatter()], verbose=False)
         assert prt.rep_lookup[3] is prt.rep_lookup[1]
+
+
+# ---------------------------------------------------------------------------
+# Delta rays buried in their track
+# ---------------------------------------------------------------------------
+
+class TestBuriedDeltaRays:
+    """Only the points move: the delta ray stays kDelta, with its own row."""
+
+    @staticmethod
+    def event(delta_cloud):
+        mu = make_particle(1, PT_TRACK, pdg=13, pc=line(0, 120, n=41))
+        d = make_particle(2, PT_DELTA, pdg=11, parent_id=1, parent_pdg=13,
+                          ancestor_id=1, pc=delta_cloud)
+        assert d.sem_type == ST.kDelta
+        return mu, d
+
+    def test_a_hidden_delta_ray_joins_its_tracks_fragment(self):
+        # 8 cells on the muon's line, 2 one cell (3 mm) off it.
+        mu, d = self.event(np.r_[line(30, 51, n=8), line(60, 63, n=2, y=4.0)])
+        frags = fragments(mu, d)
+        found = find_buried_deltas(frags, [mu, d], 8.0, voxel_size=3.0)
+        assert [(f.id, h.id, x) for f, h, x in found] == [(2, 1, 3.0)]
+        frags = merge_buried_deltas(frags, found, [mu, d])
+        assert [f.id for f in frags] == [1] and mu.member_ids == [1, 2]
+        assert d.sem_type == ST.kDelta and d.buried_in_track
+        groups = snapshot_groups(frags)
+        assert fragment_le([mu, d], groups) == {1: False, 2: False}
+        insts = merge_em_showers(frags)
+        assert len(insts) == 1 and sorted(insts[0].member_ids) == [1, 2]
+
+    def test_it_keeps_its_row_and_its_own_points(self):
+        import copy
+        from pysupera.layout import build_layout
+        mu, d = self.event(np.r_[line(30, 51, n=8), line(60, 63, n=2, y=4.0)])
+        frags = fragments(copy.copy(mu), copy.copy(d))   # step 1's copies
+        found = find_buried_deltas(frags, [mu, d], 8.0, voxel_size=3.0)
+        frags = merge_buried_deltas(frags, found, [mu, d])
+        fg = snapshot_groups(frags)
+        ig = snapshot_groups(merge_em_showers(frags))
+        lay = build_layout([mu, d], fg, ig, keep={2})
+        c = lay.columns
+        r = {int(i): k for k, i in enumerate(c["id"])}
+        assert set(r) == {1, 2}
+        assert c["sem_type"][r[2]] == ST.kDelta.value
+        # It heads no group (frag_id/inst_id are set on heads only); its
+        # points lie in the track's fragment, which holds them all.
+        assert c["frag_id"][r[2]] == -1 and c["inst_id"][r[2]] == -1
+        assert c["pc_end"][r[2]] - c["pc_start"][r[2]] == len(d.point_cloud)
+        assert c["pc_end"][r[1]] - c["pc_start"][r[1]] == len(mu.point_cloud)
+        lo, hi = c["frag_pc_start"][r[1]], c["frag_pc_end"][r[1]]
+        assert lo <= c["pc_start"][r[2]] < c["pc_end"][r[2]] <= hi
+        assert hi - lo == len(mu.point_cloud) + len(d.point_cloud)
+        # Without keep it would have no row: it heads no group any more.
+        assert 2 not in build_layout([mu, d], fg, ig).columns["id"].tolist()
+
+    def test_a_visible_one_keeps_its_own_fragment(self):
+        # 3 cells (9 mm) off the muon.
+        mu, d = self.event(np.r_[line(30, 51, n=8), line(60, 90, n=11, y=9.0)])
+        frags = fragments(mu, d)
+        assert find_buried_deltas(frags, [mu, d], 8.0, voxel_size=3.0) == []
+        assert find_buried_deltas(frags, [mu, d], 10.0, voxel_size=3.0) != []
+
+    def test_distance_decides_not_the_number_of_cells_off_the_track(self):
+        # A halo: 30 cells beside the muon, none more than a cell from it.
+        mu, halo = self.event(line(0, 90, n=31, y=3.0))
+        assert find_buried_deltas(fragments(mu, halo), [mu, halo], 8.0, 3.0) != []
+        # A spur: 2 cells, but 3 cells (9 mm) out.
+        mu, spur = self.event(np.r_[line(30, 51, n=8), line(60, 60, n=1, y=6.0),
+                                    line(60, 60, n=1, y=9.0)])
+        assert find_buried_deltas(fragments(mu, spur), [mu, spur], 8.0, 3.0) == []
+
+    def test_exact_positions_without_voxels(self):
+        mu, d = self.event(np.r_[line(30, 51, n=8), line(60, 60, n=1, y=7.0)])
+        assert find_buried_deltas(fragments(mu, d), [mu, d], 8.0) != []
+        assert find_buried_deltas(fragments(mu, d), [mu, d], 6.0) == []
+
+    def test_off_by_default(self):
+        mu, d = self.event(line(30, 51, n=8))
+        assert find_buried_deltas(fragments(mu, d), [mu, d], 0, 3.0) == []
+
+    def test_a_fragment_holding_another_non_le_particle_stays(self):
+        mu, d = self.event(line(30, 51, n=8))
+        other = make_particle(3, PT_TRACK, pdg=2212, pc=line(30, 90, n=30, y=3.0))
+        mu.member_ids, d.member_ids = [1], [2, 3]
+        assert find_buried_deltas([mu, d], [mu, d, other], 8.0, 3.0) == []
+
+    def test_its_steps_do_not_draw_the_tracks_last_point(self):
+        from pysupera.kinematics import instance_kinematics
+        mu, d = self.event(line(30, 51, n=8))
+        frags = fragments(mu, d)
+        frags = merge_buried_deltas(
+            frags, find_buried_deltas(frags, [mu, d], 8.0, 3.0), [mu, d])
+        mu.geant4_id, d.geant4_id = 10, 20
+        steps = np.zeros(3, dtype=[("x", "f4"), ("y", "f4"), ("z", "f4"),
+                                   ("t", "f4"), ("px", "f4"), ("py", "f4"),
+                                   ("pz", "f4"), ("p", "f4"), ("de", "f4"),
+                                   ("dx", "f4"), ("theta", "f4"),
+                                   ("phi", "f4")])
+        steps["t"] = [1.0, 2.0, 9.0]          # the delta ray's step is last
+        steps["x"] = [0.0, 120.0, 40.0]
+        steps["dx"] = 0.1
+        kin = {"geant4_trackid": np.array([10, 20]), "mass": np.array([105.7, 0.511]),
+               "start_mom": np.zeros((2, 4))}
+        got = instance_kinematics(snapshot_groups(merge_em_showers(frags)),
+                                  [mu, d], steps, np.array([0, 0, 1]),
+                                  np.array([1, 1, 2]), kin)
+        assert got[1]["last_pos"][3] < 9.0
+
+
+class TestAbsorbedDeltaRays:
+    """A delta ray the size rule made LE and its track absorbed is written as
+    the buried ones are: a kDelta row with its own points, in the track."""
+
+    @staticmethod
+    def event():
+        mu = make_particle(1, PT_TRACK, pdg=13, pc=line(0, 120, n=41))
+        d = make_particle(2, PT_DELTA, pdg=11, parent_id=1, parent_pdg=13,
+                          ancestor_id=1, pc=line(60, 63, n=2, y=3.0))
+        d.sem_type = ST.kLEScatter                   # what min_pc_size makes it
+        return mu, d
+
+    def test_it_is_written_as_a_kdelta_row_in_its_track(self):
+        from pysupera.layout import build_layout
+        mu, d = self.event()
+        mu.member_ids, d.member_ids = [1, 2], [2]   # AbsorbLEScatter's doing
+        fg = snapshot_groups([mu])
+        found = find_absorbed_deltas(fg, [mu, d])
+        assert found == [d]
+        ig = snapshot_groups(merge_em_showers([mu]))
+        relabel_absorbed_deltas(found)
+        assert d.sem_type == ST.kDelta and d.buried_in_track
+        assert fragment_le([mu, d], fg) == {1: False, 2: False}
+        c = build_layout([mu, d], fg, ig, keep={2}).columns
+        r = {int(i): k for k, i in enumerate(c["id"])}
+        assert c["sem_type"][r[2]] == ST.kDelta.value
+        assert c["frag_id"][r[2]] == -1 and c["inst_id"][r[2]] == -1
+        assert c["pc_end"][r[2]] - c["pc_start"][r[2]] == 2
+        assert c["frag_pc_start"][r[1]] <= c["pc_start"][r[2]]
+        assert c["pc_end"][r[2]] <= c["frag_pc_end"][r[1]]
+
+    def test_one_left_on_its_own_stays_le(self):
+        mu, d = self.event()
+        assert find_absorbed_deltas(snapshot_groups(fragments(mu, d)), [mu, d]) == []
+
+    def test_one_absorbed_by_another_track_stays_le(self):
+        mu, d = self.event()
+        pi = make_particle(3, PT_TRACK, pdg=211, pc=line(0, 90, n=31, y=6.0))
+        mu.member_ids, pi.member_ids = [1], [3, 2]
+        assert find_absorbed_deltas(snapshot_groups([mu, pi]), [mu, d, pi]) == []
+
+    def test_a_piece_of_the_track_is_not_a_delta_ray(self):
+        mu, d = self.event()
+        mu.geant4_id = d.geant4_id = 10
+        mu.member_ids = [1, 2]
+        assert find_absorbed_deltas(snapshot_groups([mu]), [mu, d]) == []
 
 
 # ---------------------------------------------------------------------------

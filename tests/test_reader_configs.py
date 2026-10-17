@@ -128,6 +128,7 @@ def test_the_pixel_reader_brings_the_hit_mode_settings():
     assert cfg.particle.voxelize.store == "voxels"          # 3 mm truth voxels
     assert cfg.distance_threshold > 4.32 * 2 ** 0.5
     assert cfg.check_group_ownership is False
+    assert cfg.delta_min_standoff == 8
 
 
 @pytest.mark.parametrize("name", ("edepsim_h5", "jaxtpc_wire"))
@@ -137,6 +138,7 @@ def test_every_other_reader_keeps_the_truth_defaults(name):
     assert cfg.particle.voxelize.store == "voxels"
     assert cfg.distance_threshold == 5.2
     assert cfg.check_group_ownership is True
+    assert cfg.delta_min_standoff == 0               # delta rays as before
 
 
 def test_switching_the_pixel_reader_to_deposits_is_refused():

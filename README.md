@@ -385,7 +385,8 @@ if not np.isnan(p.kinetic_energy_start):  # float32 scalar check
 
 #### Semantic types
 
-`sem_type` is derived automatically from `process_type`, `pdg`, `parent_pdg`, and `point_cloud` at construction time via `SetSemanticType`.  Particles with fewer than `min_pc_size` points may be reclassified as `kLEScatter`.
+`sem_type` is derived automatically from `process_type`, `pdg`, `parent_pdg`, and `point_cloud` at construction time via `SetSemanticType`.  Particles with fewer than `min_pc_size` points may be reclassified as `kLEScatter`.  A delta ray so reclassified that ends up in its parent track is written
+as `kDelta` again (see [Delta rays merged into their track](#delta-rays-merged-into-their-track)).
 
 A generator primary is never `kLEScatter`: it is `kShower` if it is an
 electron, positron or photon and `kTrack` otherwise, whatever its size --
@@ -639,7 +640,9 @@ with read_events("output.h5") as store:
   LE particle touching several things into its own ancestor when that is one
   of them, so a delta ray goes to its track. A stand-alone piece that
   defragmentation cut off a `kTrack`, `kMichel` or `kDelta` particle joins
-  that particle's instance and is not LE.
+  that particle's instance and is not LE. Optionally, a delta ray that
+  never gets far from its track joins it too (see
+  [`delta_min_standoff`](#delta-rays-the-track-hides--delta_min_standoff)).
 - **Kinematics.** Every row carries its Geant4 particle's `mass` and
   creation and destruction position and 4-momentum; every instance row also
   its instance's first and last point, made from the deposits it collected.
@@ -785,11 +788,35 @@ About 9% of them. A particle gets a row if it
 2. **is an instance representative**, or
 3. **lies on the ancestry of one**, including point-less links such as a π⁰
    between its two photons.
+4. **is a delta ray merged into its track**, by either rule (see
+   [Delta rays merged into their track](#delta-rays-merged-into-their-track)).
 
 Merged shower members get no row — an instance is one object, and its
 constituents are not individually addressable. **Every point is still stored**
 regardless: a group's points are its members', whether or not those members
 have rows, and no point is unreachable from some stored row.
+
+#### Delta rays merged into their track
+
+A delta ray whose points end up in its parent track's fragment is part of the
+track's picture: the points are the track's, and not LE. Two rules put it
+there. In every mode, one smaller than `min_pc_size` is typed `kLEScatter`
+and `AbsorbLEScatter` merges it into the track it touches. With pixel hits,
+`delta_min_standoff` also merges one that never gets far from the track (see
+[below](#delta-rays-the-track-hides--delta_min_standoff)). Either way the
+delta ray keeps a row, written as **`sem_type == kDelta`**, so
+`sem_type == kDelta` selects the delta rays with their own instance and those
+in their track alike. A merged one heads no
+group (`frag_id`/`inst_id` −1); its own `pc_start`/`pc_end` lie inside its
+track's fragment range, and its steps do not count toward the track
+instance's `first_*`/`last_*`. A row whose `inst_id` is its own `id` is a
+delta ray with its own instance. A delta ray merged into anything else, or
+left as an LE blob, stays `kLEScatter` as before.
+
+These rows add 5% (edepsim) to 9% (pixel) to the particle table, about 490
+and 340 delta rays an event on `sdf_data_03`, and change nothing else: the
+points, groups, hit labels and instance kinematics are identical with and
+without them.
 
 ### Particle columns
 
@@ -1328,6 +1355,44 @@ the `group_sizes` fix it was 1.84% — but not zero, so
 `check_group_ownership=false` is set for hit mode, and the run resolves each
 straddled group by majority and reports how many there were. `hit_labels/` is
 unaffected: pixel hits are labelled one by one, not through their group.
+
+#### Delta rays the track hides — `delta_min_standoff`
+
+A low-energy delta ray seen through a diffused readout often cannot be told
+from the muon it came off: its hits lie on the track or hug it. With
+`delta_min_standoff` set to a distance in mm, a delta ray that never gets
+that far from its track is merged into it. *Never gets that far* means that
+none of the delta ray's voxels (`particle.voxelize.voxel_size`) is
+`delta_min_standoff` or more from the nearest voxel of the track's fragment.
+Only the *points* move, into the track's fragment and so into its instance.
+The delta-ray particle stays `kDelta`, never LE, and keeps its row,
+kinematics and its own `pc_start`/`pc_end`, which lie inside the track's
+fragment range. It heads no group, so its `frag_id`/`inst_id` are −1, and its
+steps do not count toward the track instance's `first_*`/`last_*`. It applies
+to non-primary delta rays heading their own fragment, whose parent is in a
+track-like fragment and whose fragment holds nothing else but LE and its own
+pieces. It is measured on the clouds step 1 groups, so in hit mode on the
+voxelized hits: what the readout can show. 0, the default, disables it;
+`reader=jaxtpc_pixel` sets 8 mm. Wire and edepsim leave it off, and their delta
+rays are decided as before, by `min_pc_size` and `AbsorbLEScatter`.
+
+It is distance and not a count of voxels off the track because a delta ray
+that runs along the track can have many voxels beside it and still be
+invisible, while a short one that leaves the track is plain to see. In a hand
+scan of event 0 (`sdf_data_03`, pixel, 3 mm voxels), how far a delta ray gets
+from its muon matched the call for all 11. The voxels it has off the track
+did not: 507 has 19 such voxels, 519 has 21.
+
+| delta ray | voxels off the track | farthest voxel from it | hand scan |
+|---|---|---|---|
+| 482, 511, 447, 525, 519 | 0, 4, 6, 12, 21 | 0–6.0 mm | hidden |
+| 468, 481 | 13, 19 | 6.7, 7.3 mm | hidden (468 marginal) |
+| 507, 479, 461, 480 | 19, 54, 69, 145 | 9.0–20.3 mm | visible |
+
+So, at a 4.32 mm pitch, about two pixels: 8 mm merges all those called
+hidden, 25–30 delta rays an event. It is for hits only. On the truth deposits
+the same delta rays are resolved: 519 gets 12.4 mm from the muon, 481 and
+525 9.0 mm, so a deposit-mode cut would merge what the image shows.
 
 ### Hit provenance (JAXTPC mode)
 

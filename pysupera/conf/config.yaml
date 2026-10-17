@@ -155,6 +155,18 @@ output_compact: true
 # Useful when low-energy scatter products are not needed downstream.
 drop_le_scatter: false
 
+# Merge a delta ray its track hides into the track.  A non-primary kDelta
+# fragment none of whose occupied cells (particle.voxelize.voxel_size) is
+# this far (mm, cell to cell) or more from its parent track's fragment has
+# its points moved into the track's fragment, and so its instance.  What
+# shows a delta ray is how far it gets from the track, not how many cells
+# it has off it.  The delta-ray particle stays kDelta, with its own row,
+# kinematics and pc_start/pc_end; it is never LE.  Its steps do not count
+# toward the track instance's first_*/last_*.  Measured on the clouds step 1
+# groups (pixel: the hits), so it measures what the readout can show.
+# 0 disables; reader=jaxtpc_pixel sets it (readout/jaxtpc_pixel.yaml).
+delta_min_standoff: 0
+
 # Which particle instances to write.
 #
 # all       — every instance the step-2 merger produced, including the many

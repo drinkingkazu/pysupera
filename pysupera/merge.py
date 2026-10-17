@@ -319,6 +319,189 @@ def find_split_pieces(fragments, particles):
     return out
 
 
+# ---------------------------------------------------------------------------
+# Delta rays buried in their track
+# ---------------------------------------------------------------------------
+
+def _cells(point_cloud, voxel_size):
+    """The cells *point_cloud* occupies, as (n, 3) coordinates in mm:
+    voxel corners, or the exact positions when *voxel_size* is None."""
+    xyz = np.asarray(point_cloud[:, :3], dtype=np.float64)
+    if voxel_size:
+        return np.unique(np.floor(xyz / voxel_size), axis=0) * voxel_size
+    return np.unique(xyz, axis=0)
+
+
+def find_buried_deltas(fragments, particles, min_standoff, voxel_size=None):
+    """
+    Delta-ray fragments that cannot be told apart from their parent track.
+
+    A delta ray mostly overlaps the track it came from; with a diffused
+    readout a low-energy one is invisible, its cells all on or hugging the
+    track.  Such a delta ray's *points* belong in the track's fragment.
+    What makes a delta ray visible is how far it gets from the track, not
+    how many cells it has off it: a halo along the track can hold many.
+    This finds the fragments headed by a non-primary ``kDelta`` particle,
+    not LE, whose parent sits in a different, track-like fragment, and none
+    of whose occupied cells is *min_standoff* or more from the nearest cell
+    of that fragment.  Every other member of such a fragment must be LE or
+    a piece of the delta ray, so nothing else is moved with it.
+
+    The delta-ray particle is not reclassified: it stays ``kDelta`` with its
+    own points (see :func:`merge_buried_deltas`).
+
+    Parameters
+    ----------
+    fragments : list of Particle
+        Step-1 fragment representatives.
+    particles : list of Particle
+        Every particle of the event.
+    min_standoff : float
+        Distance in mm, cell to cell, a delta ray must reach from its
+        track's fragment to keep its own.  0 or less finds nothing.
+    voxel_size : float or None
+        Cell size the clouds are counted in; None uses exact positions.
+
+    Returns
+    -------
+    list of tuple
+        ``(delta_fragment, track_fragment, standoff)`` triples, the
+        standoff in mm.
+    """
+    if not min_standoff or min_standoff <= 0:
+        return []
+    from scipy.spatial import cKDTree
+    by_id = {int(p.id): p for p in particles}
+    frag_of = {}
+    for f in fragments:
+        for m in (f.member_ids if f.member_ids is not None else [f.id]):
+            frag_of[int(m)] = f
+    g4 = lambda p: int(getattr(p, "geant4_id", p.id))
+    trees = {}
+    out = []
+    for f in fragments:
+        rep = by_id.get(int(f.id))
+        if (rep is None or rep.sem_type != SemanticType.kDelta
+                or f.sem_type != SemanticType.kDelta
+                or rep.interaction_type == InteractionType.kPrimary):
+            continue
+        par = by_id.get(int(rep.parent_id)) if rep.parent_id is not None else None
+        if par is None or par is rep:
+            continue
+        home = frag_of.get(int(par.id))
+        if home is None or home is f or home.sem_type not in _TRACK_LIKE:
+            continue
+        mids = f.member_ids if f.member_ids is not None else [f.id]
+        if any(int(m) != int(rep.id) and int(m) in by_id
+               and by_id[int(m)].sem_type != SemanticType.kLEScatter
+               and g4(by_id[int(m)]) != g4(rep) for m in mids):
+            continue
+        if not len(f.point_cloud) or not len(home.point_cloud):
+            continue
+        if id(home) not in trees:
+            trees[id(home)] = cKDTree(_cells(home.point_cloud, voxel_size))
+        standoff = float(trees[id(home)].query(_cells(f.point_cloud, voxel_size))[0].max())
+        if standoff < min_standoff:
+            out.append((f, home, standoff))
+    return out
+
+
+def merge_buried_deltas(fragments, found, particles):
+    """
+    Merge each delta-ray fragment of :func:`find_buried_deltas` into its
+    track's fragment, in place, before the fragments are snapshotted.
+
+    Only the points move: the delta-ray particle keeps its ``kDelta`` type,
+    its row and its own point range, and is marked ``buried_in_track`` so
+    that the track instance's first/last points are not drawn from its
+    steps.  A delta ray of a buried delta ray follows it into the track.
+
+    Returns
+    -------
+    list of Particle
+        *fragments* without the merged ones.
+    """
+    by_id = {int(p.id): p for p in particles}
+    gone = {}
+    root = lambda h: root(gone[id(h)]) if id(h) in gone else h
+    for f, home, _ in found:
+        h = root(home)
+        if h is f:
+            continue
+        h.member_ids = (list(h.member_ids if h.member_ids is not None else [h.id])
+                        + list(f.member_ids if f.member_ids is not None else [f.id]))
+        clouds = [c for c in (h.point_cloud, f.point_cloud) if len(c)]
+        if len(clouds) > 1:
+            h.point_cloud = np.concatenate(clouds, axis=0)
+        elif clouds:
+            h.point_cloud = clouds[0]
+        gone[id(f)] = h
+        by_id[int(f.id)].buried_in_track = True
+    return [f for f in fragments if id(f) not in gone]
+
+
+def find_absorbed_deltas(frag_groups, particles):
+    """
+    Delta rays that the size rule made LE and proximity put in their track.
+
+    A delta ray smaller than ``min_pc_size`` is typed ``kLEScatter`` and,
+    touching its track, ``AbsorbLEScatter`` merges it there.  Its points
+    are the track's either way; this finds such particles so that, like the
+    ones :func:`merge_buried_deltas` moves, they can be written as
+    ``kDelta`` rows with their own points.  A delta ray qualifies when it
+    has points and sits in the same fragment as its parent, and that
+    fragment is track-like.  A piece of the parent (same Geant4 track) is
+    not a delta ray of it and is left out.
+
+    Parameters
+    ----------
+    frag_groups : list of Group
+        Step-1 fragments, from :func:`~pysupera.layout.snapshot_groups`.
+    particles : list of Particle
+        Every particle of the event, carrying the clouds step 1 grouped.
+
+    Returns
+    -------
+    list of Particle
+    """
+    by_id = {int(p.id): p for p in particles}
+    frag_of, sem_of = {}, {}
+    for g in frag_groups:
+        sem_of[g.rep_id] = g.sem_type
+        for m in g.member_ids:
+            frag_of[int(m)] = g.rep_id
+    track_like = {t.value for t in _TRACK_LIKE}
+    g4 = lambda p: int(getattr(p, "geant4_id", p.id))
+    out = []
+    for p in particles:
+        if (p.interaction_type != InteractionType.kDelta
+                or p.sem_type != SemanticType.kLEScatter
+                or not len(p.point_cloud)):
+            continue
+        par = by_id.get(int(p.parent_id)) if p.parent_id is not None else None
+        if par is None or par is p or g4(par) == g4(p):
+            continue
+        f = frag_of.get(int(p.id))
+        if (f is None or f == int(p.id) or frag_of.get(int(par.id)) != f
+                or sem_of[f] not in track_like):
+            continue
+        out.append(p)
+    return out
+
+
+def relabel_absorbed_deltas(deltas):
+    """
+    Type each delta ray of :func:`find_absorbed_deltas` ``kDelta``, in place,
+    and mark it ``buried_in_track``.  Call it after step 2, before the
+    layout: the fragment decides LE, so the points stay the track's, and
+    the mark keeps its steps out of the track instance's first/last points,
+    as its LE type did.
+    """
+    for p in deltas:
+        p.sem_type = SemanticType.kDelta
+        p.buried_in_track = True
+
+
 def relabel_split_pieces(pairs):
     """
     Give each piece fragment its track fragment's semantic type, in place.
