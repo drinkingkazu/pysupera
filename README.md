@@ -388,8 +388,9 @@ if not np.isnan(p.kinetic_energy_start):  # float32 scalar check
 `sem_type` is derived automatically from `process_type`, `pdg`, `parent_pdg`, and `point_cloud` at construction time via `SetSemanticType`.  Particles with fewer than `min_pc_size` points may be reclassified as `kLEScatter`.
 
 A generator primary is never `kLEScatter`: it is `kShower` if it is an
-electron, positron or photon and `kTrack` otherwise, whatever its size.
-Neutrons and nuclei are the exception and follow their own rules. The
+electron, positron or photon and `kTrack` otherwise, whatever its size --
+neutrons, nuclei and π0 included, which usually leaves an instance with no
+voxels. The
 readers take the primaries from the input's primary table
 (`reader.primary_key`, `primary/geant4`), not from the process fields, which
 Geant4 leaves meaningless for a primary. Geant4 gives exactly these particles
@@ -521,7 +522,7 @@ defragmentation and the extent classification see. See
 
 #### Defragmentation
 
-A particle's point cloud may be *fragmented* — split into spatially disconnected clusters that should logically belong to the same particle.  The defragmenter runs a connected-components algorithm (eps-ball radius = `distance_threshold`) on each particle's point cloud independently, then detaches small disconnected fragments (size ≤ `min_pc_size`) as new `kLEScatter` particles.  By default only `kShower`, `kDelta`, `kMichel` and `kLEScatter` particles are examined (`preprocessor.sem_types`); tracks are left whole.  A detached piece of a `kTrack`, `kMichel` or `kDelta` particle that touches nothing joins its particle's instance and is not LE (its fragment takes the particle's fragment type); one that proximity absorbed elsewhere stays there.
+A particle's point cloud may be *fragmented* — split into spatially disconnected clusters that should logically belong to the same particle.  The defragmenter runs a connected-components algorithm (eps-ball radius = `distance_threshold`) on each particle's point cloud independently, then detaches small disconnected fragments (size ≤ `min_pc_size`) as new `kLEScatter` particles.  By default only `kShower`, `kDelta`, `kMichel` and `kLEScatter` particles are examined (`preprocessor.sem_types`); tracks are left whole.  A detached piece of a `kTrack`, `kMichel` or `kDelta` particle other than a neutron that touches nothing joins its particle's instance and is not LE (its fragment takes the particle's fragment type); one that proximity absorbed elsewhere stays there.
 
 Enable with:
 

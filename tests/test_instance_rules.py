@@ -188,6 +188,12 @@ class TestSplitPiecesGoBackToTheirTrack:
         blob = self.piece_of(n, 2, (300, 0, 0))
         assert find_split_pieces(fragments(n, blob), [n, blob]) == []
 
+    def test_a_primary_neutrons_blobs_are_left_alone_though_it_is_a_track(self):
+        n = make_particle(1, PT_PRIMARY, pdg=2112, n_pts=8)
+        assert n.sem_type == ST.kTrack
+        blob = self.piece_of(n, 2, (300, 0, 0))
+        assert find_split_pieces(fragments(n, blob), [n, blob]) == []
+
     def test_a_piece_absorbed_elsewhere_stays_there(self):
         mu = make_particle(1, PT_TRACK, pdg=13, pc=line(0, 100))
         pi = make_particle(3, PT_TRACK, pdg=211, pc=line(300, 400))

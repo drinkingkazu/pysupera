@@ -681,8 +681,8 @@ def _get_interaction_type(parts: np.ndarray,
         cleaner process classification is available.
     is_primary : ndarray of bool or None, optional
         Which particles are generator primaries (:func:`primary_mask`).
-        A primary is ``kPrimary`` -- never LE, whatever its size -- unless
-        it is a neutron or a nucleus.  Its ``proc_start`` and
+        A primary is ``kPrimary`` -- never LE, whatever its size --
+        neutrons and nuclei included.  Its ``proc_start`` and
         ``subproc_start`` are not read: Geant4 records no creator process
         for a primary, and the fields hold whatever the converter wrote.
         None takes the particles with ``parent_track_id == -1``.
@@ -730,9 +730,9 @@ def _get_interaction_type(parts: np.ndarray,
     is_electron = abs(pdg) == 11
 
     conditions = [
+        is_primary,
         pdg == 2112,
         pdg > 1_000_000_000,
-        is_primary,
         pdg == 22,
         # EM electrons — ordered from most specific to least specific
         is_electron & (proc_start == EM) & (subproc_start == PE),
@@ -752,9 +752,9 @@ def _get_interaction_type(parts: np.ndarray,
     ]
 
     choices = [
+        InteractionType.kPrimary,
         InteractionType.kNeutron,
         InteractionType.kNucleus,
-        InteractionType.kPrimary,
         InteractionType.kPhoton,
         InteractionType.kPhotoElectron,
         InteractionType.kCompton,

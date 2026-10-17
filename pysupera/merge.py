@@ -253,10 +253,15 @@ def merge_em_showers(fragments):
 
 #: Semantic types whose split-off pieces go back to their particle: the ones
 #: with a continuous trajectory that a gap can interrupt.  Showers collect
-#: their pieces through PhotonDecay and genealogy already; a neutron's blobs
-#: are separate interactions, not one trajectory.
+#: their pieces through PhotonDecay and genealogy already.
 _TRACK_LIKE = frozenset({SemanticType.kTrack, SemanticType.kMichel,
                          SemanticType.kDelta})
+
+#: Particles whose pieces never go back, whatever their semantic type: a
+#: neutron's blobs are separate interactions, not one trajectory.  A primary
+#: neutron is ``kTrack``, and its own deposits (sub-cut recoils, in some
+#: physics lists) can lie metres apart.
+_NOT_A_TRAJECTORY_PDG = frozenset({2112})
 
 
 def find_split_pieces(fragments, particles):
@@ -269,7 +274,8 @@ def find_split_pieces(fragments, particles):
     piece touches nothing it stays a fragment of its own, though it is part
     of its particle's trajectory.  This finds those fragments: every member
     a piece of the same Geant4 particle, that particle ``kTrack``,
-    ``kMichel`` or ``kDelta``, and its own fragment not LE.  A piece that
+    ``kMichel`` or ``kDelta`` and not a neutron, and its own fragment not
+    LE.  A piece that
     proximity absorbed into another fragment is left where it is -- it looks
     like part of that fragment, so it is.
 
@@ -303,7 +309,8 @@ def find_split_pieces(fragments, particles):
         if any(int(m) not in by_id or g4(by_id[int(m)]) != g4(piece)
                for m in mids):
             continue
-        if src.sem_type not in _TRACK_LIKE:
+        if (src.sem_type not in _TRACK_LIKE
+                or abs(int(src.pdg)) in _NOT_A_TRAJECTORY_PDG):
             continue
         home = frag_of.get(int(src.id))
         if home is None or home is f or home.sem_type == SemanticType.kLEScatter:

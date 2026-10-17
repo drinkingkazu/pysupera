@@ -101,10 +101,19 @@ class TestPrimaryIsNeverLE:
         assert SetSemanticType(IT.kPrimary, 22, 0, empty, 63) is ST.kShower
         assert SetSemanticType(IT.kPrimary, -11, 0, empty, 63) is ST.kShower
 
-    def test_a_primary_neutron_stays_a_neutron(self):
-        ev = parts([(1, -1, 2112, 0, 0)])
-        it = _get_interaction_type(ev, is_primary=np.array([True]))
-        assert IT(int(it[0])) is IT.kNeutron
+    @pytest.mark.parametrize("pdg", [2112, 1000180400, 111])
+    def test_a_primary_neutron_nucleus_or_pi0_is_a_track(self, pdg):
+        ev = parts([(1, -1, pdg, 0, 0), (2, 1, pdg, 4, 111)])
+        it = _get_interaction_type(ev, is_primary=np.array([True, False]))
+        assert IT(int(it[0])) is IT.kPrimary
+        empty = np.zeros((0, 6), dtype=np.float32)
+        assert SetSemanticType(IT.kPrimary, pdg, 0, empty, 63) is ST.kTrack
+
+    def test_a_secondary_neutron_or_nucleus_keeps_its_rule(self):
+        ev = parts([(1, -1, 13, 0, 0), (2, 1, 2112, 4, 111),
+                    (3, 1, 1000180400, 4, 111)])
+        it = _get_interaction_type(ev, is_primary=np.array([True, False, False]))
+        assert [IT(int(v)) for v in it[1:]] == [IT.kNeutron, IT.kNucleus]
 
 
 def write_edepsim(path, prim_ids=None, steps=True):
