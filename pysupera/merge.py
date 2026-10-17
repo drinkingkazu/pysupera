@@ -103,6 +103,10 @@ def merge_em_showers(fragments):
       are their own instances.  The same electrons made by a photon *within*
       a shower belong to it.
 
+    The parent of a fragment is the fragment holding its parent particle,
+    which proximity may have put among the fragment's own descendants.  Where
+    the walk loops, the fragments on the loop share one instance.
+
     Extended parent lookup
     ~~~~~~~~~~~~~~~~~~~~~~
     The walk uses two lookup tables in tandem:
@@ -177,10 +181,41 @@ def merge_em_showers(fragments):
             cur = up[id(cur)]
         return rep if top is None else top
 
+    # Chains can loop: an LE particle absorbed by proximity into a fragment
+    # of its own descendants -- a stopped muon swallowed by the shower of its
+    # Michel's brem photon -- makes that fragment the descendant's parent
+    # too.  Each fragment on a loop then names a different initiator, and an
+    # initiator outside its own group would be dropped with its members.
+    # Follow initiators to a fixed point; a loop of them takes its lowest-id
+    # member that may head a shower, so every initiator heads its own group.
+    first = {id(rep): find_initiator(rep) for rep in fragments}
+    resolved: dict = {}
+
+    def initiator_of(rep):
+        path, on_path, cur = [], {}, rep
+        while id(cur) not in resolved:
+            nxt = first[id(cur)]
+            if nxt is cur:
+                resolved[id(cur)] = cur
+                break
+            if id(cur) in on_path:
+                loop = path[on_path[id(cur)]:]
+                head = min(loop, key=lambda r: (not _can_initiate(r), r.id))
+                for r in loop:
+                    resolved[id(r)] = head
+                break
+            on_path[id(cur)] = len(path)
+            path.append(cur)
+            cur = nxt
+        head = resolved[id(cur)]
+        for r in path:
+            resolved.setdefault(id(r), head)
+        return resolved[id(rep)]
+
     # Group every fragment under its shower initiator.
     groups: dict = defaultdict(list)   # initiator.id → list[fragment rep]
     for rep in fragments:
-        initiator = find_initiator(rep)
+        initiator = initiator_of(rep)
         groups[initiator.id].append(rep)
 
     # Build instance representatives by merging point clouds and member ID lists.

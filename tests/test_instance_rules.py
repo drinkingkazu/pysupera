@@ -20,8 +20,8 @@ from pysupera.merge import (attach_split_pieces, find_split_pieces,
 from pysupera.utils import SemanticType as ST
 from tests.conftest import (
     make_particle, make_partitioner,
-    PT_COMPTON, PT_CONVERSION, PT_DELTA, PT_NEUTRON, PT_PHOTON, PT_PRIMARY,
-    PT_TRACK,
+    PT_COMPTON, PT_CONVERSION, PT_DECAY, PT_DELTA, PT_NEUTRON, PT_PHOTON,
+    PT_PRIMARY, PT_TRACK,
 )
 
 EMPTY = np.zeros((0, 3), dtype=np.float32)
@@ -102,6 +102,25 @@ class TestShowerStartsAtPairProduction:
         insts = merge_em_showers(fragments(le, big))
         assert instance_of(insts, 2).id == 2
         assert instance_of(insts, 1).id == 1
+
+    def test_a_parent_absorbed_into_its_descendants_shower_loses_nothing(self):
+        """
+        A stopped muon 1, too small to be a track, absorbed by proximity into
+        the shower of photon 3, which its Michel positron 2 radiated: 2's
+        parent fragment is 3's, and 3's is 2's.  Seen in production.
+        """
+        mu = make_particle(1, PT_PRIMARY, pdg=-13, n_pts=4)
+        e2 = make_particle(2, PT_DECAY, pdg=-11, parent_id=1, parent_pdg=-13,
+                           ancestor_id=1, n_pts=30)
+        g3 = make_particle(3, PT_PHOTON, pdg=22, parent_id=2, parent_pdg=-11,
+                           ancestor_id=1, pc=EMPTY)
+        mu.sem_type, e2.sem_type, g3.sem_type = (ST.kLEScatter, ST.kMichel,
+                                                 ST.kShower)
+        e2.member_ids, g3.member_ids = [2], [3, 1]
+        insts = merge_em_showers([e2, g3])
+        members = sorted(m for i in insts for m in i.member_ids)
+        assert members == [1, 2, 3]
+        assert len(insts) == 1 and insts[0].id == 2
 
 
 # ---------------------------------------------------------------------------
