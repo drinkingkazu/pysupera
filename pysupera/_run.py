@@ -303,6 +303,13 @@ def main(cfg: DictConfig) -> None:
                     'energy_mantissa_bits', None),
             })
 
+            # What the run noticed but did not stop for, written to issues/.
+            from pysupera.issues import Issue, IssueLog
+            from pysupera.readers.format_edepsim_h5 import (
+                PRIMARY_CHECK_TEXT)
+            _issues = IssueLog()
+            _no_primary_table_noted = False
+
             from tqdm import tqdm
             _bar = tqdm(
                 total=_n_to_process,
@@ -317,6 +324,23 @@ def main(cfg: DictConfig) -> None:
                     break
                 n_events += 1
                 _ev_t: dict = {}   # per-event stage timings (seconds)
+
+                # ── Primaries: the primary table against parent -1 ─────────
+                # The reader took kPrimary from the table; a disagreement
+                # with parent_track_id == -1 is recorded, one row per track.
+                _pchk = getattr(store, 'last_primary_check', False)
+                if _pchk is None and not _no_primary_table_noted:
+                    _issues.record(Issue.NO_PRIMARY_TABLE,
+                                   "the input has no primary table; "
+                                   "parent_track_id == -1 taken instead")
+                    _no_primary_table_noted = True
+                elif _pchk:
+                    for _key, _tids in _pchk.items():
+                        for _t in _tids:
+                            _issues.record(
+                                Issue.PRIMARY_TABLE_MISMATCH,
+                                f"track {int(_t)} {PRIMARY_CHECK_TEXT[_key]}",
+                                event=event_idx, geant4_trackid=int(_t))
 
                 # ── JAXTPC visibility counts ────────────────────────────────
                 # Already computed by the reader from data it had in hand, so
@@ -465,11 +489,14 @@ def main(cfg: DictConfig) -> None:
                 # guard stays armed for everything else.
                 if not _nonzero and _wholly_outside_window(_hs):
                     n_out_of_window_events += 1
-                    print(f"[run] event {event_idx}: none of its "
-                          f"{_hs['n_deposits']:,} deposits arrived inside the "
-                          f"readout window ({_hs['n_before_window']:,} "
-                          f"before, {_hs['n_after_window']:,} after); "
+                    _why = (f"none of its {_hs['n_deposits']:,} deposits "
+                            f"arrived inside the readout window "
+                            f"({_hs['n_before_window']:,} before, "
+                            f"{_hs['n_after_window']:,} after)")
+                    print(f"[run] event {event_idx}: {_why}; "
                           f"written as an empty event.")
+                    _issues.record(Issue.OUTSIDE_READOUT_WINDOW, _why,
+                                   event=event_idx)
                 elif not _nonzero:
                     _msg = (
                         f"Event {event_idx}: empty image — all "
@@ -484,14 +511,19 @@ def main(cfg: DictConfig) -> None:
                             f"JAXTPC mode) that reader.jaxtpc_seg_path and "
                             f"reader.jaxtpc_inst_path point at the seg/step and "
                             f"hits/inst files respectively.  Set "
-                            f"allow_empty_image=true to downgrade this to a "
-                            f"one-time warning."
+                            f"allow_empty_image=true to record it in the "
+                            f"output's issues/ group and go on instead."
                         )
+                    _issues.record(
+                        Issue.EMPTY_IMAGE,
+                        f"all {len(particles)} particle(s) have an empty "
+                        f"point cloud", event=event_idx)
                     if not _warned_empty_image:
                         import warnings
                         warnings.warn(
                             f"{_msg}  allow_empty_image=true, so processing "
-                            f"continues; this warning is issued only once.",
+                            f"continues; every such event is recorded in "
+                            f"issues/, and this warning is issued only once.",
                             UserWarning,
                             stacklevel=2,
                         )
@@ -545,6 +577,7 @@ def main(cfg: DictConfig) -> None:
                 # instance after step 2.
                 _pieces = find_split_pieces(fragments, particles)
                 relabel_split_pieces(_pieces)
+
 
                 # Capture fragment membership NOW.  merge_em_showers returns
                 # the surviving representatives themselves as the instances --
@@ -729,6 +762,7 @@ def main(cfg: DictConfig) -> None:
                 )
 
             _bar.close()
+            writer.write_issues(_issues)
 
     # ── Post-run repack (opt-in) ───────────────────────────────────────────
     # Runs only after every writer above has been closed, so the file is
@@ -960,6 +994,8 @@ def main(cfg: DictConfig) -> None:
         print(f"  {_SEP}")
         print(f"  {'TOTAL':<{_W}} {total:>10.3f} {1000*total/n_events:>15.2f} {'100.0':>6}%")
 
+    # Last, so it is what a log's tail shows.
+    print("\n" + _issues.report())
     print("[run] Done.")
 
 

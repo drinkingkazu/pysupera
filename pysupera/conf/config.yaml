@@ -108,10 +108,11 @@ repack:
 #                   mistake (e.g. the wrong reader.jaxtpc_seg_path / step_key)
 #                   rather than real physics, and silently writing thousands of
 #                   empty events is far worse than stopping early.
-# true            — allow empty images through, emitting a single warning the
-#                   first time one is encountered (not once per event).  Use
-#                   when empty events are genuinely expected, e.g. very low
-#                   readout thresholds or heavily masked detector volumes.
+# true            — allow empty images through, recording each one in the
+#                   output's issues/ group (code 3, EMPTY_IMAGE) and printing
+#                   a single warning the first time.  Use when empty events
+#                   are genuinely expected, e.g. very low readout thresholds
+#                   or heavily masked detector volumes.
 allow_empty_image: false
 
 # Verify that every JAXTPC group belongs to exactly one pysupera particle.

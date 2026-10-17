@@ -40,6 +40,7 @@ A Python library for grouping simulated LArTPC particles into physics partitions
    - [What the output stores (JAXTPC input)](#what-the-output-stores-jaxtpc-input)
    - [Hit provenance (JAXTPC mode)](#hit-provenance-jaxtpc-mode)
      - [Seeing it](#seeing-it)
+   - [Issues](#issues)
    - [Expert and debugging output](#expert-and-debugging-output)
 7. [Training Data (PyTorch)](#training-data-pytorch)
    - [Voxel merging](#voxel-merging)
@@ -386,6 +387,17 @@ if not np.isnan(p.kinetic_energy_start):  # float32 scalar check
 
 `sem_type` is derived automatically from `process_type`, `pdg`, `parent_pdg`, and `point_cloud` at construction time via `SetSemanticType`.  Particles with fewer than `min_pc_size` points may be reclassified as `kLEScatter`.
 
+A generator primary is never `kLEScatter`: it is `kShower` if it is an
+electron, positron or photon and `kTrack` otherwise, whatever its size.
+Neutrons and nuclei are the exception and follow their own rules. The
+readers take the primaries from the input's primary table
+(`reader.primary_key`, `primary/geant4`), not from the process fields, which
+Geant4 leaves meaningless for a primary. Geant4 gives exactly these particles
+`parent_track_id == -1`, and each event is checked for that. A mismatch is
+recorded in the output's `issues/` group, and the run goes on using the
+table. Without a table, the parent-less particles are taken as the
+primaries.
+
 | Value | Meaning |
 |---|---|
 | `kShower` | EM shower fragment |
@@ -664,6 +676,7 @@ particles/<kin>  (M, 4) float64       kinematics; see below
 inter/<col>      (K,)
 groups/          JAXTPC group -> owning fragment            } JAXTPC
 hit_labels/volume{V}/plane{P}/  per hit of that plane       } input
+issues/          what the run noticed but did not stop for; see below
 ```
 
 Everything is concatenated across events with CSR fenceposts: event *i*
@@ -1443,6 +1456,34 @@ or back; it errors rather than guess if the file is uncompressed. `--scope`
 defaults to `source`, which leaves an uncompressed dataset uncompressed —
 `all` overrides that. On a 100-event file, gzip is 65.4 MiB against LZ4's
 89.4 MiB, so gzip is worth it for anything but the fastest reads.
+
+### Issues
+
+Some checks report a problem but let the run go on. Each such check records
+what it found under a fixed integer code, in the `issues/` group, because a
+warning printed into a production log goes unseen. The group is always
+written, so an empty one says the checks ran and found nothing.
+
+```
+issues/event           (I,) int64   event index; -1 for the whole file
+issues/code            (I,) int32   see the table below
+issues/geant4_trackid  (I,) int64   the track concerned; -1 for none
+issues/message         (I,) str     what was found
+issues/codes/          code, name, description of every code
+```
+
+The root attribute `n_issues` holds the total, and `issues.attrs["n_<name>"]`
+the count for each code. `EventStoreV3.issues()` returns the group as arrays.
+The end of the run log lists the codes found and their first messages.
+
+| code | name | recorded when |
+|---|---|---|
+| 1 | `PRIMARY_TABLE_MISMATCH` | the primary table and `parent_track_id == -1` disagree about a track (one row per track); the table is used |
+| 2 | `NO_PRIMARY_TABLE` | the input has no primary table, so the parent-less particles were taken as primaries (once per file) |
+| 3 | `EMPTY_IMAGE` | every particle of an event has an empty point cloud, and `allow_empty_image=true` let the run go on |
+| 4 | `OUTSIDE_READOUT_WINDOW` | none of an event's deposits arrived inside the readout window; the event was written empty |
+
+Codes are never renumbered or reused, so counts can be summed across files.
 
 ### Expert and debugging output
 

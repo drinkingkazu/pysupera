@@ -420,6 +420,11 @@ class EventWriterV3:
             ds[self._n_events] = total
         self._f["n_events"][()] = np.int64(self._n_events)
 
+    def write_issues(self, log):
+        """Store the run's :class:`~pysupera.issues.IssueLog` as issues/."""
+        from .issues import write_issues
+        write_issues(self._f, log)
+
     def close(self):
         if self._f is not None:
             self._f.close()
@@ -638,6 +643,14 @@ class EventStoreV3:
                 d["source"] = g.attrs.get("source", pname)
                 out[(int(g.attrs["volume"]), int(g.attrs["plane"]))] = d
         return out
+
+    def issues(self):
+        """
+        The run's recorded issues (:func:`pysupera.issues.read_issues`), or
+        None for a file written before they were.
+        """
+        from .issues import read_issues
+        return read_issues(self._f)
 
     def group_owners(self, ev):
         """
