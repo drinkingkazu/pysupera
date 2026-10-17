@@ -754,6 +754,9 @@ body.dragover #canvas-wrap::after{
   <div class="tgrp">
     <button class="tbtn" id="btn-center" data-tip="Center camera [C]">CENTER</button>
     <button class="tbtn" id="btn-axes" data-tip="Toggle axes [A]">AXES</button>
+    <button class="tbtn active" id="btn-hoverhl" data-tip="Highlight the instance under the cursor [H]">HOVER</button>
+    <button class="tbtn" id="btn-unpin" data-tip="Clear pinned instances (click a track to pin) [X]">UNPIN</button>
+    <button class="tbtn" id="btn-pan" data-tip="Left-drag pans instead of rotating [P]; right-drag / shift-drag / shift+arrows always pan">PAN</button>
     <button class="tbtn" id="btn-shot" data-tip="Save PNG screenshot [S]">SHOT</button>
     <button class="tbtn dim" id="btn-debug" data-tip="Log debug info [D]">DBG</button>
     <button class="tbtn dim" id="btn-help" data-tip="Keyboard shortcuts [?]" style="padding:4px 9px">?</button>
@@ -927,6 +930,11 @@ body.dragover #canvas-wrap::after{
       <div class="help-row"><span>Previous event</span><kbd>←</kbd></div>
       <div class="help-row"><span>Next event</span><kbd>→</kbd></div>
       <div class="help-row"><span>Center camera</span><kbd>C</kbd></div>
+      <div class="help-row"><span>Pan camera</span><kbd>right-drag · shift-drag · shift+arrows</kbd></div>
+      <div class="help-row"><span>Left-drag pans (toggle)</span><kbd>P</kbd></div>
+      <div class="help-row"><span>Pin / unpin instance</span><kbd>click</kbd></div>
+      <div class="help-row"><span>Clear pinned</span><kbd>X</kbd></div>
+      <div class="help-row"><span>Hover highlight on/off</span><kbd>H</kbd></div>
       <div class="help-row"><span>Toggle axes</span><kbd>A</kbd></div>
       <div class="help-row"><span>Screenshot</span><kbd>S</kbd></div>
       <div class="help-row"><span>Play / pause anim</span><kbd>Space</kbd></div>
@@ -1018,6 +1026,7 @@ void main(){
 
 const FRAG_SHADER = `
 uniform float uCmap,uOpacity,uTimeThresh,uAnimUseNorm,uEnergyThresh,uHighlightId,uHighlightInstId,uDiscreteColor,uInstPtThresh,uViewMode;
+uniform float uPins[8],uNPins;
 varying float vN,vTime,vEnergy,vIntId,vInstId,vRawVal,vInstPts,vPdg;
 vec3 viridis(float t){vec3 c0=vec3(.277,.0054,.334),c1=vec3(.105,1.404,1.384),c2=vec3(-.331,.215,.095),c3=vec3(-4.63,-5.80,-19.33),c4=vec3(6.23,14.18,56.69),c5=vec3(4.78,-13.74,-65.35),c6=vec3(-5.44,4.65,26.31);return clamp(c0+t*(c1+t*(c2+t*(c3+t*(c4+t*(c5+t*c6))))),0.,1.);}
 vec3 plasma(float t){vec3 c0=vec3(.059,.023,.543),c1=vec3(2.177,.238,.754),c2=vec3(-2.689,-7.456,3.110),c3=vec3(6.130,42.35,-28.52),c4=vec3(-11.11,-82.67,60.14),c5=vec3(10.02,71.41,-54.07),c6=vec3(-3.66,-22.93,18.19);return clamp(c0+t*(c1+t*(c2+t*(c3+t*(c4+t*(c5+t*c6))))),0.,1.);}
@@ -1040,6 +1049,13 @@ void main(){
   else if(uCmap<3.5)         col=hot(vN);
   else if(uCmap<4.5)         col=cool(vN);
   else                       col=vec3(vN);
+  // Pinned instances (click) stay lit together, over any hover highlight.
+  if(uNPins>0.5){
+    bool pin=false;
+    for(int k=0;k<8;k++){if(float(k)<uNPins&&abs(vInstId-uPins[k])<0.5)pin=true;}
+    if(!pin){gl_FragColor=vec4(col*0.11,uOpacity*0.11);return;}
+    gl_FragColor=vec4(col,uOpacity);return;
+  }
   if(uHighlightInstId>=0.0){
     bool si=abs(vInstId-uHighlightInstId)<0.5;
     bool sx=uHighlightId>=0.0&&abs(vIntId-uHighlightId)<0.5;
@@ -1062,6 +1078,7 @@ const S={evIdx:0,showNLE:true,showLE:true,col:8,cmap:0,autoRange:true,size:2,opa
   anim:{playing:false,tMin:0,tMax:1,dur:30,t0wall:0,_pausedFrac:0,normMode:0,spread:1.0,drift:{on:false,speed:0.0016}},
   rot:{on:false,secPerRev:30},
   logScale:false, eThr:0, hist:null, highlight:-1, highlightLocked:false, interactions:[],
+  pins:[], hoverHL:true, _hoverInst:-1,
   adaptiveZoom:true, _savedCam:null, _camLerp:null, _lockedInter:null, statsDet:null,
   instGraph:null, instHighlight:-1, instLocked:-1, instSemFilter:null, instPtThresh:0, _instCountMap:null, _lockedDetHTML:null,
   _cloudHoverIntId:-1, _cloudHoverInstId:-1, _curGraphParams:null,
@@ -1188,7 +1205,7 @@ function buildPoints(f32, instPtsBuf, pdgBuf){
   geo.setAttribute('pdg',new THREE.BufferAttribute(pdgBuf||new Float32Array(N),1));
   geo.computeBoundingBox(); geo.computeBoundingSphere();
   const mat=new THREE.ShaderMaterial({
-    uniforms:{uColorCol:{value:S.col},uMin:{value:0},uMax:{value:1},uSize:{value:S.size},uCmap:{value:S.cmap},uOpacity:{value:S.opacity},uTimeThresh:{value:ANIM_THRESH_MAX},uAnimUseNorm:{value:0},uLogScale:{value:0},uEnergyThresh:{value:S.eThr},uHighlightId:{value:-1},uHighlightInstId:{value:-1},uDiscreteColor:{value:0},uInstPtThresh:{value:S.instPtThresh},uViewMode:{value:0},uDriftSpeed:{value:0},uBboxXMin:{value:S.bbox.xMin},uBboxXMax:{value:S.bbox.xMax}},
+    uniforms:{uColorCol:{value:S.col},uMin:{value:0},uMax:{value:1},uSize:{value:S.size},uCmap:{value:S.cmap},uOpacity:{value:S.opacity},uTimeThresh:{value:ANIM_THRESH_MAX},uAnimUseNorm:{value:0},uLogScale:{value:0},uEnergyThresh:{value:S.eThr},uHighlightId:{value:-1},uHighlightInstId:{value:-1},uPins:{value:_pinArr()},uNPins:{value:S.pins.length},uDiscreteColor:{value:0},uInstPtThresh:{value:S.instPtThresh},uViewMode:{value:0},uDriftSpeed:{value:0},uBboxXMin:{value:S.bbox.xMin},uBboxXMax:{value:S.bbox.xMax}},
     vertexShader:VERT_SHADER,fragmentShader:FRAG_SHADER,transparent:true,depthWrite:false,
   });
   return {pts:new THREE.Points(geo,mat),n:N,f32};
@@ -1327,7 +1344,7 @@ async function loadEvent(idx){
   resetAnim();
   logMsg('Loading event '+idx+'…'); clearObjects();
   S.highlight=-1; S.highlightLocked=false; S.instHighlight=-1; S.instLocked=-1;
-  S._curGraphParams=null;
+  S._curGraphParams=null; S.pins=[];
   _setInstHighlight(-1); _hideLockedBar();
   let _nleF32, _leF32, _pdgMap=null;
   try{
@@ -2570,6 +2587,60 @@ function updateStats(){
 
 function setStatus(msg){document.getElementById('status').textContent=msg;}
 
+// ── Pinned instances, hover highlight, pan mode ──
+// Clicking a track pins its instance; pinned instances stay lit together, so
+// a delta ray and its parent can be seen at once.  While any is pinned the
+// hover only reads coordinates.
+function _pinArr(){const a=new Array(8).fill(-1);(S.pins||[]).forEach((v,k)=>{if(k<8)a[k]=v;});return a;}
+function _hoverLights(){return S.hoverHL&&!S.pins.length;}
+function _clearHover(){
+  if(S._cloudHoverInstId>=0){S._cloudHoverInstId=-1;_setInstHighlight(-1);}
+  if(S._cloudHoverIntId>=0&&!S.highlightLocked){
+    S._cloudHoverIntId=-1; _setHighlight(-1);
+    const _b=document.getElementById('ip-bubbles');
+    if(_b) _b.querySelectorAll('.ip-bub').forEach(e=>e.classList.remove('dimmed','active'));
+    const _det=document.getElementById('ip-detail');
+    if(_det) _det.innerHTML=S.statsDet||'';
+  }
+}
+function _applyPins(){
+  for(const o of[objNLE,objLE]){
+    if(!o) continue;
+    o.pts.material.uniforms.uPins.value=_pinArr();
+    o.pts.material.uniforms.uNPins.value=Math.min(S.pins.length,8);
+  }
+  if(S.pins.length) _clearHover();
+  document.getElementById('btn-unpin').classList.toggle('active',S.pins.length>0);
+  setStatus(S.pins.length?'Pinned instance'+(S.pins.length>1?'s ':' ')+S.pins.join(', ')+' — click again to unpin, X clears'
+                         :'Nothing pinned');
+}
+function togglePin(instId){
+  if(instId<0) return;
+  const k=S.pins.indexOf(instId);
+  if(k>=0) S.pins.splice(k,1); else{S.pins.push(instId); if(S.pins.length>8) S.pins.shift();}
+  _applyPins();
+}
+function clearPins(){if(S.pins.length){S.pins=[];_applyPins();}}
+function setHoverHL(on){
+  S.hoverHL=on; document.getElementById('btn-hoverhl').classList.toggle('active',on);
+  if(!on) _clearHover();
+}
+function setPanMode(on){
+  controls.mouseButtons.LEFT=on?THREE.MOUSE.PAN:THREE.MOUSE.ROTATE;
+  document.getElementById('btn-pan').classList.toggle('active',on);
+}
+const PAN_KEYS={ArrowLeft:[-1,0],ArrowRight:[1,0],ArrowUp:[0,1],ArrowDown:[0,-1]};
+function panView(dxPix,dyPix){
+  const el=renderer.domElement;
+  const dist=camera.position.distanceTo(controls.target);
+  const half=dist*Math.tan(camera.fov/2*Math.PI/180);
+  const sx=2*dxPix*half/Math.max(1,el.clientHeight), sy=2*dyPix*half/Math.max(1,el.clientHeight);
+  camera.updateMatrix();
+  const m=camera.matrix.elements;
+  const d=new THREE.Vector3(m[0],m[1],m[2]).multiplyScalar(-sx).add(new THREE.Vector3(m[4],m[5],m[6]).multiplyScalar(sy));
+  camera.position.add(d); controls.target.add(d); controls.update();
+}
+
 function logMsg(msg,cls=''){
   const el=document.getElementById('log-text'); if(!el) return;
   const t=new Date().toLocaleTimeString('en-US',{hour12:false,hour:'2-digit',minute:'2-digit',second:'2-digit'});
@@ -3289,6 +3360,17 @@ document.getElementById('btn-ethr-reset').addEventListener('click',()=>{
   drawHistogram();
 });
 document.getElementById('btn-center').addEventListener('click',centerCamera);
+document.getElementById('btn-hoverhl').addEventListener('click',()=>setHoverHL(!S.hoverHL));
+document.getElementById('btn-unpin').addEventListener('click',clearPins);
+document.getElementById('btn-pan').addEventListener('click',()=>setPanMode(controls.mouseButtons.LEFT!==THREE.MOUSE.PAN));
+// A click on the cloud pins the instance under the cursor; a drag does not.
+(()=>{let down=null;
+  renderer.domElement.addEventListener('pointerdown',e=>{down=e.button===0?[e.clientX,e.clientY]:null;});
+  renderer.domElement.addEventListener('pointerup',e=>{
+    if(!down||Math.hypot(e.clientX-down[0],e.clientY-down[1])>4) return;
+    down=null; if(S._hoverInst>=0) togglePin(S._hoverInst);
+  });
+})();
 document.getElementById('btn-rot').addEventListener('click',toggleRotation);
 document.getElementById('sl-rot-speed').addEventListener('input',e=>{
   S.rot.secPerRev=parseInt(e.target.value);
@@ -3425,8 +3507,12 @@ document.body.addEventListener('drop',e=>{e.preventDefault();document.body.class
 // Keyboard
 document.addEventListener('keydown',e=>{
   if(e.target.tagName==='INPUT') return;
+  if(e.shiftKey&&PAN_KEYS[e.key]){e.preventDefault();const k=PAN_KEYS[e.key];panView(k[0]*60,k[1]*60);return;}
   if(e.key==='ArrowLeft') goTo(S.evIdx-1);
   if(e.key==='ArrowRight') goTo(S.evIdx+1);
+  if(e.key==='h') setHoverHL(!S.hoverHL);
+  if(e.key==='x') clearPins();
+  if(e.key==='p') setPanMode(controls.mouseButtons.LEFT!==THREE.MOUSE.PAN);
   if(e.key==='c') centerCamera();
   if(e.key==='a') axesHelper.visible=!axesHelper.visible;
   if(e.key==='s') takeScreenshot();
@@ -3439,6 +3525,7 @@ document.addEventListener('keydown',e=>{
   if(e.key==='d') document.getElementById('btn-debug').click();
   if(e.key==='?') helpEl.classList.toggle('open');
   if(e.key==='Escape'){
+    clearPins();
     helpEl.classList.remove('open');
     document.querySelectorAll('.panel').forEach(p=>p.classList.remove('open'));
     document.querySelectorAll('[data-toggle]').forEach(b=>b.classList.remove('active'));
@@ -3561,10 +3648,12 @@ let fpsT=performance.now(),fpsN=0;
         } else {
           coordEl.style.display='block';
           coordEl.innerHTML='<div class="ch-hdr">'+(isLE?'&#9632; LE scatter':'&#9633; Non-LE')+' &nbsp; pt&nbsp;'+idx+'</div><div class="ch-div"></div>'+rows+'<div class="ch-div"></div>'+_xtra;
-          // cloud hover → graph node + interaction bubble
-          if(S._cloudHoverInstId!==_iid){S._cloudHoverInstId=_iid;
+          // cloud hover → graph node + interaction bubble (unless hover
+          // highlighting is off or something is pinned)
+          S._hoverInst=_iid;
+          if(_hoverLights()&&S._cloudHoverInstId!==_iid){S._cloudHoverInstId=_iid;
             _setInstHighlight(_iid>=0?_instNodeIdxById(_iid):-1);}
-          if(S._cloudHoverIntId!==_iidInt&&!S.highlightLocked){
+          if(_hoverLights()&&S._cloudHoverIntId!==_iidInt&&!S.highlightLocked){
             S._cloudHoverIntId=_iidInt; _setHighlight(_iidInt);
             const _b=document.getElementById('ip-bubbles');
             if(_b) _b.querySelectorAll('.ip-bub').forEach(e=>{const _s=parseFloat(e.dataset.id)===_iidInt;e.classList.toggle('active',_s);e.classList.toggle('dimmed',!_s);});
@@ -3572,7 +3661,7 @@ let fpsT=performance.now(),fpsN=0;
           }
         }
       } else {
-        coordEl.style.display='none';
+        coordEl.style.display='none'; S._hoverInst=-1;
         if(S._cloudHoverInstId>=0){S._cloudHoverInstId=-1;_setInstHighlight(-1);}
         if(S._cloudHoverIntId>=0&&!S.highlightLocked){
           S._cloudHoverIntId=-1; _setHighlight(-1);

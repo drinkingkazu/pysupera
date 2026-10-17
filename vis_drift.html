@@ -65,7 +65,10 @@
   </label>
   <label>show &ge; <input type="range" id="thr" min="0" max="99" step="1" value="0" style="width:90px"><span id="thrv" class="k">all</span></label>
   <button id="fit">fit (c)</button>
-  <span id="hint" class="k">load the output and its hits subset — hover a point to follow it across both views</span>
+  <label><input type="checkbox" id="hoverhl" checked> hover highlight (h)</label>
+  <button id="unpin">clear highlight (x)</button>
+  <label><input type="checkbox" id="panmode"> left-drag pans (p)</label>
+  <span id="hint" class="k">load the output and its hits subset — hover a point to follow it across both views · click to pin, click again to unpin · pan: right-drag, shift-drag or arrows</span>
 </header>
 <div id="filters"><span>show semantic type:</span></div>
 
@@ -109,6 +112,7 @@ const S = {
   out:null, hit:null, ev:0, nEvents:0,
   T:null, H:null,               // the two point sets; see pointSet()
   sel:-1, dim:0.03, thrPct:0,
+  pins:new Set(), hoverHL:true, // clicked ids stay lit together; hover lights one
   mode:'inst', hl:'inst',
   cols:null, idRow:null,        // particle columns for the event, id -> row
   semShow:new Set(), leMode:'all',
@@ -248,7 +252,10 @@ document.getElementById('f-hit').onchange = async e => {
 
 document.getElementById('ev').onchange   = e => { S.ev = +e.target.value; rebuild(); };
 document.getElementById('mode').onchange = e => { S.mode = e.target.value; recolour(); };
-document.getElementById('hl').onchange   = e => { S.hl = e.target.value; S.sel = -1; buildKeys(); recolour(); };
+document.getElementById('hl').onchange   = e => { S.hl = e.target.value; S.sel = -1; S.pins.clear(); buildKeys(); recolour(); };
+document.getElementById('hoverhl').onchange = e => setHoverHL(e.target.checked);
+document.getElementById('unpin').onclick = () => clearPins();
+document.getElementById('panmode').onchange = e => setPanMode(e.target.checked);
 document.getElementById('logE').onchange = () => recolour();
 document.getElementById('offsensor').onchange = () => rebuild();
 document.getElementById('lemode').onchange = e => { S.leMode = e.target.value; recolour(); };
@@ -261,7 +268,13 @@ document.getElementById('dim').oninput = e => {
 };
 document.getElementById('thr').oninput = e => { S.thrPct = +e.target.value; recolour(); };
 document.getElementById('fit').onclick = () => fitView();
-addEventListener('keydown', e => { if(e.key === 'c') fitView(); });
+addEventListener('keydown', e => {
+  if(e.target.tagName === 'INPUT' || e.target.tagName === 'SELECT') return;
+  if(e.key === 'c') fitView();
+  if(e.key === 'h') setHoverHL(!S.hoverHL);
+  if(e.key === 'x' || e.key === 'Escape') clearPins();
+  if(e.key === 'p') setPanMode(!document.getElementById('panmode').checked);
+});
 
 // ------------------------------------------------------ the two point sets --
 // A point set is {name, n, pts (xyz), e (energy column), inst, frag (owner
@@ -459,26 +472,34 @@ function colourOf(P, i, ramp){
   }
 }
 
+// What is lit: the pinned ids when there are any, else the hovered one (when
+// hover highlighting is on); null when nothing is.
+let isLit = null;
+function updateLit(){
+  if(S.pins.size){ const p = S.pins; isLit = k => p.has(k); }
+  else if(S.hoverHL && S.sel >= 0){ const k0 = S.sel; isLit = k => k === k0; }
+  else isLit = null;
+}
 function paintSet(v, P){
   if(!v || !v.cloud || !P.n) return null;
   // The ramp sorts every value, so it is computed when the colouring or the
   // filter changes, not on every hover.
   if(!P.ramp) P.ramp = energyRamp(P);
-  const ramp = P.ramp, dimming = S.sel >= 0;
+  const ramp = P.ramp, dimming = isLit !== null;
   const col = v.cloud.geometry.attributes.color.array;
   let nSel = 0;
   const rgb = new Float32Array(P.n * 3);
   for(let i = 0; i < P.n; i++){
     const [r, g, b] = colourOf(P, i, ramp);
     rgb[i*3] = r; rgb[i*3+1] = g; rgb[i*3+2] = b;
-    const picked = dimming && P.visible[i] && P.key[i] === S.sel; if(picked) nSel++;
+    const picked = dimming && P.visible[i] && isLit(P.key[i]); if(picked) nSel++;
     col[i*4] = r; col[i*4+1] = g; col[i*4+2] = b;
     col[i*4+3] = !P.visible[i] ? 0 : picked ? 0 : (dimming ? S.dim : 1);
   }
   v.cloud.geometry.attributes.color.needsUpdate = true;
   const sp = new Float32Array(nSel * 3), sc = new Float32Array(nSel * 3); let k = 0;
   if(nSel) for(let i = 0; i < P.n; i++){
-    if(!(P.visible[i] && P.key[i] === S.sel)) continue;
+    if(!(P.visible[i] && isLit(P.key[i]))) continue;
     for(let d = 0; d < 3; d++){ sp[k*3+d] = P.pts[i*3+d]; sc[k*3+d] = rgb[i*3+d]; } k++;
   }
   const g = v.selCloud.geometry;
@@ -488,6 +509,7 @@ function paintSet(v, P){
   return {ramp, nSel};
 }
 function paint(){
+  updateLit();
   const t = paintSet(V.tru, S.T), h = paintSet(V.hit, S.H);
   drawLegend(t ? t.ramp : null, h ? h.ramp : null);
   return {t, h};
@@ -539,6 +561,14 @@ function makeView(hostId, set){
   host.addEventListener('pointerenter', () => { ACTIVE = v; });
   v.raycaster = new THREE.Raycaster(); v.pointer = new THREE.Vector2();
   v.renderer.domElement.addEventListener('mousemove', e => onMove(v, e));
+  if(document.getElementById('panmode').checked) v.controls.mouseButtons.LEFT = THREE.MOUSE.PAN;
+  // A click pins; a drag (rotate, pan) does not.
+  let down = null;
+  v.renderer.domElement.addEventListener('pointerdown', e => { down = e.button === 0 ? [e.clientX, e.clientY] : null; });
+  v.renderer.domElement.addEventListener('pointerup', e => {
+    if(!down || Math.hypot(e.clientX - down[0], e.clientY - down[1]) > 4) return;
+    down = null; const k = pickKey(v, e); if(k !== null) togglePin(k);
+  });
   v.controls.addEventListener('change', () => syncFrom(v));
   const resize = () => { const s = hostSize(host); v.camera.aspect = s.w/s.h;
                          v.camera.updateProjectionMatrix(); v.renderer.setSize(s.w, s.h, false); };
@@ -617,6 +647,16 @@ function fitView(){
   }
 }
 
+function pickKey(v, e){
+  const P = v.set(); if(!v.cloud || !P || !P.n) return null;
+  const r = v.renderer.domElement.getBoundingClientRect();
+  v.pointer.x = ((e.clientX - r.left)/r.width)*2 - 1; v.pointer.y = -((e.clientY - r.top)/r.height)*2 + 1;
+  v.raycaster.setFromCamera(v.pointer, v.camera);
+  for(const h of v.raycaster.intersectObject(v.cloud, false))
+    if(P.visible[h.index]) return P.key[h.index];
+  return null;
+}
+
 // Raycasting a few million points is not free, so pick at most every 50 ms.
 let lastPick = 0;
 function onMove(v, e){
@@ -692,6 +732,7 @@ function select(key){
   key = Number(key);
   if(key === S.sel) return;
   S.sel = key;
+  if(S.pins.size || !S.hoverHL) return;   // the hover does not change what is lit
   const {t, h} = paint();
   const lvl = S.hl === 'frag' ? 'fragment' : S.hl === 'inter' ? 'interaction' : 'instance';
   statusEl.innerHTML = key < 0 ? `<span class="k">not traced to a particle</span>`
@@ -699,12 +740,36 @@ function select(key){
       `   <span class="k">hits</span> <span class="v">${(h ? h.nSel : 0).toLocaleString()}</span>`;
 }
 
+// Click (not drag) pins the id under the cursor, or unpins it.
+function togglePin(key){
+  key = Number(key); if(key < 0) return;
+  if(S.pins.has(key)) S.pins.delete(key); else S.pins.add(key);
+  showPins();
+}
+function clearPins(){ S.pins.clear(); showPins(); }
+function showPins(){
+  const {t, h} = paint();
+  const lvl = S.hl === 'frag' ? 'fragment' : S.hl === 'inter' ? 'interaction' : 'instance';
+  if(!S.pins.size){ statusEl.innerHTML = `<span class="k">nothing pinned</span>`; return; }
+  statusEl.innerHTML = `<b>pinned ${lvl}${S.pins.size > 1 ? 's' : ''} ${[...S.pins].join(', ')}</b>` +
+    `   <span class="k">truth voxels</span> <span class="v">${(t ? t.nSel : 0).toLocaleString()}</span>` +
+    `   <span class="k">hits</span> <span class="v">${(h ? h.nSel : 0).toLocaleString()}</span>` +
+    `\n<span class="k">click again to unpin · x clears</span>`;
+}
+function setPanMode(on){
+  document.getElementById('panmode').checked = on;
+  for(const v of Object.values(V)) if(v) v.controls.mouseButtons.LEFT = on ? THREE.MOUSE.PAN : THREE.MOUSE.ROTATE;
+}
+function setHoverHL(on){
+  document.getElementById('hoverhl').checked = on; S.hoverHL = on; paint();
+}
+
 // ----------------------------------------------------------------- rebuild --
 function rebuild(){
   if(!S.out) return;
   if(!V.tru) V.tru = makeView('pane-true', () => S.T);
   if(!V.hit) V.hit = makeView('pane-hit', () => S.H);
-  S.sel = -1;
+  S.sel = -1; S.pins.clear();
   try{
     buildParticles(); buildTruth(); buildHits();
     buildKeys(); buildFilters(); applyFilter();

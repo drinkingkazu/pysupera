@@ -2,14 +2,20 @@
 <meta charset="utf-8">
 <title>pysupera — wire hits ⇄ voxels</title>
 <style>
-  :root{--bg:#0e1116;--panel:#161b22;--line:#2a313a;--text:#d8dee9;--text2:#8b949e;--accent:#58a6ff}
+  :root{
+    --bg:#0e1116; --panel:#161b22; --line:#2a313a;
+    --text:#d8dee9; --text2:#8b949e; --accent:#58a6ff;
+  }
   *{box-sizing:border-box}
   body{margin:0;background:var(--bg);color:var(--text);font:13px/1.45 ui-sans-serif,system-ui,sans-serif;height:100vh;display:flex;flex-direction:column}
-  header{padding:8px 12px;background:var(--panel);border-bottom:1px solid var(--line);display:flex;gap:14px;align-items:center;flex-wrap:wrap}
+  header{padding:7px 12px;background:var(--panel);border-bottom:1px solid var(--line);display:flex;gap:13px;align-items:center;flex-wrap:wrap}
   label{color:var(--text2);font-size:12px}
-  input[type=file]{font-size:11px;color:var(--text2);max-width:230px}
+  input[type=file]{font-size:11px;color:var(--text2);max-width:220px}
   select,button{background:#21262d;color:var(--text);border:1px solid var(--line);border-radius:5px;padding:3px 8px;font-size:12px}
   button:hover{border-color:var(--accent);cursor:pointer}
+  #filters{padding:5px 12px;background:var(--panel);border-bottom:1px solid var(--line);display:flex;gap:10px;align-items:center;flex-wrap:wrap;font-size:11px;color:var(--text2)}
+  #filters label{display:inline-flex;align-items:center;gap:4px;cursor:pointer}
+  .sw{width:10px;height:10px;border-radius:2px;display:inline-block}
   main{flex:1;display:flex;min-height:0}
   #three{flex:1;min-width:0;position:relative;overflow:hidden}
   #three canvas{position:absolute;inset:0;width:100%;height:100%;display:block}
@@ -19,11 +25,13 @@
   .pw h4 b{color:var(--text)}
   .cvwrap{flex:1;min-height:0;position:relative}
   canvas.plane{position:absolute;inset:0;width:100%;height:100%;display:block;background:#0a0d12;border-radius:4px;cursor:crosshair;image-rendering:pixelated}
-  #banner{position:absolute;left:10px;right:10px;top:10px;background:#5a1d1d;border:1px solid #a33;border-radius:6px;padding:8px 10px;font-size:12px;display:none;z-index:5;white-space:pre-wrap}
+  #banner{position:absolute;left:10px;right:10px;top:10px;background:#5a1d1d;border:1px solid #a33;border-radius:6px;padding:8px 10px;font-size:12px;display:none;z-index:6;white-space:pre-wrap}
   #pinfo{position:absolute;right:10px;bottom:10px;background:rgba(13,17,23,.94);border:1px solid var(--line);border-radius:6px;padding:8px 11px;font-size:12px;z-index:4;display:none;font-variant-numeric:tabular-nums}
   #pinfo table{border-collapse:collapse} #pinfo td{padding:1px 0}
   #pinfo td:first-child{color:var(--text2);padding-right:12px}
   #status{position:absolute;left:10px;bottom:10px;z-index:4;background:rgba(13,17,23,.9);border:1px solid var(--line);border-radius:6px;padding:7px 10px;font-size:12px;max-width:min(560px,90%);white-space:pre-wrap}
+  #legend{position:absolute;left:10px;top:10px;background:rgba(13,17,23,.92);border:1px solid var(--line);border-radius:6px;padding:7px 10px;font-size:11px;z-index:4;max-height:40%;overflow:auto}
+  #legend .row{display:flex;align-items:center;gap:6px;margin:2px 0}
   #log{position:absolute;right:10px;top:10px;background:rgba(13,17,23,.9);border:1px solid var(--line);border-radius:6px;padding:7px 10px;font-size:11px;color:var(--text2);max-height:32%;overflow:auto;max-width:44%}
   .k{color:var(--text2)} .v{color:var(--text)} b{color:var(--accent)}
 </style>
@@ -32,21 +40,41 @@
   <label>output .h5 <input type="file" id="f-out" accept=".h5"></label>
   <label>hits subset .h5 <input type="file" id="f-hit" accept=".h5"></label>
   <label>event <select id="ev"></select></label>
-  <label>link by
-    <select id="level"><option value="inst">instance</option><option value="frag">fragment</option><option value="inter">interaction</option></select>
+  <label>colour by
+    <select id="mode">
+      <option value="energy">energy / charge</option>
+      <option value="sem">semantic type</option>
+      <option value="frag">fragment id</option>
+      <option value="inst" selected>instance id</option>
+      <option value="inter">interaction id</option>
+      <option value="pdg">particle type (PDG)</option>
+    </select>
   </label>
-  <label>point size <input type="range" id="psize" min="1" max="8" step="0.5" value="2.5" style="width:80px"></label>
-  <label>others <input type="range" id="dim" min="0" max="1" step="0.02" value="0.12" style="width:80px"><span id="dimv" class="k">0.12</span></label>
+  <label>highlight
+    <select id="hl">
+      <option value="inst" selected>instance</option>
+      <option value="frag">fragment</option>
+      <option value="inter">interaction</option>
+    </select>
+  </label>
+  <label>point size <input type="range" id="psize" min="1" max="8" step="0.5" value="2.5" style="width:70px"></label>
+  <label>others <input type="range" id="dim" min="0" max="1" step="0.01" value="0.12" style="width:80px"><span id="dimv" class="k">0.12</span></label>
+  <label><input type="checkbox" id="logE" checked> log scale</label>
   <label>LE
     <select id="lemode"><option value="all">show all</option><option value="hide">hide LE</option><option value="only">hide non-LE</option></select>
   </label>
+  <label>show &ge; <input type="range" id="thr" min="0" max="99" step="1" value="0" style="width:90px"><span id="thrv" class="k">all</span></label>
   <label><input type="checkbox" id="info" checked> point info</label>
   <button id="fit">fit view (c)</button>
-  <span id="hint" class="k">load the output and its hits subset — hover a voxel or a hit</span>
+  <label><input type="checkbox" id="hoverhl" checked> hover highlight (h)</label>
+  <button id="unpin">clear highlight (x)</button>
+  <label><input type="checkbox" id="panmode"> left-drag pans (p)</label>
+  <span id="hint" class="k">load the output and its hits subset — hover a voxel or a hit to follow it across every view · click to pin, click again to unpin · 3D pan: right-drag, shift-drag or arrows</span>
 </header>
+<div id="filters"><span>show semantic type:</span></div>
 
 <main>
-  <div id="three"><div id="banner"></div><div id="status">no file loaded</div><div id="pinfo"></div><div id="log"></div></div>
+  <div id="three"><div id="banner"></div><div id="legend"></div><div id="status">no file loaded</div><div id="pinfo"></div><div id="log"></div></div>
   <div id="planes"></div>
 </main>
 
@@ -64,8 +92,8 @@ import {OrbitControls} from 'three/addons/controls/OrbitControls.js';
 // What this shows.  Left: points/flat -- the true energy deposits behind the
 // hits, voxelized, each owned by a pysupera particle.  Right: every JAXTPC
 // hit of every wire plane, wire against tick, each labelled by hit_labels/
-// with the fragment and instance it belongs to.  One owner id drives both
-// sides, so hovering a voxel lights its hits on all planes and hovering a hit
+// with the fragment and instance it belongs to.  One id drives every view,
+// so hovering a voxel lights its hits on all planes and hovering a hit
 // lights its voxels and its hits on the other planes.
 //
 // Inputs, both gzip (the browser decodes nothing else):
@@ -75,11 +103,14 @@ import {OrbitControls} from 'three/addons/controls/OrbitControls.js';
 
 // ---------------------------------------------------------------- state --
 const S = {
-  out:null, hit:null, ev:0, level:'inst', nEvents:0,
-  pts:null, feat:null, owner:null, isLE:null,  // voxels (visible only)
-  leMode:'all', planes:[], sel:-1, dim:0.12,
-  interOf:new Map(),            // instance id -> interaction id
-  instOfFrag:new Map(),         // fragment id -> instance id
+  out:null, hit:null, ev:0, nEvents:0,
+  T:null, planes:[],            // the voxels and one point set per plane; see pointSet()
+  sel:-1, dim:0.12, thrPct:0,
+  pins:new Set(), hoverHL:true, // clicked ids stay lit together; hover lights one
+  mode:'inst', hl:'inst',
+  cols:null, idRow:null,        // particle columns for the event, id -> row
+  semShow:new Set(), leMode:'all',
+  ramp:{T:null, H:null},        // energy colour scales: voxels, and all planes together
   ncol:6,                       // points/flat columns
 };
 let H5File, FS;
@@ -94,6 +125,47 @@ function banner(msg){
   if(msg){ bannerEl.textContent = msg; log(msg.split('\n')[0]); }
 }
 
+// ------------------------------------------------------------- palette --
+// Categorical slots in a fixed order; a seventh category folds into "other".
+// Identity is never carried by colour alone: a legend is always up, classes
+// can be isolated with the filter strip, and the hover panel names them.
+const CAT = ['#3987e5','#d95926','#199e70','#c98500','#d55181','#008300'];
+const CAT_OTHER = '#6e7681';
+const SEM = {1:'shower', 2:'track', 3:'delta', 4:'Michel', 5:'LE scatter', 6:'unknown'};
+const SEM_ORDER = [2, 1, 3, 4, 5, 6];
+const SEM_COLOR = {}; SEM_ORDER.forEach((v, i) => { SEM_COLOR[v] = CAT[i]; });
+//: SemanticType.kLEScatter
+const SEM_LE = 5;
+const PDG_ORDER = [[13,'mu-'], [-13,'mu+'], [11,'e-'], [-11,'e+'], [22,'gamma'],
+                   [2212,'proton'], [2112,'neutron'], [211,'pi+'], [-211,'pi-']];
+const PDG_NAME = new Map(PDG_ORDER);
+const PDG_COLOR = new Map(); PDG_ORDER.slice(0, 6).forEach(([p], i) => PDG_COLOR.set(p, CAT[i]));
+const SEQ = ['#0d366b','#104281','#184f95','#1c5cab','#256abf','#2a78d6',
+             '#3987e5','#5598e7','#6da7ec','#86b6ef','#9ec5f4','#b7d3f6','#cde2fb'];
+const DIV_NEG = '#3987e5', DIV_MID = '#383835', DIV_POS = '#e34948';
+const hex2rgb = h => [parseInt(h.slice(1,3),16)/255, parseInt(h.slice(3,5),16)/255, parseInt(h.slice(5,7),16)/255];
+const lerpHex = (a, b, f) => { const A = hex2rgb(a), B = hex2rgb(b); return A.map((x, i) => x + (B[i]-x)*f); };
+const CAT_RGB = CAT.map(hex2rgb), SEQ_RGB = SEQ.map(hex2rgb), OTHER_RGB = hex2rgb(CAT_OTHER);
+const DIV_RGB = (() => { const n = 6, out = [];
+  for(let i = n; i > 0; i--) out.push(lerpHex(DIV_NEG, DIV_MID, 1 - i/n));
+  out.push(hex2rgb(DIV_MID));
+  for(let i = 1; i <= n; i++) out.push(lerpHex(DIV_MID, DIV_POS, i/n));
+  return out; })();
+const rgb2css = c => `rgb(${c.map(v => Math.round(v*255)).join(',')})`;
+// Ids run to thousands; a stable hash keeps one object one colour in every
+// view, and the hover highlight carries identity.  Cached: a plane has
+// hundreds of thousands of hits.
+const HASH = new Map();
+function hashColor(id){
+  if(id < 0) return [0.30,0.33,0.38];
+  let c = HASH.get(id);
+  if(!c){ const h = Math.imul(id ^ 0x9e3779b9, 0x85ebca6b) >>> 0;
+          const t = new THREE.Color().setHSL((h % 360)/360, 0.68, 0.58);
+          c = [t.r, t.g, t.b]; HASH.set(id, c); }
+  return c;
+}
+
+// ------------------------------------------------------------ h5 helpers --
 // h5wasm decodes gzip/shuffle/szip and nothing else.  An LZ4 or Blosc
 // dataset does not raise -- it yields garbage -- so refuse up front.
 const READABLE = new Set(['1', '2', '3', '4', '5', '6']);
@@ -115,22 +187,6 @@ function attr(f, path, name){
     return (typeof a === 'object' && 'value' in a) ? a.value : a;
   }catch(e){ return null; }
 }
-
-const LEVEL_NAME = {inst:'instance', frag:'fragment', inter:'interaction'};
-//: SemanticType.kLEScatter
-const LE_SEM = 5;
-// Whether a point or hit with this LE flag passes the LE selector.
-const leShown = le => S.leMode === 'hide' ? !le : S.leMode === 'only' ? !!le : true;
-
-// Stable colour per owner id: the same function colours voxels and hits, so a
-// colour means the same object on both sides.
-function ownerColor(id){
-  if(id < 0) return [0.30, 0.33, 0.38];
-  const h = Math.imul(id ^ 0x9e3779b9, 0x85ebca6b) >>> 0;
-  const c = new THREE.Color().setHSL((h % 360) / 360, 0.68, 0.58);
-  return [c.r, c.g, c.b];
-}
-
 const has = (f, p) => { try { return f.get(p) !== null; } catch(e){ return false; } };
 const val = (f, p) => f.get(p).value;
 const sl  = (f, p, a, b) => f.get(p).slice([[a, b]]);
@@ -143,12 +199,7 @@ async function boot(){
   log('h5wasm ready');
 }
 const booted = boot();
-
-async function openBytes(buf, tag){
-  await booted;
-  FS.writeFile(tag, new Uint8Array(buf));
-  return new H5File(tag, 'r');
-}
+async function openBytes(buf, tag){ await booted; FS.writeFile(tag, new Uint8Array(buf)); return new H5File(tag, 'r'); }
 
 async function loadOut(buf, name){
   S.out = await openBytes(buf, 'out.h5');
@@ -218,93 +269,94 @@ document.getElementById('f-hit').onchange = async e => {
   }catch(err){ log('ERROR fetching: ' + err.message); }
 })();
 
-document.getElementById('ev').onchange = e => { S.ev = +e.target.value; rebuild(); };
-document.getElementById('level').onchange = e => { S.level = e.target.value; rebuild(); };
+document.getElementById('ev').onchange   = e => { S.ev = +e.target.value; rebuild(); };
+document.getElementById('mode').onchange = e => { S.mode = e.target.value; recolour(); };
+document.getElementById('hl').onchange   = e => { S.hl = e.target.value; S.sel = -1; S.pins.clear(); buildKeys(); recolour(); };
+document.getElementById('hoverhl').onchange = e => setHoverHL(e.target.checked);
+document.getElementById('unpin').onclick = () => clearPins();
+document.getElementById('panmode').onchange = e => setPanMode(e.target.checked);
+document.getElementById('logE').onchange = () => recolour();
+document.getElementById('lemode').onchange = e => { S.leMode = e.target.value; recolour(); };
 document.getElementById('psize').oninput = e => {
   if(VIEW && VIEW.cloud){ VIEW.cloud.material.size = +e.target.value;
                           VIEW.selCloud.material.size = +e.target.value; }
 };
 document.getElementById('dim').oninput = e => {
-  S.dim = +e.target.value;
-  document.getElementById('dimv').textContent = S.dim.toFixed(2);
-  paintCloud(); for(const p of S.planes) paintPlane(p);
+  S.dim = +e.target.value; document.getElementById('dimv').textContent = S.dim.toFixed(2); paint();
 };
-document.getElementById('lemode').onchange = e => { S.leMode = e.target.value; rebuild(); };
+document.getElementById('thr').oninput = e => { S.thrPct = +e.target.value; recolour(); };
 document.getElementById('info').onchange = e => {
   if(!e.target.checked) document.getElementById('pinfo').style.display = 'none';
 };
 document.getElementById('fit').onclick = () => fitView();
-addEventListener('keydown', e => { if(e.key === 'c') fitView(); });
+addEventListener('keydown', e => {
+  if(e.target.tagName === 'INPUT' || e.target.tagName === 'SELECT') return;
+  if(e.key === 'c') fitView();
+  if(e.key === 'h') setHoverHL(!S.hoverHL);
+  if(e.key === 'x' || e.key === 'Escape') clearPins();
+  if(e.key === 'p') setPanMode(!document.getElementById('panmode').checked);
+});
 
-// ------------------------------------------------- per-event voxel labels --
-// A voxel's owner is the instance (or fragment) block its row falls in:
-// ownership is positional, exactly as the format intends.
-function buildVoxels(){
-  const f = S.out, ev = S.ev;
-  const eo = val(f, 'events/offsets'), po = val(f, 'points/offsets');
+// ------------------------------------------------------------ point sets --
+// A point set is {name, n, e (energy column), inst, frag (owner ids), le},
+// plus key / visible / rgb, which buildKeys, applyFilter and recolour fill
+// in.  The voxels add pts (xyz) and feat; a plane adds wire, tick, src.
+// Everything below that colours, filters or highlights works on either.
+function pointSet(name, n){
+  return {name, n, e:new Float32Array(n),
+          inst:new Int32Array(n).fill(-1), frag:new Int32Array(n).fill(-1),
+          le:new Uint8Array(n), key:null, visible:null, rgb:null};
+}
+const allSets = () => S.T ? [S.T, ...S.planes] : [];
+
+function buildParticles(){
+  const f = S.out, ev = S.ev, eo = val(f, 'events/offsets');
   const a = Number(eo[ev]), b = Number(eo[ev+1]);
-  const pa = Number(po[ev]), pb = Number(po[ev+1]);
-  const n = pb - pa;
-  S.ncol = Number(f.get('points/flat').shape[1]);
-  const col = nm => f.get('particles').keys().includes(nm) ? sl(f, 'particles/' + nm, a, b) : null;
-  const id = col('id'), iid = col('inst_id'), fid = col('frag_id'), itr = col('interaction_id');
-  const fin = col('frag_inst_id');
-
-  // instance -> interaction, fragment -> instance
-  S.interOf = new Map(); S.instOfFrag = new Map();
-  for(let k = 0; k < id.length; k++){
-    const i = Number(id[k]);
-    if(Number(iid[k]) === i) S.interOf.set(i, Number(itr[k]));
-    if(fin && Number(fid[k]) === i && Number(fin[k]) >= 0) S.instOfFrag.set(i, Number(fin[k]));
-  }
-  loadKinematics(a, b, id, col);
-  if(n <= 0){
-    S.pts = new Float32Array(0); S.feat = new Float32Array(0);
-    S.owner = new Int32Array(0); S.isLE = new Uint8Array(0); return;
-  }
-  const feat = Float32Array.from(f.get('points/flat').slice([[pa, pb], [0, S.ncol]]));
-  const owner = new Int32Array(n).fill(-1), isLE = new Uint8Array(n);
-  const fill = (s, e, v, le) => {
-    s = Number(s); e = Number(e); if(s < 0) return;
-    for(let j = Math.max(0, s - pa); j < Math.min(n, e - pa); j++){
-      if(v !== null) owner[j] = v;
-      if(le) isLE[j] = 1;
-    }
-  };
-  // LE belongs to the fragment: a kLEScatter fragment is a blob, and an LE
-  // deposit absorbed into a track is the track's.  One run per fragment.
-  const fs = col('frag_pc_start'), fe = col('frag_pc_end'), fsem = col('frag_sem_type');
-  for(let k = 0; k < id.length; k++){
-    if(Number(fid[k]) !== Number(id[k])) continue;
-    fill(fs[k], fe[k], S.level === 'frag' ? Number(id[k]) : null,
-         Number(fsem[k]) === LE_SEM);
-  }
-  if(S.level !== 'frag'){
-    const is0 = col('inst_pc_start'), ie0 = col('inst_pc_end');
-    for(let k = 0; k < id.length; k++){
-      if(Number(iid[k]) !== Number(id[k])) continue;
-      const v = S.level === 'inter' ? (S.interOf.get(Number(id[k])) ?? -1) : Number(id[k]);
-      fill(is0[k], ie0[k], v, false);
-    }
-  }
-  // Drop LE (or non-LE) rows here rather than at draw time, so the picker cannot select
-  // something the user asked not to see.
-  const keep = [];
-  for(let j = 0; j < n; j++) if(leShown(isLE[j])) keep.push(j);
-  const m = keep.length, C = S.ncol;
-  const f2 = new Float32Array(m * C), o2 = new Int32Array(m), l2 = new Uint8Array(m), p3 = new Float32Array(m * 3);
-  for(let i = 0; i < m; i++){
-    const j = keep[i];
-    for(let c = 0; c < C; c++) f2[i*C+c] = feat[j*C+c];
-    for(let c = 0; c < 3; c++) p3[i*3+c] = feat[j*C+c];
-    o2[i] = owner[j]; l2[i] = isLE[j];
-  }
-  S.feat = f2; S.pts = p3; S.owner = o2; S.isLE = l2;
+  const g = f.get('particles');
+  const col = nm => g.keys().includes(nm) ? sl(f, 'particles/' + nm, a, b) : null;
+  const c = {};
+  for(const k of ['id','inst_id','frag_id','interaction_id','pdg','geant4_trackid','inst_sem_type',
+                  'inst_parent_id','inst_pc_start','inst_pc_end','frag_pc_start','frag_pc_end',
+                  'frag_sem_type','mass'])
+    c[k] = col(k);
+  // Kinematics, (rows, 4): [x,y,z,t] mm ns and [px,py,pz,E] MeV, E total.
+  for(const k of ['start_pos','start_mom','first_pos','first_mom','last_pos','last_mom',
+                  'end_pos','end_mom'])
+    c[k] = g.keys().includes(k) ? Float64Array.from(g.get(k).slice([[a, b], [0, 4]])) : null;
+  S.cols = c; S.idRow = new Map();
+  for(let k = 0; k < c.id.length; k++) S.idRow.set(Number(c.id[k]), k);
 }
 
-// ---------------------------------------------------- per-event hit labels --
-// hit_labels/volume{V}/plane{P} holds one label per hit, in the hits file's
-// own order, so entry k labels hit k of hits/event_E/volume_V/<source>.
+// Voxels: points/flat, labels from the ranges (ownership is positional).
+function buildVoxels(){
+  const f = S.out, ev = S.ev, po = val(f, 'points/offsets');
+  const pa = Number(po[ev]), pb = Number(po[ev+1]), n = Math.max(0, pb - pa);
+  S.ncol = Number(f.get('points/flat').shape[1]);
+  const T = pointSet('voxels', n); T.pts = new Float32Array(n*3);
+  S.T = T;
+  if(!n) return;
+  const C = S.ncol, flat = f.get('points/flat').slice([[pa, pb], [0, C]]);
+  T.feat = Float32Array.from(flat); T.C = C;
+  for(let i = 0; i < n; i++){ T.pts[i*3] = flat[i*C]; T.pts[i*3+1] = flat[i*C+1]; T.pts[i*3+2] = flat[i*C+2];
+                               T.e[i] = flat[i*C+4]; }
+  const c = S.cols;
+  const fill = (arr, s, e, v) => { s = Number(s); if(s < 0) return;
+    for(let j = Math.max(0, s - pa); j < Math.min(n, Number(e) - pa); j++) arr[j] = v; };
+  // One run per fragment and per instance.  LE belongs to the fragment: a
+  // kLEScatter fragment is a blob, an LE deposit absorbed into a track is
+  // the track's.
+  for(let k = 0; k < c.id.length; k++){
+    const id = Number(c.id[k]);
+    if(Number(c.inst_id[k]) === id) fill(T.inst, c.inst_pc_start[k], c.inst_pc_end[k], id);
+    if(Number(c.frag_id[k]) === id){
+      fill(T.frag, c.frag_pc_start[k], c.frag_pc_end[k], id);
+      if(Number(c.frag_sem_type[k]) === SEM_LE) fill(T.le, c.frag_pc_start[k], c.frag_pc_end[k], 1);
+    }
+  }
+}
+
+// Planes: hit_labels/volume{V}/plane{P} holds one label per hit, in the hits
+// file's own order, so entry k labels hit k of hits/event_E/volume_V/<source>.
 function buildPlanes(){
   S.planes = [];
   if(!S.hit || !S.out || !has(S.out, 'hit_labels')) return;
@@ -333,25 +385,15 @@ function buildPlanes(){
              `and the output are not from the same JAXTPC run.`);
       continue;
     }
-    const n = wire.length, keep = [];
-    for(let h = 0; h < n; h++) if(leShown(Number(le[h]))) keep.push(h);
-    const m = keep.length;
-    const p = {vol, plane, source, n:m, wire:new Int16Array(m), tick:new Int16Array(m),
-               q:new Float32Array(m), owner:new Int32Array(m), frag:new Int32Array(m),
-               inst:new Int32Array(m), le:new Uint8Array(m), src:new Int32Array(m)};
-    for(let i = 0; i < m; i++){
-      const h = keep[i];
-      p.wire[i] = wire[h]; p.tick[i] = tick[h]; p.q[i] = q ? q[h] : NaN;
-      p.frag[i] = Number(frag[h]); p.inst[i] = Number(inst[h]); p.le[i] = Number(le[h]) ? 1 : 0;
-      p.src[i] = h;
-      p.owner[i] = S.level === 'frag' ? p.frag[i]
-                 : S.level === 'inter' ? (p.inst[i] >= 0 ? (S.interOf.get(p.inst[i]) ?? -1) : -1)
-                 : p.inst[i];
-    }
+    const n = wire.length;
+    const p = pointSet(`volume ${vol} · ${source}`, n);
+    Object.assign(p, {vol, plane, source, wire:new Int16Array(n), tick:new Int16Array(n), src:new Int32Array(n)});
     let w0 = Infinity, w1 = -Infinity, t0 = Infinity, t1 = -Infinity;
-    for(let i = 0; i < m; i++){
-      if(p.wire[i] < w0) w0 = p.wire[i]; if(p.wire[i] > w1) w1 = p.wire[i];
-      if(p.tick[i] < t0) t0 = p.tick[i]; if(p.tick[i] > t1) t1 = p.tick[i];
+    for(let h = 0; h < n; h++){
+      const w = wire[h], t = tick[h];
+      p.wire[h] = w; p.tick[h] = t; p.e[h] = q ? q[h] : NaN; p.src[h] = h;
+      p.frag[h] = Number(frag[h]); p.inst[h] = Number(inst[h]); p.le[h] = Number(le[h]) ? 1 : 0;
+      if(w < w0) w0 = w; if(w > w1) w1 = w; if(t < t0) t0 = t; if(t > t1) t1 = t;
     }
     if(!isFinite(w0)){ w0 = 0; w1 = 1; t0 = 0; t1 = 1; }
     p.ex = {w0, w1:Math.max(w1, w0 + 1), t0, t1:Math.max(t1, t0 + 1)};
@@ -360,10 +402,163 @@ function buildPlanes(){
   log(`${S.planes.length} plane(s), ${S.planes.reduce((a, p) => a + p.n, 0).toLocaleString()} hits`);
 }
 
+const rowOf = id => (id >= 0 && S.idRow.has(id)) ? S.idRow.get(id) : -1;
+const colOf = (id, key) => { const r = rowOf(id); return (r >= 0 && S.cols[key]) ? Number(S.cols[key][r]) : -1; };
+const semOf = (P, i) => P.le[i] ? SEM_LE : colOf(P.inst[i], 'inst_sem_type');
+const interOf = (P, i) => colOf(P.inst[i], 'interaction_id');
+const pdgOf = (P, i) => colOf(P.inst[i], 'pdg');
+
+function buildKeys(){
+  for(const P of allSets()){
+    const k = new Int32Array(P.n);
+    for(let i = 0; i < P.n; i++)
+      k[i] = S.hl === 'frag' ? P.frag[i] : S.hl === 'inter' ? interOf(P, i) : P.inst[i];
+    P.key = k;
+  }
+}
+
+function buildFilters(){
+  const host = document.getElementById('filters');
+  host.innerHTML = '<span>show semantic type:</span>';
+  const present = new Set();
+  for(const P of allSets()) for(let i = 0; i < P.n; i++) present.add(semOf(P, i));
+  S.semShow = new Set(present);
+  for(const v of SEM_ORDER){
+    if(!present.has(v)) continue;
+    const lab = document.createElement('label'), cb = document.createElement('input');
+    cb.type = 'checkbox'; cb.checked = true;
+    cb.onchange = () => { cb.checked ? S.semShow.add(v) : S.semShow.delete(v); recolour(); };
+    const sw = document.createElement('span'); sw.className = 'sw'; sw.style.background = SEM_COLOR[v] || CAT_OTHER;
+    lab.append(cb, sw, document.createTextNode(SEM[v] || ('type ' + v)));
+    host.appendChild(lab);
+  }
+}
+
+// Filtering hides at paint time; the pickers consult it too, so nothing
+// hidden can be selected.  The display cut is a percentile of |value|: one
+// for the voxels (MeV), one for all planes together (charge).
+function percentileOf(sets, pct){
+  if(pct <= 0) return 0;
+  let n = 0; for(const P of sets) n += P.n;
+  if(!n) return 0;
+  const a = new Float32Array(n); let k = 0;
+  for(const P of sets) for(let i = 0; i < P.n; i++) a[k++] = Math.abs(P.e[i]);
+  a.sort();
+  return a[Math.min(n - 1, Math.floor(pct/100 * n))];
+}
+function applyFilter(){
+  const parts = [];
+  for(const [what, sets] of [['voxels', [S.T]], ['hits', S.planes]]){
+    if(!sets.length) continue;
+    const thr = percentileOf(sets, S.thrPct);
+    let kept = 0, n = 0;
+    for(const P of sets){
+      const vis = new Uint8Array(P.n);
+      for(let i = 0; i < P.n; i++){ const le = !!P.le[i];
+        const pass = S.semShow.has(semOf(P, i)) && !(Math.abs(P.e[i]) < thr)
+          && (S.leMode === 'hide' ? !le : S.leMode === 'only' ? le : true);
+        vis[i] = pass ? 1 : 0; if(pass) kept++; }
+      P.visible = vis; n += P.n;
+    }
+    if(S.thrPct > 0) parts.push(`${what} ≥ ${fmt(thr, 3)} (${n ? (100*kept/n).toFixed(0) : 0}%)`);
+  }
+  document.getElementById('thrv').textContent = S.thrPct <= 0 ? 'all' : parts.join(' · ');
+}
+
+// ------------------------------------------------------------- colouring --
+const symlog = (v, lin) => Math.sign(v) * Math.log10(1 + Math.abs(v)/lin);
+const unsymlog = (t, lin) => Math.sign(t) * (Math.pow(10, Math.abs(t)) - 1) * lin;
+function energyRamp(sets){
+  const lg = document.getElementById('logE').checked;
+  const raw = [], mags = []; let anyNeg = false;
+  for(const P of sets) for(let i = 0; i < P.n; i++){
+    if(!P.visible[i]) continue; const e = P.e[i]; if(Number.isNaN(e)) continue;
+    if(e < 0) anyNeg = true; raw.push(e); if(e !== 0) mags.push(Math.abs(e)); }
+  if(!raw.length) return {lo:0, hi:1, lg, lin:1, diverging:false};
+  mags.sort((a, b) => a - b);
+  const lin = Math.max(mags.length ? mags[Math.floor(mags.length*0.25)] : 1, 1e-12);
+  const vals = (lg ? raw.map(v => symlog(v, lin)) : raw).sort((a, b) => a - b);
+  const q = f => vals[Math.min(vals.length-1, Math.max(0, Math.round(f*(vals.length-1))))];
+  let lo = q(0.02), hi = q(0.98);
+  if(anyNeg){ const m = Math.max(Math.abs(lo), Math.abs(hi)); lo = -m; hi = m; }
+  if(hi <= lo) hi = lo + 1e-9;
+  return {lo, hi, lg, lin, diverging:anyNeg};
+}
+function colourOf(P, i, ramp){
+  switch(S.mode){
+    case 'energy': {
+      let e = P.e[i]; if(Number.isNaN(e)) return OTHER_RGB;
+      if(ramp.lg) e = symlog(e, ramp.lin);
+      const f = Math.min(1, Math.max(0, (e - ramp.lo) / (ramp.hi - ramp.lo)));
+      const R = ramp.diverging ? DIV_RGB : SEQ_RGB;
+      return R[Math.min(R.length - 1, Math.round(f * (R.length - 1)))];
+    }
+    case 'sem': { const j = SEM_ORDER.indexOf(semOf(P, i)); return j >= 0 ? CAT_RGB[j] : OTHER_RGB; }
+    case 'pdg': { const c = PDG_COLOR.get(pdgOf(P, i)); return c ? hex2rgb(c) : OTHER_RGB; }
+    case 'frag':  return hashColor(P.frag[i]);
+    case 'inter': return hashColor(interOf(P, i));
+    default:      return hashColor(P.inst[i]);
+  }
+}
+// Colours change only with the colouring or the filter, not on hover, so
+// they are worked out once here and painting reads them back.
+function computeColours(){
+  S.ramp = {T: S.T ? energyRamp([S.T]) : null, H: S.planes.length ? energyRamp(S.planes) : null};
+  for(const P of allSets()){
+    const ramp = P === S.T ? S.ramp.T : S.ramp.H, rgb = new Float32Array(P.n * 3);
+    for(let i = 0; i < P.n; i++){ const c = colourOf(P, i, ramp);
+                                  rgb[i*3] = c[0]; rgb[i*3+1] = c[1]; rgb[i*3+2] = c[2]; }
+    P.rgb = rgb;
+  }
+}
+
+// What is lit: the pinned ids when there are any, else the hovered one (when
+// hover highlighting is on); null when nothing is.
+let isLit = null;
+function updateLit(){
+  if(S.pins.size){ const p = S.pins; isLit = k => p.has(k); }
+  else if(S.hoverHL && S.sel >= 0){ const k0 = S.sel; isLit = k => k === k0; }
+  else isLit = null;
+}
+function paint(){
+  if(!S.T) return {nVox:0, nHit:0};
+  updateLit();
+  const nVox = paintCloud();
+  let nHit = 0; for(const p of S.planes) nHit += paintPlane(p);
+  planeHeaders(); drawLegend();
+  return {nVox, nHit};
+}
+const recolour = () => { if(!S.T) return; applyFilter(); computeColours(); paint(); };
+
+function drawLegend(){
+  const el = document.getElementById('legend'), rows = [];
+  const sw = (c, t) => `<div class="row"><span class="sw" style="background:${c}"></span><span>${t}</span></div>`;
+  if(S.mode === 'energy'){
+    for(const [what, r] of [['voxels: dE [MeV]', S.ramp.T], ['hits: charge', S.ramp.H]]){
+      if(!r) continue;
+      const bar = (r.diverging ? DIV_RGB.map(rgb2css) : SEQ).map(c =>
+        `<span style="background:${c};width:10px;height:10px;display:inline-block"></span>`).join('');
+      const f = v => (r.lg ? unsymlog(v, r.lin) : v).toPrecision(3);
+      rows.push(`<div class="row"><span>${what}</span></div><div class="row">${bar}</div>` +
+                `<div class="row"><span class="k">${f(r.lo)} &rarr; ${f(r.hi)}${r.diverging ? ' · grey is zero' : ''}</span></div>`);
+    }
+    rows.push(`<div class="row"><span class="k">2nd&ndash;98th pct${document.getElementById('logE').checked ? ', symlog' : ''}</span></div>`);
+  } else if(S.mode === 'sem'){
+    for(const v of SEM_ORDER) if(S.semShow.has(v)) rows.push(sw(SEM_COLOR[v], SEM[v]));
+  } else if(S.mode === 'pdg'){
+    for(const [p, nm] of PDG_ORDER.slice(0, 6)) rows.push(sw(PDG_COLOR.get(p), nm));
+    rows.push(sw(CAT_OTHER, 'other'));
+  } else {
+    rows.push(`<div class="row"><span>colour = ${S.mode === 'frag' ? 'fragment' : S.mode === 'inter' ? 'interaction' : 'instance'} id</span></div>`,
+              `<div class="row"><span class="k">same id, same colour, every view</span></div>`);
+  }
+  el.innerHTML = rows.join('');
+}
+
 // ------------------------------------------------------------- 2D planes --
-// Each plane is rasterized into its own pixel buffer: a hit writes its colour
-// into the cell its (wire, tick) lands in, and the cell remembers which hit
-// did, so picking is one lookup.  The selection is drawn last, on top.
+// Each plane is rasterized into its own pixel buffer: a visible hit writes its
+// colour into the cell its (wire, tick) lands in, and the cell remembers
+// which hit did, so picking is one lookup.  What is lit is drawn last, on top.
 function drawPlanes(){
   const host = document.getElementById('planes');
   host.innerHTML = '';
@@ -374,14 +569,19 @@ function drawPlanes(){
     const cv = document.createElement('canvas'); cv.className = 'plane'; cw.appendChild(cv);
     host.appendChild(wrap);
     p.canvas = cv;
-    cv.onmousemove = e => {
-      const r = cv.getBoundingClientRect();
-      const i = pickHit(p, (e.clientX - r.left) / r.width, (e.clientY - r.top) / r.height);
-      if(i >= 0){ infoHit(p, i); select(p.owner[i], `${p.source} of volume ${p.vol}`); }
-    };
+    const at = e => { const r = cv.getBoundingClientRect();
+                      return pickHit(p, (e.clientX - r.left) / r.width, (e.clientY - r.top) / r.height); };
+    cv.onmousemove = e => { const i = at(e); if(i >= 0){ infoHit(p, i); select(p.key[i], `a hit on ${p.name}`); } };
+    // A click pins; a drag does not.
+    let down = null;
+    cv.addEventListener('pointerdown', e => { down = e.button === 0 ? [e.clientX, e.clientY] : null; });
+    cv.addEventListener('pointerup', e => {
+      if(!down || Math.hypot(e.clientX - down[0], e.clientY - down[1]) > 4) return;
+      down = null; const i = at(e); if(i >= 0) togglePin(p.key[i]);
+    });
   }
   // size the buffers once the flex layout has settled
-  requestAnimationFrame(() => { for(const p of S.planes) paintPlane(p); planeHeaders(); });
+  requestAnimationFrame(() => paint());
 }
 
 function sizeBuffer(p){
@@ -392,26 +592,32 @@ function sizeBuffer(p){
 }
 
 function paintPlane(p){
-  if(!p.canvas) return;
+  if(!p.canvas || !p.rgb) return 0;
   sizeBuffer(p);
   const W = p.canvas.width, Hh = p.canvas.height, ctx = p.canvas.getContext('2d');
   const img = ctx.createImageData(W, Hh), d = img.data;
   for(let k = 0; k < W * Hh; k++){ d[k*4] = 10; d[k*4+1] = 13; d[k*4+2] = 18; d[k*4+3] = 255; }
   p.pick.fill(-1);
   const ex = p.ex, sx = (W - 1) / (ex.w1 - ex.w0), sy = (Hh - 1) / (ex.t1 - ex.t0);
-  const dim = S.sel >= 0;
+  const dimming = isLit !== null, rgb = p.rgb;
   const put = (i, a) => {
     const x = Math.round((p.wire[i] - ex.w0) * sx), y = Math.round((p.tick[i] - ex.t0) * sy);
     const k = y * W + x;
-    const [r, g, b] = ownerColor(p.owner[i]);
-    d[k*4]   = Math.round((r * a + (10/255) * (1 - a)) * 255);
-    d[k*4+1] = Math.round((g * a + (13/255) * (1 - a)) * 255);
-    d[k*4+2] = Math.round((b * a + (18/255) * (1 - a)) * 255);
+    d[k*4]   = Math.round((rgb[i*3]   * a + (10/255) * (1 - a)) * 255);
+    d[k*4+1] = Math.round((rgb[i*3+1] * a + (13/255) * (1 - a)) * 255);
+    d[k*4+2] = Math.round((rgb[i*3+2] * a + (18/255) * (1 - a)) * 255);
     p.pick[k] = i;
   };
-  for(let i = 0; i < p.n; i++) if(!(dim && p.owner[i] === S.sel)) put(i, dim ? S.dim : 1);
-  if(dim) for(let i = 0; i < p.n; i++) if(p.owner[i] === S.sel) put(i, 1);
+  let nSel = 0;
+  for(let i = 0; i < p.n; i++){
+    if(!p.visible[i]) continue;
+    if(dimming && isLit(p.key[i])){ nSel++; continue; }
+    put(i, dimming ? S.dim : 1);
+  }
+  if(nSel) for(let i = 0; i < p.n; i++) if(p.visible[i] && isLit(p.key[i])) put(i, 1);
   ctx.putImageData(img, 0, 0);
+  p.nSel = nSel;
+  return nSel;
 }
 
 function pickHit(p, fx, fy){
@@ -431,19 +637,20 @@ function pickHit(p, fx, fy){
 function planeHeaders(){
   for(const p of S.planes){
     if(!p.head) continue;
-    let nSel = 0; if(S.sel >= 0) for(let i = 0; i < p.n; i++) if(p.owner[i] === S.sel) nSel++;
+    let nVis = 0; for(let i = 0; i < p.n; i++) nVis += p.visible[i];
     p.head.innerHTML = `<b>volume ${p.vol} · ${p.source}</b> <span class="k">(plane ${p.plane})</span>` +
-      ` — ${p.n.toLocaleString()} hits · wires ${p.ex.w0}–${p.ex.w1} · ticks ${p.ex.t0}–${p.ex.t1}` +
-      (S.sel >= 0 ? ` · <b>${nSel.toLocaleString()}</b> highlighted` : '');
+      ` — ${p.n.toLocaleString()} hits${nVis < p.n ? ` (${nVis.toLocaleString()} shown)` : ''}` +
+      ` · wires ${p.ex.w0}–${p.ex.w1} · ticks ${p.ex.t0}–${p.ex.t1}` +
+      (isLit ? ` · <b>${(p.nSel || 0).toLocaleString()}</b> highlighted` : '');
   }
 }
-addEventListener('resize', () => { for(const p of S.planes) paintPlane(p); });
+addEventListener('resize', () => paint());
 
 // ------------------------------------------------------------- 3D voxels --
 function hostSize(host){
   const r = host.getBoundingClientRect();
   return {w: Math.max(1, Math.round(r.width) || innerWidth * 0.5),
-          h: Math.max(1, Math.round(r.height) || innerHeight - 60)};
+          h: Math.max(1, Math.round(r.height) || innerHeight - 90)};
 }
 function makeView(){
   const host = document.getElementById('three');
@@ -457,8 +664,16 @@ function makeView(){
   host.appendChild(v.renderer.domElement);
   v.controls = new OrbitControls(v.camera, v.renderer.domElement);
   v.controls.screenSpacePanning = true;
+  if(document.getElementById('panmode').checked) v.controls.mouseButtons.LEFT = THREE.MOUSE.PAN;
   v.raycaster = new THREE.Raycaster(); v.pointer = new THREE.Vector2();
   v.renderer.domElement.addEventListener('mousemove', e => onVoxelMove(e));
+  // A click pins; a drag (rotate, pan) does not.
+  let down = null;
+  v.renderer.domElement.addEventListener('pointerdown', e => { down = e.button === 0 ? [e.clientX, e.clientY] : null; });
+  v.renderer.domElement.addEventListener('pointerup', e => {
+    if(!down || Math.hypot(e.clientX - down[0], e.clientY - down[1]) > 4) return;
+    down = null; const i = pickVoxel(e); if(i >= 0) togglePin(S.T.key[i]);
+  });
   const resize = () => { const s = hostSize(host); v.camera.aspect = s.w / s.h;
                          v.camera.updateProjectionMatrix(); v.renderer.setSize(s.w, s.h, false); };
   new ResizeObserver(resize).observe(host);
@@ -466,60 +681,73 @@ function makeView(){
   return v;
 }
 
+function panView(dxPix, dyPix){
+  const v = VIEW; if(!v) return;
+  const el = v.renderer.domElement;
+  const dist = new THREE.Vector3().subVectors(v.camera.position, v.controls.target).length();
+  const half = dist * Math.tan((v.camera.fov / 2) * Math.PI / 180);
+  const sx = 2 * dxPix * half / Math.max(1, el.clientHeight), sy = 2 * dyPix * half / Math.max(1, el.clientHeight);
+  const m = v.camera.matrix.elements;
+  const d = new THREE.Vector3(m[0], m[1], m[2]).multiplyScalar(-sx).add(new THREE.Vector3(m[4], m[5], m[6]).multiplyScalar(sy));
+  v.camera.position.add(d); v.controls.target.add(d); v.controls.update();
+}
+const PAN_KEYS = {ArrowLeft:[-1,0], ArrowRight:[1,0], ArrowUp:[0,1], ArrowDown:[0,-1]};
+addEventListener('keydown', e => {
+  if(e.target.tagName === 'INPUT' || e.target.tagName === 'SELECT') return;
+  const k = PAN_KEYS[e.key]; if(!k || !VIEW) return;
+  e.preventDefault(); const step = e.shiftKey ? 160 : 40; panView(k[0]*step, k[1]*step);
+});
+
 function buildCloud(){
-  const v = VIEW;
+  const v = VIEW, P = S.T;
   for(const k of ['cloud', 'selCloud']) if(v[k]){ v.scene.remove(v[k]); v[k].geometry.dispose(); v[k].material.dispose(); v[k] = null; }
-  const n = S.pts.length / 3;
-  if(!n) return;
+  if(!P.n) return;
   const size = +document.getElementById('psize').value;
   const geo = new THREE.BufferGeometry();
-  geo.setAttribute('position', new THREE.BufferAttribute(S.pts, 3));
-  geo.setAttribute('color', new THREE.BufferAttribute(new Float32Array(n * 4), 4));
+  geo.setAttribute('position', new THREE.BufferAttribute(P.pts, 3));
+  geo.setAttribute('color', new THREE.BufferAttribute(new Float32Array(P.n * 4), 4));
+  // alphaTest discards the fully transparent (filtered) points, so they write
+  // no depth and punch no holes
   v.cloud = new THREE.Points(geo, new THREE.PointsMaterial({size, vertexColors:true,
-    sizeAttenuation:false, transparent:true, depthWrite:false}));
+    sizeAttenuation:false, transparent:true, depthWrite:true, alphaTest:0.01}));
   v.scene.add(v.cloud);
-  // the selection is drawn in a second pass on top, so faint points in front
-  // cannot hide it
+  // What is lit gets its own pass drawn over the top, so the dimmed bulk can
+  // keep writing depth without hiding it.
   const sg = new THREE.BufferGeometry();
   sg.setAttribute('position', new THREE.BufferAttribute(new Float32Array(0), 3));
   sg.setAttribute('color', new THREE.BufferAttribute(new Float32Array(0), 3));
   v.selCloud = new THREE.Points(sg, new THREE.PointsMaterial({size, vertexColors:true,
     sizeAttenuation:false, depthTest:false, depthWrite:false}));
   v.selCloud.renderOrder = 2; v.scene.add(v.selCloud);
-  paintCloud();
 }
 
 function paintCloud(){
-  const v = VIEW; if(!v || !v.cloud) return;
-  const n = S.owner.length, col = v.cloud.geometry.attributes.color.array;
-  const dim = S.sel >= 0; let nSel = 0;
-  for(let i = 0; i < n; i++){
-    const [r, g, b] = ownerColor(S.owner[i]);
-    const on = dim && S.owner[i] === S.sel; if(on) nSel++;
-    col[i*4] = r; col[i*4+1] = g; col[i*4+2] = b;
-    col[i*4+3] = on ? 0 : (dim ? S.dim : 1);
+  const v = VIEW, P = S.T; if(!v || !v.cloud || !P.n || !P.rgb) return 0;
+  const col = v.cloud.geometry.attributes.color.array, rgb = P.rgb;
+  const dimming = isLit !== null; let nSel = 0;
+  for(let i = 0; i < P.n; i++){
+    const picked = dimming && P.visible[i] && isLit(P.key[i]); if(picked) nSel++;
+    col[i*4] = rgb[i*3]; col[i*4+1] = rgb[i*3+1]; col[i*4+2] = rgb[i*3+2];
+    col[i*4+3] = !P.visible[i] ? 0 : picked ? 0 : (dimming ? S.dim : 1);
   }
   v.cloud.geometry.attributes.color.needsUpdate = true;
-  const sp = new Float32Array(nSel * 3), sc = new Float32Array(nSel * 3);
-  let k = 0;
-  if(nSel) for(let i = 0; i < n; i++){
-    if(S.owner[i] !== S.sel) continue;
-    const c = ownerColor(S.owner[i]);
-    for(let d = 0; d < 3; d++){ sp[k*3+d] = S.pts[i*3+d]; sc[k*3+d] = c[d]; }
-    k++;
+  const sp = new Float32Array(nSel * 3), sc = new Float32Array(nSel * 3); let k = 0;
+  if(nSel) for(let i = 0; i < P.n; i++){
+    if(!(P.visible[i] && isLit(P.key[i]))) continue;
+    for(let d = 0; d < 3; d++){ sp[k*3+d] = P.pts[i*3+d]; sc[k*3+d] = rgb[i*3+d]; } k++;
   }
   const g = v.selCloud.geometry;
   g.setAttribute('position', new THREE.BufferAttribute(sp, 3));
   g.setAttribute('color', new THREE.BufferAttribute(sc, 3));
   v.selCloud.visible = nSel > 0;
+  return nSel;
 }
 
 function fitView(){
-  const v = VIEW; if(!v || !S.pts || !S.pts.length) return;
-  const n = S.pts.length / 3;
+  const v = VIEW, P = S.T; if(!v || !P || !P.n) return;
   const mn = [1e30, 1e30, 1e30], mx = [-1e30, -1e30, -1e30];
-  for(let i = 0; i < n; i++) for(let d = 0; d < 3; d++){
-    const q = S.pts[i*3+d]; if(q < mn[d]) mn[d] = q; if(q > mx[d]) mx[d] = q;
+  for(let i = 0; i < P.n; i++) for(let d = 0; d < 3; d++){
+    const q = P.pts[i*3+d]; if(q < mn[d]) mn[d] = q; if(q > mx[d]) mx[d] = q;
   }
   const c = mn.map((q, i) => (q + mx[i]) / 2), span = Math.max(...mx.map((q, i) => q - mn[i]), 1);
   v.controls.target.set(c[0], c[1], c[2]);
@@ -529,110 +757,131 @@ function fitView(){
   v.controls.update();
 }
 
-function onVoxelMove(e){
-  const v = VIEW; if(!v.cloud) return;
+function pickVoxel(e){
+  const v = VIEW, P = S.T; if(!v || !v.cloud || !P || !P.n) return -1;
   const r = v.renderer.domElement.getBoundingClientRect();
   v.pointer.x = ((e.clientX - r.left) / r.width) * 2 - 1;
   v.pointer.y = -((e.clientY - r.top) / r.height) * 2 + 1;
   v.raycaster.setFromCamera(v.pointer, v.camera);
-  const hits = v.raycaster.intersectObject(v.cloud, false);
-  if(hits.length){ const i = hits[0].index; infoVoxel(i); select(S.owner[i], 'a voxel'); }
+  for(const h of v.raycaster.intersectObject(v.cloud, false))
+    if(P.visible[h.index]) return h.index;
+  return -1;
+}
+// Raycasting a large cloud is not free, so pick at most every 50 ms.
+let lastPick = 0;
+function onVoxelMove(e){
+  const now = performance.now(); if(now - lastPick < 50) return; lastPick = now;
+  const i = pickVoxel(e);
+  if(i >= 0){ infoVoxel(i); select(S.T.key[i], 'a voxel'); }
 }
 
 // ------------------------------------------------------------ info panel --
 const fmt = (x, d = 3) => (x === undefined || x === null || Number.isNaN(x)) ? '—'
   : (Math.abs(x) >= 1e5 || (x !== 0 && Math.abs(x) < 1e-3) ? Number(x).toExponential(2) : Number(x).toFixed(d));
+const pdgName = p => PDG_NAME.has(p) ? `${p} (${PDG_NAME.get(p)})` : (p === -1 ? '—' : String(p));
 function showInfo(rows){
   const el = document.getElementById('pinfo');
   if(!document.getElementById('info').checked){ el.style.display = 'none'; return; }
   el.innerHTML = '<table>' + rows.map(([k, v]) => `<tr><td>${k}</td><td>${v}</td></tr>`).join('') + '</table>';
   el.style.display = 'block';
 }
+function labelRows(P, i){
+  const sem = semOf(P, i);
+  return [['fragment', P.frag[i] < 0 ? '—' : String(P.frag[i])],
+          ['instance', P.inst[i] < 0 ? '—' : String(P.inst[i])],
+          ['interaction', interOf(P, i) < 0 ? '—' : String(interOf(P, i))],
+          ['semantic type', SEM[sem] ? `${SEM[sem]} <span class="k">(${sem})</span>` : '—'],
+          ['LE', P.le[i] ? 'yes' : 'no'],
+          ['instance pdg', pdgName(pdgOf(P, i))],
+          ...(S.hl === 'inter' ? [] : kinRows(S.hl === 'frag' ? P.frag[i] : P.inst[i]))];
+}
 function infoVoxel(i){
-  const f = S.feat, C = S.ncol, o = i * C;
+  const P = S.T, f = P.feat, C = P.C, o = i * C;
   const rows = [['voxel', i.toLocaleString()],
                 ['x y z [mm]', `${fmt(f[o],1)}  ${fmt(f[o+1],1)}  ${fmt(f[o+2],1)}`],
                 ['t [µs]', fmt(f[o+3], 2)], ['dE [MeV]', fmt(f[o+4], 4)], ['dX [cm]', fmt(f[o+5], 4)]];
   if(C >= 9) rows.push(['θ φ [rad]', `${fmt(f[o+6], 3)}  ${fmt(f[o+7], 3)}`], ['|p| [MeV/c]', fmt(f[o+8], 2)]);
-  rows.push(['LE', S.isLE[i] ? 'yes' : 'no'], [LEVEL_NAME[S.level], S.owner[i] < 0 ? '—' : String(S.owner[i])]);
-  if(S.level !== 'inter') rows.push(...kinRows(S.owner[i]));
-  showInfo(rows);
+  showInfo([...rows, ...labelRows(P, i)]);
 }
-// ------------------------------------------------------------ kinematics --
-// Per stored row, the representative's own Geant4 particle: start (creation),
-// first / last visible step, end (destruction).  [x,y,z,t] mm ns and
-// [px,py,pz,E] MeV, E total; absent from files before 4.0.0.
-function loadKinematics(a, b, id, col){
-  S.kin = new Map();
-  const g = S.out.get('particles'), names = g.keys();
-  if(!names.includes('start_pos')) return;
-  const v4 = nm => Float64Array.from(g.get(nm).slice([[a, b], [0, 4]]));
-  const K = {}; for(const nm of ['start_pos','start_mom','first_pos','first_mom',
-                                 'last_pos','last_mom','end_pos','end_mom']) K[nm] = v4(nm);
-  const mass = col('mass'), pdg = col('pdg');
-  for(let k = 0; k < id.length; k++){
-    const r = {pdg: Number(pdg[k]), mass: Number(mass[k])};
-    for(const nm in K) r[nm] = Array.from(K[nm].subarray(k*4, k*4+4));
-    S.kin.set(Number(id[k]), r);
-  }
+function infoHit(p, i){
+  showInfo([['hit', `volume ${p.vol} · ${p.source} · #${p.src[i].toLocaleString()}`],
+            ['wire', String(p.wire[i])], ['tick', String(p.tick[i])],
+            ['charge [ENC]', fmt(p.e[i], 1)], ...labelRows(p, i)]);
 }
+
+// The representative's own Geant4 particle: start (creation), end
+// (destruction); then the instance's first / last point, from the steps it
+// collected (instance rows only; none for a shower's last).
 function kinRows(gid){
-  const r = S.kin && S.kin.get(Number(gid));
-  if(!r) return [];
-  const ke = m => Number.isNaN(m[3]) ? NaN : m[3] - r.mass;
-  const xyz = q => `${fmt(q[0],1)}  ${fmt(q[1],1)}  ${fmt(q[2],1)}`;
-  const dist = (p, q) => Math.hypot(p[0]-q[0], p[1]-q[1], p[2]-q[2]);
-  const out = [['pdg · mass', `${r.pdg} · ${fmt(r.mass, 3)} MeV`],
-               ['KE start→end', `${fmt(ke(r.start_mom), 2)} → ${fmt(ke(r.end_mom), 2)} MeV`],
-               ['start [mm]', xyz(r.start_pos)]];
-  out.push(['end [mm]', xyz(r.end_pos)]);
-  // first / last belong to the instance (its own steps, the readout saw);
-  // their momentum is of the particle that made the step.  A shower has no
-  // last point.
-  const pe = m => `${fmt(Math.hypot(m[0], m[1], m[2]), 2)} · ${fmt(m[3], 2)} MeV`;
-  if(Number.isNaN(r.first_pos[0])) out.push(['inst. first', '—']);
+  const c = S.cols, k = S.idRow.get(Number(gid));
+  if(k === undefined || !c.start_pos) return [];
+  const q = nm => Array.from(c[nm].subarray(k*4, k*4+4)), m = Number(c.mass[k]);
+  const ke = v => Number.isNaN(v[3]) ? NaN : v[3] - m;
+  const xyz = v => `${fmt(v[0],1)}  ${fmt(v[1],1)}  ${fmt(v[2],1)}`;
+  const sp = q('start_pos'), fp = q('first_pos');
+  const out = [['mass [MeV]', fmt(m, 3)],
+               ['KE start→end', `${fmt(ke(q('start_mom')), 2)} → ${fmt(ke(q('end_mom')), 2)} MeV`],
+               ['start [mm]', xyz(sp)]];
+  out.push(['end [mm]', xyz(q('end_pos'))]);
+  const pe = v => `${fmt(Math.hypot(v[0], v[1], v[2]), 2)} · ${fmt(v[3], 2)} MeV`;
+  const lp = q('last_pos');
+  if(Number.isNaN(fp[0])) out.push(['inst. first', '—']);
   else {
-    out.push(['inst. first [mm]', `${xyz(r.first_pos)}  (+${fmt(dist(r.first_pos, r.start_pos), 1)})`],
-             ['|p| · E first', pe(r.first_mom)]);
-    if(Number.isNaN(r.last_pos[0])) out.push(['inst. last', '— (shower)']);
-    else out.push(['inst. last [mm]', xyz(r.last_pos)], ['|p| · E last', pe(r.last_mom)]);
+    out.push(['inst. first [mm]', `${xyz(fp)}  (+${fmt(Math.hypot(fp[0]-sp[0], fp[1]-sp[1], fp[2]-sp[2]), 1)})`],
+             ['|p| · E first', pe(q('first_mom'))]);
+    if(Number.isNaN(lp[0])) out.push(['inst. last', '— (shower)']);
+    else out.push(['inst. last [mm]', xyz(lp)], ['|p| · E last', pe(q('last_mom'))]);
   }
   return out;
 }
 
-function infoHit(p, i){
-  showInfo([['hit', `volume ${p.vol} · ${p.source} · #${p.src[i].toLocaleString()}`],
-            ['wire', String(p.wire[i])], ['tick', String(p.tick[i])],
-            ['charge [ENC]', fmt(p.q[i], 1)],
-            ['fragment', p.frag[i] < 0 ? '—' : String(p.frag[i])],
-            ['instance', p.inst[i] < 0 ? '—' : String(p.inst[i])],
-            ['interaction', p.inst[i] >= 0 && S.interOf.has(p.inst[i]) ? String(S.interOf.get(p.inst[i])) : '—'],
-            ['LE', p.le[i] ? 'yes' : 'no'],
-            ...(S.level === 'inter' ? [] : kinRows(S.level === 'frag' ? p.frag[i] : p.inst[i]))]);
+// ------------------------------------------------------------- selection --
+// One key drives the voxels and every plane; that is the link being shown.
+const LEVEL = () => S.hl === 'frag' ? 'fragment' : S.hl === 'inter' ? 'interaction' : 'instance';
+function select(key, why){
+  key = Number(key);
+  if(key === S.sel) return;
+  S.sel = key;
+  if(S.pins.size || !S.hoverHL) return;   // the hover does not change what is lit
+  const {nVox, nHit} = paint();
+  statusEl.innerHTML = key < 0 ? `<span class="k">${why} — not traced to a particle</span>`
+    : `<b>${LEVEL()} ${key}</b>\n<span class="k">voxels</span> <span class="v">${nVox.toLocaleString()}</span>` +
+      `   <span class="k">hits</span> <span class="v">${nHit.toLocaleString()}</span>\n<span class="k">via ${why}</span>`;
 }
 
-// ------------------------------------------------------------- selection --
-// One owner id drives the voxels and all planes; that is the link shown.
-function select(id, why){
-  id = Number(id);
-  if(id === S.sel) return;
-  S.sel = id;
-  paintCloud(); for(const p of S.planes) paintPlane(p); planeHeaders();
-  let nVox = 0; for(const o of S.owner) if(o === id) nVox++;
-  let nHit = 0; for(const p of S.planes) for(let i = 0; i < p.n; i++) if(p.owner[i] === id) nHit++;
-  statusEl.innerHTML = id < 0 ? `<span class="k">${why} — not traced to a particle</span>`
-    : `<b>${LEVEL_NAME[S.level]} ${id}</b>\n<span class="k">voxels</span> <span class="v">${nVox.toLocaleString()}</span>` +
-      `   <span class="k">hits</span> <span class="v">${nHit.toLocaleString()}</span>\n<span class="k">via ${why}</span>`;
+// Click (not drag) pins the id under the cursor, or unpins it.
+function togglePin(key){
+  key = Number(key); if(key < 0) return;
+  if(S.pins.has(key)) S.pins.delete(key); else S.pins.add(key);
+  showPins();
+}
+function clearPins(){ S.pins.clear(); showPins(); }
+function showPins(){
+  const {nVox, nHit} = paint();
+  if(!S.pins.size){ statusEl.innerHTML = `<span class="k">nothing pinned</span>`; return; }
+  statusEl.innerHTML = `<b>pinned ${LEVEL()}${S.pins.size > 1 ? 's' : ''} ${[...S.pins].join(', ')}</b>` +
+    `\n<span class="k">voxels</span> <span class="v">${nVox.toLocaleString()}</span>` +
+    `   <span class="k">hits</span> <span class="v">${nHit.toLocaleString()}</span>` +
+    `\n<span class="k">click again to unpin · x clears</span>`;
+}
+function setPanMode(on){
+  document.getElementById('panmode').checked = on;
+  if(VIEW) VIEW.controls.mouseButtons.LEFT = on ? THREE.MOUSE.PAN : THREE.MOUSE.ROTATE;
+}
+function setHoverHL(on){
+  document.getElementById('hoverhl').checked = on; S.hoverHL = on; paint();
 }
 
 // --------------------------------------------------------------- rebuild --
 function rebuild(){
   if(!S.out) return;
   if(!VIEW) VIEW = makeView();
-  S.sel = -1;
+  S.sel = -1; S.pins.clear();
   try{
-    buildVoxels(); buildPlanes(); buildCloud(); drawPlanes(); fitView();
-    const nv = S.owner.length, nh = S.planes.reduce((a, p) => a + p.n, 0);
+    buildParticles(); buildVoxels(); buildPlanes();
+    buildKeys(); buildFilters(); applyFilter(); computeColours();
+    buildCloud(); drawPlanes(); paint(); fitView();
+    const nv = S.T.n, nh = S.planes.reduce((a, p) => a + p.n, 0);
     statusEl.innerHTML = `<b>event ${S.ev}</b>\n<span class="k">voxels</span> <span class="v">${nv.toLocaleString()}</span>` +
       `   <span class="k">hits</span> <span class="v">${nh.toLocaleString()}</span> on ${S.planes.length} plane(s)` +
       (S.hit ? '' : '\n<span class="k">load the hits subset to see the planes</span>');

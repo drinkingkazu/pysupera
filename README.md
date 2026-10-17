@@ -261,26 +261,23 @@ Shortcuts: `c` centre · `a` axes · `s` screenshot · `space` play/pause ·
 Left: the 3-D cloud of `points/flat` (3 mm truth voxels). Right: one 2-D
 image per `hit_labels/volume{V}/plane{P}` group, stacked in rows — six for a
 two-volume, three-plane detector — each wire against drift tick, one pixel per
-hit. The same colour means the same object everywhere.
+hit.
 
 **Hover anywhere and the object under the cursor lights up in every view**:
 a voxel highlights its hits on all six planes, and a hit highlights its voxels
 in 3-D and its hits on the other planes. The link is the label itself — the
 voxel's range in `points/flat` and the hit's `instance_id` / `fragment_id` in
-`hit_labels` — so the views cannot disagree.
+`hit_labels` — so the views cannot disagree. Click to pin, as in
+`vis_drift.html` (see [Highlighting](#highlighting)).
 
-| control | |
-|---|---|
-| **highlight** | instance, fragment or interaction — what "the object under the cursor" means |
-| **others** | opacity of everything not selected |
-| **LE** | show all, hide LE, or hide non-LE: drops the chosen voxels and hits from every view, so the picker cannot select them |
-| **point info** | position, t, dE, dX, θ, φ, \|p\| and labels for a voxel; volume, plane, wire, tick, charge and labels for a hit |
-| **c** | fit the 3-D view |
-
-Plane headers give the hit count, wire and tick range and how many hits are
-highlighted. A red banner appears instead of a wrong picture for a pixel file,
-an output without `hit_labels`, a subset without per-hit rows, or labels and
-hits of different lengths.
+Colouring, the `highlight` selector, the semantic-type strip, **LE**, **show
+≥** and log scale work as in `vis_drift.html` below. The energy ramp and the
+**show ≥** cut are one for the voxels (dE, MeV) and one shared by all planes
+(hit charge), so the planes compare. Plane headers give the hit count, how
+many are shown, the wire and tick range and how many are highlighted. A red
+banner appears instead of a wrong picture for a pixel file, an output without
+`hit_labels`, a subset without per-hit rows, or labels and hits of different
+lengths. **point info** turns the hover panel off.
 
 #### `vis_drift.html` — JAXTPC pixel
 
@@ -316,6 +313,23 @@ The semantic-type strip filters classes in and out of both panes, the
 the absolute value it lands on. By default only on-sensor hits are drawn —
 the ones the model sees; **off-sensor hits** adds the rest, which carry no
 label (`-1`) and are drawn grey.
+
+#### Highlighting
+
+In `vis_drift.html` and `vis_hits.html`:
+
+| | |
+|---|---|
+| hover | lights the object under the cursor in every view |
+| click | pins it; click more to pin several together, click a pinned one to unpin. While anything is pinned, hovering changes nothing |
+| `x`, `Esc`, **clear highlight** | unpins everything |
+| `h`, **hover highlight** | turns hover highlighting off and on |
+| right-drag, shift-drag | pans a 3-D view; zoom with the wheel |
+| `p`, **left-drag pans** | makes left-drag pan instead of rotate |
+| arrows (shift: faster) | pan the 3-D view under the cursor |
+| `c`, **fit** | frames the 3-D view on the event |
+
+A drag never pins, so rotating does not change what is lit.
 
 #### What the energy column holds
 
