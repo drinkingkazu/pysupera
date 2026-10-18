@@ -630,7 +630,11 @@ with read_events("output.h5") as store:
 ## Output File Format
 
 `run_pysupera` writes a single HDF5 file. This section describes format
-**4.0.0**, recorded in the scalar dataset `format_version`.
+**4.1.0**, recorded in the scalar dataset `format_version`.
+
+4.1.0 adds, without changing anything else, where each event came from and its
+identity (see [Inputs and event identity](#inputs-and-event-identity)); 4.0.0
+files read as before.
 
 4.0.0 changed two things, and 3.x files are no longer read — regenerate them:
 
@@ -682,9 +686,12 @@ stores each point **once**. On a two-event file that is 6.4 MiB → 1.7 MiB.
 ### Layout
 
 ```
-format_version   scalar str   "4.0.0"
+format_version   scalar str   "4.1.0"
 n_events         scalar int64
 events/offsets   (n_events+1,) int64   particle rows per event
+events/input, input_event, jaxtpc_entry  where each event came from    } 4.1;
+inputs/          the input files                                     } see
+events/event_id, job_id, job_event  the event's identity (dprod)     } below
 points/offsets   (n_events+1,) int64   point rows per event
 inter/offsets    (n_events+1,) int64   interaction rows per event
 points/flat      (N, C) float32        one row per voxel (or deposit)
@@ -1537,6 +1544,34 @@ defaults to `source`, which leaves an uncompressed dataset uncompressed —
 `all` overrides that. On a 100-event file, gzip is 65.4 MiB against LZ4's
 89.4 MiB, so gzip is worth it for anything but the fastest reads.
 
+### Inputs and event identity
+
+One output can hold the events of several inputs (see [CLI Usage](#cli-usage)),
+so every 4.1 file says, per event, where it came from:
+
+```
+inputs/edepsim        (I,) str        the EDepSim inputs, in run order
+inputs/jaxtpc_step    (I,) str        their JAXTPC step / hits / sensor files,
+inputs/jaxtpc_hits    (I,) str        one row per EDepSim input ("" when not
+inputs/jaxtpc_sensor  (I,) str        used; a merged JAXTPC file repeats)
+events/input          (n_events,) int32  row of inputs/ the event came from
+events/input_event    (n_events,) int64  its event index in that EDepSim file
+events/jaxtpc_entry   (n_events,) int64  its JAXTPC entry (entry_NNNNNN), -1 without
+```
+
+When every EDepSim input comes from a dprod production -- it carries
+`/dprod/events` -- the event's identity is copied from it unchanged:
+
+```
+events/event_id       (n_events,) int64  unique within the production campaign
+events/job_id         (n_events,) int64  the production job that generated it
+events/job_event      (n_events,) int64  its number within that job
+```
+
+`event_id` is the same in the EDepSim file, the JAXTPC sensor/step/hits entries
+(their `event_id` attribute) and here, so it pairs an event across all of them.
+`EventStoreV3.event_ids()` and `.event_sources()` return these columns.
+
 ### Issues
 
 Some checks report a problem but let the run go on. Each such check records
@@ -1842,6 +1877,22 @@ run_pysupera --multirun \
 ```
 
 The working directory is not changed by Hydra, so relative paths in `io.*` resolve against the directory where the command is invoked.
+
+**Several inputs, one output.** `io.input_path` may be a list. Each
+`reader.jaxtpc_*_path` is then either a list of the same length (one JAXTPC
+file per input) or one path all inputs share -- the files JAXTPC writes with
+`--merge-output`, which hold the events of every input; pysupera finds each
+EDepSim event's JAXTPC entry by its identity attributes:
+
+```bash
+run_pysupera reader=jaxtpc_wire io.output_path=/data/supera_wire_j000120-000124.h5 \
+    "io.input_path=['/data/edepsim_j000120-000120.h5','/data/edepsim_j000121-000121.h5']" \
+    reader.jaxtpc_seg_path=/data/step/sim_wire_step_jaxtpc_wire_j000120-000124.h5 \
+    reader.jaxtpc_inst_path=/data/hits/sim_wire_hits_jaxtpc_wire_j000120-000124.h5
+```
+
+The events are written in input order; `events/input` says which input each
+came from (see [Inputs and event identity](#inputs-and-event-identity)).
 
 ---
 

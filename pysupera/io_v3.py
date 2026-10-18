@@ -1,5 +1,5 @@
 """
-Writer and reader for the 4.0.0 on-disk format.
+Writer and reader for the 4.x on-disk format (4.1.0 written).
 
 One particle table, and each point stored exactly once.  See
 :mod:`pysupera.layout` for how a single event's ordering, row selection and
@@ -11,9 +11,16 @@ Layout
 ------
 ::
 
-    format_version   scalar str  "4.0.0"
+    format_version   scalar str  "4.1.0"
     n_events         scalar int64
     events/offsets   (n_events+1,) int64   particle rows per event
+    events/input, events/input_event, events/jaxtpc_entry, inputs/*
+                                           4.1: which input each event came
+                                           from (one output may hold several)
+    events/event_id, events/job_id, events/job_event
+                                           4.1, dprod productions: the event's
+                                           identity, copied from the input;
+                                           see pysupera.identity
     points/offsets   (n_events+1,) int64   point rows per event
     points/flat      (N, C) float32        one row per voxel (or deposit)
     points/columns   (C,) str              the column names; JAXTPC input:
@@ -88,7 +95,7 @@ from .utils import SemanticType as _ST
 
 _LE_CODE = _ST.kLEScatter.value
 
-FORMAT_VERSION_V3 = "4.0.0"
+FORMAT_VERSION_V3 = "4.1.0"
 
 #: points/flat's columns when nothing else is given: a deposit, as the plain
 #: EDepSim reader produces it.  JAXTPC input adds direction and momentum.
@@ -420,6 +427,10 @@ class EventWriterV3:
             ds[self._n_events] = total
         self._f["n_events"][()] = np.int64(self._n_events)
 
+    def write_event_sources(self, sources):
+        """Store each event's input and identity (:class:`~pysupera.identity.EventSources`)."""
+        sources.write(self._f, self._n_events)
+
     def write_issues(self, log):
         """Store the run's :class:`~pysupera.issues.IssueLog` as issues/."""
         from .issues import write_issues
@@ -576,6 +587,29 @@ class EventStoreV3:
 
     def __len__(self):
         return int(self._f["n_events"][()])
+
+    def event_ids(self):
+        """``{event_id, job_id, job_event}`` arrays (4.1, dprod inputs), or None."""
+        from .identity import ID_COLUMNS
+        ev = self._f["events"]
+        if not all(c in ev for c in ID_COLUMNS):
+            return None
+        return {c: ev[c][:] for c in ID_COLUMNS}
+
+    def event_sources(self):
+        """
+        Where each event came from (4.1): ``{'input', 'input_event',
+        'jaxtpc_entry'}`` arrays and ``'inputs'``, ``{role: [path, ...]}``;
+        None for a 4.0 file.
+        """
+        ev = self._f["events"]
+        if "input" not in ev:
+            return None
+        out = {c: ev[c][:] for c in ("input", "input_event", "jaxtpc_entry")}
+        g = self._f["inputs"]
+        out["inputs"] = {r: [x.decode() if isinstance(x, bytes) else str(x)
+                             for x in g[r][()]] for r in g}
+        return out
 
     def __getitem__(self, ev):
         n = len(self)

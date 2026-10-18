@@ -1,6 +1,6 @@
 # Input / output paths.
 # Use ??? to mark a value as required (Hydra will raise if not provided).
-input_path: ???    # e.g. /data/events.h5
+input_path: ???    # e.g. /data/events.h5, or a list [a.h5,b.h5]: one output for all
 output_path: ???   # e.g. /data/events_merged.h5
 
 # HDF5 compression filter.

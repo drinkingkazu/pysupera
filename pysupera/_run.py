@@ -193,14 +193,23 @@ def main(cfg: DictConfig) -> None:
     print(f"[run] check_ancestor_id     : {bool(cfg.get('check_ancestor_id', True))}")
     print(f"[run] instance_output : {str(cfg.get('instance_output', 'traceable')).lower()}")
     print(f"[run] repack          : {bool((cfg.get('repack', {}) or {}).get('enabled', False))}")
-    print(f"[run] input           : {cfg.io.input_path}")
+    from pysupera.config import reader_inputs
+    _inputs = reader_inputs(cfg)
+    if len(_inputs) == 1:
+        print(f"[run] input           : {_inputs[0]['edepsim']}")
+    else:
+        print(f"[run] inputs          : {len(_inputs)} EDepSim files, one output")
+        for _d in _inputs:
+            print(f"[run]   input         : {_d['edepsim']}")
     print(f"[run] output          : {cfg.io.output_path}")
-    _jaxtpc_seg  = cfg.reader.get("jaxtpc_seg_path",  None)
-    _jaxtpc_inst = cfg.reader.get("jaxtpc_inst_path", None)
+    _jaxtpc_seg  = sorted({_d['jaxtpc_step'] for _d in _inputs} - {""})
+    _jaxtpc_inst = sorted({_d['jaxtpc_hits'] for _d in _inputs} - {""})
     if _jaxtpc_seg and _jaxtpc_inst:
         print(f"[run] jaxtpc mode     : visibility-filtered")
-        print(f"[run]   seg           : {_jaxtpc_seg}")
-        print(f"[run]   inst          : {_jaxtpc_inst}")
+        for _p in _jaxtpc_seg:
+            print(f"[run]   seg           : {_p}")
+        for _p in _jaxtpc_inst:
+            print(f"[run]   inst          : {_p}")
     else:
         print(f"[run] jaxtpc mode     : disabled (all EDepSim segments used)")
     if _write_voxmap:
@@ -254,6 +263,12 @@ def main(cfg: DictConfig) -> None:
         )
 
     with build_reader(cfg) as store:
+        # Per written event: which input it came from and, with a dprod
+        # production's inputs, its event id (see pysupera.identity).
+        from pysupera.identity import EventSources
+        _sources = EventSources(_inputs)
+        if _sources.has_ids:
+            print("[run] event ids       : from the inputs' /dprod/events")
         # Which readout the inst file describes.  Nothing downstream branches
         # on it -- visibility is a property of a group, not of the geometry --
         # but a pixel run silently reported as wire is the kind of thing that
@@ -757,6 +772,9 @@ def main(cfg: DictConfig) -> None:
                                        kinematics=_tk,
                                        inst_kinematics=_inst_kin)
                 writer.append_event(_layout)
+                _sources.append(getattr(store, 'last_input', None) or 0,
+                                getattr(store, 'last_input_event', event_idx),
+                                getattr(store, 'last_jaxtpc_entry', None))
                 if _labels is not None:
                     writer.append_hit_labels(_labels)
 
@@ -789,6 +807,7 @@ def main(cfg: DictConfig) -> None:
                 )
 
             _bar.close()
+            writer.write_event_sources(_sources)
             writer.write_issues(_issues)
 
     # ── Post-run repack (opt-in) ───────────────────────────────────────────

@@ -181,7 +181,8 @@ def get_visible_segment_indices_by_track(
     inst_file : h5py.File
         Open read-only handle to the inst HDF5 file.
     event_key : str
-        HDF5 group name for this event, e.g. ``"event_000"``.
+        HDF5 group name for this event, e.g. ``"entry_000000"`` (JAXTPC
+        format 2) or ``"event_000"`` (format 1).
 
     Returns
     -------
@@ -640,6 +641,12 @@ class JaxtpcHDF5Reader(EventReaderBase):
             self._check_same_batch()
 
         self._n_events = len(self._edepsim_file[self._part_key])
+        #: EDepSim event index -> JAXTPC entry group; None: format-1 files,
+        #: whose event_NNN is the EDepSim event index itself.
+        self._entries = self._map_entries()
+        #: The JAXTPC entry (index into the entry_NNNNNN groups) of the
+        #: event just read; None for a format-1 file.
+        self.last_jaxtpc_entry = None
 
     # ------------------------------------------------------------------ #
     # EventReaderBase interface                                            #
@@ -675,7 +682,7 @@ class JaxtpcHDF5Reader(EventReaderBase):
         if index < 0:
             index += n
 
-        event_key = f'event_{index:03d}'
+        event_key = self._entry_key(index)
 
         # ── Step 1: load particle metadata from the EDepSim file ──────────
         # These provide PDG code, track IDs, interaction type, etc.
@@ -901,6 +908,93 @@ class JaxtpcHDF5Reader(EventReaderBase):
             return None
         v = cfg.attrs.get(name)
         return None if v is None else float(v)
+
+    # ------------------------------------------------------------------ #
+    # Which JAXTPC entry is which EDepSim event                            #
+    # ------------------------------------------------------------------ #
+
+    def _map_entries(self):
+        """
+        Pair every EDepSim event with its JAXTPC entry.
+
+        A format-2 JAXTPC file (``entry_NNNNNN`` groups) numbers entries by
+        their position in the file only, and may hold the events of several
+        EDepSim files (``--merge-output``).  Each entry says which event it
+        is: ``job_id`` / ``job_event`` when the inputs came from a dprod
+        production (matched against this EDepSim file's ``/dprod/events``),
+        and always ``source_index`` (into ``config/source_files``) and
+        ``source_event_idx`` (matched by file name).  Returns a list, one
+        entry name (or None if absent) per EDepSim event; None for a
+        format-1 file.
+        """
+        import os
+        from ..identity import read_dprod_events
+        f = self._inst_file
+        keys = [k for k in f.keys() if k.startswith('entry_')]
+        if not keys:
+            return None
+        cfg = f.get('config')
+        srcs = []
+        if cfg is not None and 'source_files' in cfg:
+            srcs = [os.path.basename(x.decode() if isinstance(x, bytes) else str(x))
+                    for x in cfg['source_files'][()]]
+        elif cfg is not None and 'source_file' in cfg.attrs:
+            srcs = [os.path.basename(str(cfg.attrs['source_file']))]
+        by_id, by_src = {}, {}
+        for k in keys:
+            a = f[k].attrs
+            if 'job_id' in a and 'job_event' in a:
+                by_id[(int(a['job_id']), int(a['job_event']))] = k
+            si = int(a.get('source_index', 0))
+            name = srcs[si] if si < len(srcs) else None
+            by_src[(name, int(a['source_event_idx']))] = k
+        ids = read_dprod_events(self._edepsim_file, self._n_events)
+        if ids is not None and by_id:
+            return [by_id.get((int(j), int(e)))
+                    for j, e in zip(ids['job_id'], ids['job_event'])]
+        if len(set(srcs)) != len(srcs):
+            raise ValueError(
+                f"{self._inst_path}: its inputs share a file name "
+                f"({', '.join(srcs)}), so its entries cannot be paired with "
+                f"{self._edepsim_path} by name")
+        me = os.path.basename(self._edepsim_path)
+        return [by_src.get((me, i)) for i in range(self._n_events)]
+
+    def _entry_key(self, index):
+        """The JAXTPC group of EDepSim event *index* (checked in every file)."""
+        if self._entries is None:
+            self.last_jaxtpc_entry = None
+            return f'event_{index:03d}'
+        key = self._entries[index]
+        if key is None:
+            raise KeyError(
+                f"EDepSim event {index} of {self._edepsim_path} has no entry in "
+                f"the JAXTPC file {self._inst_path}: the JAXTPC files must "
+                f"cover every event of the EDepSim inputs given with them.")
+        ref = self._inst_file[key].attrs
+        for name, fh in (('seg', self._seg_file), ('sensor', self._sensor_file)):
+            if fh is None:
+                continue
+            got = fh[key].attrs if key in fh else None
+            for a in ('source_index', 'source_event_idx', 'job_id', 'job_event'):
+                if got is None or (a in ref and (a not in got or got[a] != ref[a])):
+                    raise ValueError(
+                        f"{key} is not the same event in the JAXTPC {name} file "
+                        f"and hits file ({a}): reader.jaxtpc_*_path must name "
+                        f"one JAXTPC output set")
+        self.last_jaxtpc_entry = int(key[len('entry_'):])
+        return key
+
+    def share_pixel_geometry(self, other):
+        """
+        Take over *other*'s pixel geometry and its check state: the next
+        input of a run (see :class:`~.chain.ChainReader`) is the same detector.
+        """
+        if self._pixel_geoms is None and getattr(other, '_pixel_geoms', None) is not None:
+            self._pixel_geoms = other._pixel_geoms
+            self._pixel_report = other._pixel_report
+            self._pixel_note = other._pixel_note
+            self._pixel_unchecked = other._pixel_unchecked
 
     #: Config attributes that name a JAXTPC batch file.  The sensor and hits
     #: files of one batch agree on all that both carry.

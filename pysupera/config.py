@@ -535,12 +535,72 @@ def build_reader(cfg: DictConfig):
                 ...
     """
     fmt  = cfg.reader.get("format", "edepsim_h5")
-    path = str(cfg.io.input_path)
+    inputs = reader_inputs(cfg)
+    if not _is_list(cfg.io.input_path):
+        d = inputs[0]
+        return _build_one_reader(cfg, fmt, d["edepsim"], d["jaxtpc_step"] or None,
+                                 d["jaxtpc_hits"] or None, d["jaxtpc_sensor"] or None)
+    from pysupera.readers.chain import ChainReader
+    readers = []
+    try:
+        for d in inputs:
+            readers.append(_build_one_reader(
+                cfg, fmt, d["edepsim"], d["jaxtpc_step"] or None,
+                d["jaxtpc_hits"] or None, d["jaxtpc_sensor"] or None))
+    except BaseException:
+        for r in readers:
+            r.close()
+        raise
+    return ChainReader(readers, inputs)
 
+
+def _is_list(v):
+    from omegaconf import ListConfig
+    return isinstance(v, (list, tuple, ListConfig))
+
+
+#: reader.* keys naming a JAXTPC file, and the inputs/ role each fills.
+_JAXTPC_PATH_KEYS = (("jaxtpc_seg_path", "jaxtpc_step"),
+                     ("jaxtpc_inst_path", "jaxtpc_hits"),
+                     ("jaxtpc_sensor_path", "jaxtpc_sensor"))
+
+
+def reader_inputs(cfg: DictConfig) -> list:
+    """
+    The run's inputs: one dict per EDepSim file, ``{'edepsim', 'jaxtpc_step',
+    'jaxtpc_hits', 'jaxtpc_sensor'}`` -> path (``""`` when not used).
+
+    ``io.input_path`` is one path or a list of them.  With a list, each
+    ``reader.jaxtpc_*_path`` is either a list of the same length (one JAXTPC
+    file per input) or a single path every input shares -- the files JAXTPC
+    writes with ``--merge-output``, which hold all the inputs' events.
+    """
+    paths = cfg.io.input_path
+    many = _is_list(paths)
+    paths = [str(p) for p in paths] if many else [str(paths)]
+    if not paths:
+        raise ValueError("io.input_path is an empty list")
+    inputs = [{"edepsim": p} for p in paths]
+    for key, role in _JAXTPC_PATH_KEYS:
+        v = (None if OmegaConf.is_missing(cfg.reader, key)
+             else cfg.reader.get(key, None))
+        if _is_list(v):
+            if not many or len(v) != len(paths):
+                raise ValueError(
+                    f"reader.{key} lists {len(v)} file(s) for {len(paths)} "
+                    f"io.input_path file(s): give one per input, or one path "
+                    f"shared by all")
+            vals = [str(x) if x else "" for x in v]
+        else:
+            vals = [str(v) if v else ""] * len(paths)
+        for d, x in zip(inputs, vals):
+            d[role] = x
+    return inputs
+
+
+def _build_one_reader(cfg, fmt, path, seg_path, inst_path, sensor_path):
+    """The reader of one input (see :func:`build_reader`)."""
     if fmt == "edepsim_h5":
-        # Check whether JAXTPC visibility filtering has been requested.
-        seg_path  = cfg.reader.get("jaxtpc_seg_path",  None)
-        inst_path = cfg.reader.get("jaxtpc_inst_path", None)
 
         # A reader config that declares these as mandatory (???) means the
         # run is a JAXTPC run.  OmegaConf's .get() hands back None for an
@@ -596,9 +656,7 @@ def build_reader(cfg: DictConfig):
                                                 "hit_reference_tick", 0.0) or 0.0),
                 hit_charge_threshold      = float(cfg.reader.get(
                                                 "hit_charge_threshold", 0.0) or 0.0),
-                sensor_path               = (
-                    str(cfg.reader.get("jaxtpc_sensor_path"))
-                    if cfg.reader.get("jaxtpc_sensor_path", None) else None),
+                sensor_path               = sensor_path,
                 pixel_pitch_mm            = _opt_float(cfg.reader,
                                                 "pixel_pitch_mm"),
                 pixel_drift_direction     = cfg.reader.get(

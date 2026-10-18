@@ -119,10 +119,15 @@ def extract(src: str, dst: str, n_events: int = 3, level: int = 4,
             cfg = fout.create_group("config")
             cfg.attrs.update(fin["config"].attrs)
 
-        events = sorted(k for k in fin.keys() if k.startswith("event_"))
+        # event_NNN (JAXTPC format 1) or entry_NNNNNN (format 2); a file
+        # holds one kind, so sorting keeps the entry order.
+        events = sorted(k for k in fin.keys()
+                        if k.startswith("event_") or k.startswith("entry_"))
         if n_events > 0:
             events = events[:n_events]
         for ek in events:
+            # the entry's identity (source_event_idx, event_id, job_id, ...)
+            fout.require_group(ek).attrs.update(fin[ek].attrs)
             for vol in sorted(k for k in fin[ek].keys()
                               if k.startswith("volume_")):
                 vg = fin[f"{ek}/{vol}"]
