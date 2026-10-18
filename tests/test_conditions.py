@@ -282,6 +282,40 @@ class TestAbsorbLEScatter:
         assert _same_partition(parts, 1, 2)
 
 
+    def test_candidates_in_the_order_query_ball_tree_gave(self):
+        """
+        When a kLEScatter touches several reps and none is its home, the
+        first candidate wins, so get_rep_candidates must list them in the
+        order the query_ball_tree + set version did, not only the same set.
+        Points sit on a grid of pitch D, so many pairs are exactly D apart.
+        """
+        from types import SimpleNamespace as NS
+        from scipy.spatial import KDTree
+        rng = np.random.default_rng(5)
+        D = 3.0
+
+        def rep(i, st):
+            c = (rng.integers(0, 12, (int(rng.integers(1, 30)), 3)) * D).astype(np.float32)
+            return NS(id=i, sem_type=st, _cloud_parts=[c])
+        reps = [rep(i, SemanticType.kLEScatter if i % 3 else SemanticType.kTrack)
+                for i in range(60)]
+        prt = NS(checker=NS(D=D), diagnostics=NS(record_candidates=lambda *a: None))
+        got = AbsorbLEScatter().get_rep_candidates(prt, {r.id: r for r in reps})
+
+        le = [r for r in reps if r.sem_type == SemanticType.kLEScatter]
+        ot = [r for r in reps if r.sem_type != SemanticType.kLEScatter]
+        lt = np.concatenate([np.full(len(r._cloud_parts[0]), k) for k, r in enumerate(le)])
+        tt = np.concatenate([np.full(len(r._cloud_parts[0]), k) for k, r in enumerate(ot)])
+        hits = KDTree(np.concatenate([r._cloud_parts[0] for r in le])).query_ball_tree(
+            KDTree(np.concatenate([r._cloud_parts[0] for r in ot])), r=D)
+        touching = set()
+        for i, js in enumerate(hits):
+            for j in js:
+                touching.add((int(lt[i]), int(tt[j])))
+        ref = [(le[i].id, ot[j].id) for i, j in touching]
+        assert len(ref) > 100 and got == ref
+
+
 # ============================================================================
 # PhotonDecay: re-attaching the photon's own split-off pieces
 # ============================================================================

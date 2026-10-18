@@ -336,42 +336,57 @@ class ProximityChecker(ABC):
 # CPU Single-Threaded Implementation
 # ============================================================================
 
+class _OnDemand(dict):
+    """A dict that fills a missing key with ``make(key)`` on first access."""
+
+    def __init__(self, make):
+        super().__init__()
+        self._make = make
+
+    def __missing__(self, key):
+        v = self[key] = self._make(key)
+        return v
+
+
 class CPUSingleThreadChecker(ProximityChecker):
     """
     Single-threaded CPU proximity checker using a scipy ``KDTree`` index.
 
-    One ``KDTree`` is built per particle during :meth:`initialize`.  Each
+    A particle's ``KDTree`` (and its float32 cloud, bounding box and
+    centroid) is built the first time it is asked for.  Each
     :meth:`check_proximity` call queries the tree of cloud B against every
     point of cloud A and returns ``True`` if the nearest-neighbour distance
-    is ≤ *D*.
+    is ≤ *D*.  Partition-level proximity -- the default of
+    :meth:`~pysupera.partitioner.ParticlePartitioner.partition_combined` --
+    builds its own trees and asks for none of these, so building them all
+    up front cost a KD-tree per particle for nothing.
 
     Requires ``scipy``.
     """
     
     def __init__(self, distance_threshold: float):
         super().__init__(distance_threshold)
-        self.kdtrees = {}
-        self.clouds = {}
-        self.bboxes = {}
-        self.centroids = {}
+        self._pcs = {}
+        self.clouds = _OnDemand(
+            lambda i: self._pcs[i][:, :3].astype(np.float32))
+        self.kdtrees = _OnDemand(self._make_tree)
+        self.bboxes = _OnDemand(lambda i: self.compute_bbox(self._pcs[i]))
+        self.centroids = _OnDemand(
+            lambda i: (self.compute_centroid(self._pcs[i])
+                       if len(self._pcs[i]) else None))
+
+    def _make_tree(self, pid):
+        from scipy.spatial import KDTree
+        return KDTree(self.clouds[pid])
     
     def initialize(self, particles):
-        """Build KD-trees and precompute bounding boxes"""
-        from scipy.spatial import KDTree
-        
+        """Note each particle's cloud; trees and boxes are made on demand."""
         if self._verbose:
             print("Initializing CPU single-threaded backend...")
         for p in particles:
-            cloud_xyz = p.point_cloud[:, :3].astype(np.float32)
-            self.clouds[p.id] = cloud_xyz
-            if len(cloud_xyz) == 0:
+            self._pcs[p.id] = p.point_cloud
+            if len(p.point_cloud) == 0:
                 self.empty_ids.add(p.id)
-                self.bboxes[p.id]    = {'min': None, 'max': None}
-                self.centroids[p.id] = None
-                continue
-            self.kdtrees[p.id]   = KDTree(cloud_xyz)
-            self.bboxes[p.id]    = self.compute_bbox(p.point_cloud)
-            self.centroids[p.id] = self.compute_centroid(p.point_cloud)
 
         if self._verbose:
             print(f"  Initialized {len(particles)} particles")
@@ -427,6 +442,7 @@ class CPUSingleThreadChecker(ProximityChecker):
 
     def cleanup(self):
         """Clear data structures"""
+        self._pcs.clear()
         self.kdtrees.clear()
         self.clouds.clear()
         self.bboxes.clear()

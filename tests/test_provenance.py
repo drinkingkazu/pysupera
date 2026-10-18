@@ -177,6 +177,28 @@ class TestAttachTruthClouds:
         np.testing.assert_allclose(tc[0, 6:], [0.5, -1.0, 80.0])
         assert tc[0, 4] == 3                             # dE summed
 
+    @pytest.mark.parametrize("origin", [None, [-7.0, 3.0, -1.5]])
+    def test_one_pass_matches_each_particle_alone(self, origin):
+        """
+        voxelize_truth_many gives, particle by particle, exactly what
+        voxelize_truth does: same cells in the same order, same earliest
+        step, sums added in the same order -- bit for bit.
+        """
+        from pysupera.provenance import voxelize_truth, voxelize_truth_many
+        rng = np.random.default_rng(3)
+        sizes = [1, 40, 7, 300, 2]
+        pc = np.concatenate([np.column_stack([
+            rng.normal(c, 6, (n, 3)), rng.integers(0, 4, n),   # ties in t
+            rng.exponential(1, n), rng.exponential(.03, n),
+            rng.uniform(-3, 3, (n, 3))])
+            for c, n in zip([0, 20, -50, 5, 400], sizes)]).astype(np.float32)
+        starts = np.r_[0, np.cumsum(sizes)]
+        out, ostarts = voxelize_truth_many(pc, starts, 3.0, origin)
+        for k in range(len(sizes)):
+            one = voxelize_truth(pc[starts[k]:starts[k + 1]], 3.0, origin)
+            np.testing.assert_array_equal(out[ostarts[k]:ostarts[k + 1]], one)
+        assert ostarts[-1] == len(out)
+
     def test_particles_owning_nothing_get_an_empty_cloud(self):
         from pysupera.provenance import attach_truth_clouds
         ps = [FakeParticle(7, []), FakeParticle(8, [])]

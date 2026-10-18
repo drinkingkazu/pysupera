@@ -1911,7 +1911,7 @@ Select the backend via the `backend` parameter of `ParticlePartitioner` or `chec
 | `cell-hash-cpu-multi` | `cell_hash_cpu_multi` | `scipy`, `joblib` | Cell-hash + joblib |
 | `cell-hash-gpu` | `cell_hash_gpu` | `cupy` | Cell-hash on CPU, distance kernels on GPU |
 
-For the partition-level proximity mode (the hot path), all CPU backends override `batch_check_cloud_proximity` to build the parent KDTree **once** per candidate group rather than once per pair.
+For the partition-level proximity mode (the hot path), all CPU backends override `batch_check_cloud_proximity` to build the parent KDTree **once** per candidate group rather than once per pair.  That mode never uses per-particle trees, so `cpu_single` builds a particle's KDTree, bounding box and centroid only when the particle-level path first asks for it.
 
 On LArTPC events the default is also the fastest CPU choice. `partition_combined`
 over the same 3 pixel events (16 cores):
@@ -1966,6 +1966,34 @@ and partitioning. The first two are described under
 Repeated runs of identical code on this machine varied by up to 35%, so
 compare stage times across alternating runs rather than single wall times.
 
+Three more changes (October 2026) take another 16–26% off, with output
+bit-for-bit identical. Every dataset and attribute matched over all 100 events
+of `sdf_data_03` (pixel, EDepSim only) and `sdf_data_03_wire`:
+
+- the true deposits behind the hits are voxelized in one pass for all
+  particles instead of once per particle (see [Voxelization](#voxelization-1));
+- `cpu_single` builds per-particle KD-trees only on demand, since
+  partition-level proximity never uses them (see [Compute Backends](#compute-backends));
+- `AbsorbLEScatter` finds touching pairs with one `sparse_distance_matrix`
+  and NumPy instead of `query_ball_tree` and a Python loop, keeping the
+  candidate order (see [`AbsorbLEScatter`](#absorblescatter)).
+
+Timings are for 20 events, mean of 2 alternating serial runs. The two runs
+agreed within 2%.
+
+| | before | after | |
+|---|---|---|---|
+| pixel wall | 131.7 s | 109.7 s | −17% |
+| pixel `write_event` (truth voxels) / `partition_combined` / `partitioner_init` | 23.9 / 44.9 / 5.1 s | 13.6 / 38.0 / 0.5 s | |
+| wire wall | 80.5 s | 59.4 s | −26% |
+| wire `write_event` / `partitioner_init` | 29.9 / 5.0 s | 14.0 / 0.5 s | |
+| EDepSim wall | 69.8 s | 58.4 s | −16% |
+| EDepSim `partition_combined` / `partitioner_init` | 30.3 / 9.2 s | 28.2 / 0.7 s | |
+
+In wire, `partition_combined` rose from 17.4 s to 18.4 s, consistently but
+unexplained. On the same calls the new `AbsorbLEScatter` search is faster in
+every mode: 1.64 s against 1.86 s for wire over 10 events.
+
 ---
 
 ## Algorithms
@@ -1988,6 +2016,9 @@ result.
 For JAXTPC input the stored truth voxels are made separately
 (`provenance.voxelize_truth`), because they carry columns the generic merge
 rules do not know: theta, phi and p come from the earliest step in the cell.
+They are made for all particles in one pass (`provenance.voxelize_truth_many`),
+which uses the same packed-key sort on (particle, cell); per particle it gives,
+bit for bit, what `voxelize_truth` gives for that particle alone.
 
 ### Defragmentation
 
@@ -2121,6 +2152,13 @@ Only the touching subset proceeds to `post_filter`, and only the final `merge_pa
 **Candidate filter:** All pairs between `kLEScatter` representatives and non-`kLEScatter` representatives.
 
 **Post-filter:** One merge per `kLEScatter` — if multiple non-LE neighbours touch the same LE partition, the one holding its nearest ancestor outside it is kept when it is among them (a delta ray goes to its track, not to a shower crossing it), otherwise the first passing pair.
+
+"First" is the order the candidates are listed in, so it decides real merges.
+The touching pairs come from one KD-tree search over all points
+(`sparse_distance_matrix`) and are deduplicated to representative pairs in the
+order the earlier `query_ball_tree` version produced them: by `kLEScatter`
+point, then by the other point.  The candidate list is therefore the same,
+element for element.
 
 **Merge direction:** `kLEScatter` representative → non-`kLEScatter` representative.
 

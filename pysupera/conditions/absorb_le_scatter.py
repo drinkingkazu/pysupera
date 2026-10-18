@@ -161,17 +161,27 @@ class AbsorbLEScatter(PartitionConditionBase):
             )
             return []
 
-        from scipy.spatial import KDTree
-        # query_ball_tree returns for each LE point the list of other-point
-        # indices within D.  Map to rep indices and deduplicate.
-        hits = KDTree(le_pts).query_ball_tree(KDTree(ot_pts), r=D)
+        from scipy.spatial import cKDTree
+        # Every (LE point, other point) pair within D, as two index arrays.
+        m = cKDTree(le_pts).sparse_distance_matrix(
+            cKDTree(ot_pts), D, output_type="ndarray")
+        pi = m["i"].astype(np.int64)
+        pj = m["j"].astype(np.int64)
 
+        # Map to rep pairs and deduplicate.  The order matters: when a
+        # kLEScatter touches several reps and none is its home,
+        # _select_one_merge_per_sem5 takes the first pair, i.e. the first in
+        # this set's iteration order, which depends on the order the pairs
+        # went in.  So they go in as query_ball_tree's sorted lists put them:
+        # by LE point, then other point, each rep pair at its first
+        # occurrence.
+        n_ot = len(other_reps)
+        rk = le_tags[pi].astype(np.int64) * n_ot + ot_tags[pj]
+        rk = rk[np.argsort(pi * len(ot_pts) + pj)]
+        _, first = np.unique(rk, return_index=True)
         touching: set = set()
-        for i, js in enumerate(hits):
-            if js:
-                lk = int(le_tags[i])
-                for j in js:
-                    touching.add((lk, int(ot_tags[j])))
+        for k in rk[np.sort(first)].tolist():
+            touching.add((k // n_ot, k % n_ot))
 
         candidates = [
             (le_reps[i].id, other_reps[j].id)

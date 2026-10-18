@@ -305,6 +305,53 @@ def voxelize_truth(pc, voxel_size, origin):
     return out
 
 
+def voxelize_truth_many(pc, starts, voxel_size, origin):
+    """
+    :func:`voxelize_truth` of many particles in one pass.
+
+    *pc* holds the particles' segments back to back, particle *k* in rows
+    ``starts[k]:starts[k+1]`` (*starts* has one entry more than there are
+    particles).  Returns ``(out, out_starts)``: particle *k*'s cells are
+    ``out[out_starts[k]:out_starts[k+1]]``, row for row what
+    :func:`voxelize_truth` gives for that particle alone.
+
+    One sort over the key (particle, cell) replaces a ``np.unique(axis=0)``
+    per particle; within a particle it orders cells, and the steps inside
+    each cell, exactly as the per-particle call does, and the sums add the
+    same values in the same order.
+    """
+    from .preproc import _unique_rows
+    starts = np.asarray(starts, dtype=np.int64)
+    n = len(starts) - 1
+    if not len(pc):
+        return pc, np.zeros(n + 1, dtype=np.int64)
+    vs = np.broadcast_to(np.asarray(voxel_size, dtype=np.float64), (3,))
+    sizes = np.diff(starts)
+    rank = np.repeat(np.arange(n, dtype=np.int64), sizes)
+    if origin is None:
+        # each particle's own corner, as voxelize_truth takes it
+        nz = np.flatnonzero(sizes)
+        org = np.zeros((n, 3), dtype=np.float64)
+        org[nz] = np.minimum.reduceat(pc[:, :3], starts[nz], axis=0)
+        org_row = org[rank]
+    else:
+        org = org_row = np.asarray(origin, dtype=np.float64)
+    cell = np.floor((pc[:, :3] - org_row) / vs).astype(np.int64)
+    uniq, inv = _unique_rows(np.column_stack([rank, cell]))
+    order = np.lexsort((pc[:, 3], inv))
+    first = order[np.r_[True, inv[order][1:] != inv[order][:-1]]]
+    out = np.zeros((len(uniq), pc.shape[1]), dtype=pc.dtype)
+    u_org = org[uniq[:, 0]] if origin is None else org
+    out[:, :3] = (uniq[:, 1:] + 0.5) * vs + u_org
+    out[:, 3] = pc[first, 3]
+    out[:, 4] = np.bincount(inv, weights=pc[:, 4], minlength=len(uniq))
+    out[:, 5] = np.bincount(inv, weights=pc[:, 5], minlength=len(uniq))
+    if pc.shape[1] > 6:
+        out[:, 6:] = pc[first, 6:]
+    out_starts = np.searchsorted(uniq[:, 0], np.arange(n + 1), side="left")
+    return out, out_starts
+
+
 def attach_truth_clouds(particles, owner, flat, group, voxel_size=None,
                         origin=None):
     """
@@ -354,12 +401,22 @@ def attach_truth_clouds(particles, owner, flat, group, voxel_size=None,
         np.asarray(voxel_size, dtype=np.float64), (3,))
     org = None if origin is None else np.asarray(origin, dtype=np.float64)
 
+    if vs is not None:
+        # All owners' segments in one pass (voxelize_truth_many); span now
+        # indexes the voxelized rows.
+        segs = np.asarray(flat[sel], dtype=np.float32)
+        vox, vstarts = voxelize_truth_many(segs, np.r_[starts, len(sel)], vs, org)
+        vox = vox.astype(np.float32, copy=False)
+        span = {int(i): (int(vstarts[k]), int(vstarts[k + 1]))
+                for k, i in enumerate(ids)}
+
     n_rows = 0
     for p in particles:
         a, b = span.get(int(p.id), (0, 0))
-        pc = np.asarray(flat[sel[a:b]], dtype=np.float32)
-        if vs is not None and len(pc):
-            pc = voxelize_truth(pc, vs, org).astype(np.float32, copy=False)
+        if vs is not None:
+            pc = vox[a:b] if b > a else np.zeros((0, flat.shape[1]), np.float32)
+        else:
+            pc = np.asarray(flat[sel[a:b]], dtype=np.float32)
         p.truth_cloud = pc
         n_rows += len(pc)
     return {"n_segments": int(len(group)), "n_owned": int(len(sel)),
