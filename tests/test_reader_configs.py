@@ -100,7 +100,7 @@ def test_pixel_defaults_are_the_documented_ones():
     assert r.point_source == "hits"          # what the sensors recorded
     assert r.hit_x_from == "nominal"         # the detector's own inference
     assert r.hit_energy == "charge"
-    assert r.hit_reference_tick == 0
+    assert r.hit_reference_tick is None      # the hits file's pre-window, else 0
     assert r.pixel_geometry_from_fit is False
 
 

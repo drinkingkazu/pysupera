@@ -742,6 +742,16 @@ Geant4 parent.  3.0.0 replaced the three parallel
 particle tables of 2.x with **one** table and
 stores each point **once**. On a two-event file that is 6.4 MiB → 1.7 MiB.
 
+### Label layout — `io.layout=label`
+
+One `entry_NNNNNN` per event with `particles/` and `interactions/` (the columns
+below, without `pc_*`) and, per `volume_N`, `fragment_id` and `is_le`, where row
+g-1 is group g. Vectors are float32. There are no points or hit labels.
+
+Format 3 inputs (step, mctruth, hits and presupera files): `io.input_path` is the
+mctruth file, `reader.jaxtpc_seg_path` the step file, `reader.jaxtpc_inst_path` the
+hits file and `reader.jaxtpc_presupera_path` the presupera file.
+
 ### Layout
 
 ```
@@ -1436,7 +1446,7 @@ effect this mode exists to measure is calibrated away instead of measured.
 | anode face | `config/volume_ranges` in the hits file — read for you |
 | drift velocity, sampling period | the JAXTPC **sensor** file, via `reader.jaxtpc_sensor_path` |
 | pixel pitch, drift direction | `reader.pixel_pitch_mm`, `reader.pixel_drift_direction` — no output file records these |
-| reference tick | `reader.hit_reference_tick`, default 0 |
+| reference tick | `reader.hit_reference_tick`; not set: the hits file's pre-window (format 3), else 0 |
 
 The reader applies them as given, converts each group's hit centre, and
 measures the distance to the deposits behind it. A disagreement raises,

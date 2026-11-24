@@ -32,3 +32,7 @@ jaxtpc_seg_path: ???
 # deposit_to_group, group_to_track, and the per-plane group_ids that record
 # which groups were above the readout threshold).
 jaxtpc_inst_path: ???
+
+# Format 3 only (then io.input_path is the mctruth file and jaxtpc_seg_path the
+# step file): the presupera file of the same JAXTPC run.
+jaxtpc_presupera_path: ~

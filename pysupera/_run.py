@@ -300,6 +300,12 @@ def main(cfg: DictConfig) -> None:
         _le_type = _ST.kLEScatter
         _is_le = lambda p: p.sem_type == _le_type
 
+        _layout_kind = str(cfg.io.get('layout', 'points'))
+        if _layout_kind not in ('points', 'label'):
+            raise ValueError(f"io.layout must be 'points' or 'label', got {_layout_kind!r}")
+        if _layout_kind == 'label':
+            from pysupera.io_v3 import LabelWriter
+            open_writer_v3 = LabelWriter
         with open_writer_v3(cfg.io.output_path,
                             compression=cfg.io.compression,
                             compression_opts=cfg.io.compression_opts,

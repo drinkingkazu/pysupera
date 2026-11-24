@@ -3,6 +3,10 @@
 input_path: ???    # e.g. /data/events.h5, or a list [a.h5,b.h5]: one output for all
 output_path: ???   # e.g. /data/events_merged.h5
 
+# What the output holds: points (points/flat, hit_labels and the tables) or label
+# (one group per event: particles, interactions, labels per group; no points).
+layout: points
+
 # HDF5 compression filter.
 #   lzf        — built into h5py; always available; fast decompression, good ratio. (default)
 #   lz4        — faster than lzf; requires `pip install hdf5plugin`.

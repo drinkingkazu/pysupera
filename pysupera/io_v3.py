@@ -468,6 +468,76 @@ class EventWriterV3:
         self.close()
 
 
+class LabelWriter(EventWriterV3):
+    """Labels only, one group per event (``io.layout=label``)::
+
+        entry_NNNNNN/particles/<column>      as in the other layout, without pc_*
+        entry_NNNNNN/interactions/<column>   likewise; part_* index particles
+        entry_NNNNNN/volume_V/fragment_id    row g-1 is group g of volume V (-1 none)
+        entry_NNNNNN/volume_V/is_le          likewise
+        events/, inputs/, issues/            as in the other layout
+
+    No points and no per-hit labels: a hit's fragment is that of its group.
+    """
+
+    def __init__(self, path, **_):
+        import h5py
+        import hdf5plugin
+        self._path = path
+        self._zkw = dict(hdf5plugin.Blosc(cname="zstd", clevel=4,
+                                          shuffle=hdf5plugin.Blosc.SHUFFLE))
+        self._f = h5py.File(path, "w")
+        self._f.create_dataset("format_version", data=FORMAT_VERSION_V3)
+        self._f.create_dataset("n_events", data=np.int64(0))
+        self._f.attrs["layout"] = "label"
+        self._f.create_group("events")
+        self._n_events = 0
+        self._entry = None
+
+    def _put(self, g, name, x):
+        x = np.asarray(x)
+        # one chunk: an event is read whole
+        g.create_dataset(name, data=x, **(dict(chunks=x.shape, **self._zkw)
+                                          if x.size else {}))
+
+    def append_event(self, layout):
+        self._entry = e = self._f.create_group(f"entry_{self._n_events:06d}")
+        g = e.create_group("particles")
+        for c in COLUMNS:
+            if "pc_" not in c:
+                # kinematics come from float32 tables and steps
+                dt = np.float32 if _DTYPE[c] is np.float64 else _DTYPE[c]
+                self._put(g, c, np.asarray(layout.columns[c], dtype=dt))
+        g = e.create_group("interactions")
+        inter = layout.interactions or {}
+        for c in INTER_COLUMNS:
+            if c in _INTER_POINT_COLS:
+                continue
+            x = inter.get(c, ())
+            if c in _INTER_STR:
+                self._put(g, c, np.array([v if isinstance(v, bytes) else str(v).encode()
+                                          for v in x], dtype="S"))
+            else:
+                self._put(g, c, np.asarray(x, dtype=_INTER_DTYPE[c]))
+        self._n_events += 1
+        self._f["n_events"][()] = np.int64(self._n_events)
+
+    def append_hit_labels(self, labels):
+        pass
+
+    def append_group_owners(self, frag_owner, is_le=None, volume_offsets=()):
+        frag_owner = np.asarray(frag_owner, dtype=np.int32)
+        le = (np.zeros(len(frag_owner), bool) if is_le is None
+              else np.asarray(is_le).astype(bool))
+        edges = [int(o) for o in volume_offsets] + [len(frag_owner)]
+        for v in range(len(edges) - 1):
+            # a volume's first slot is the unused group 0
+            a, b = edges[v] + 1, edges[v + 1]
+            g = self._entry.create_group(f"volume_{v}")
+            self._put(g, "fragment_id", frag_owner[a:b])
+            self._put(g, "is_le", le[a:b])
+
+
 class EventView:
     """One event's rows and points, as plain arrays."""
 

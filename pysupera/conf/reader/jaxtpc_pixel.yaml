@@ -24,6 +24,10 @@ jaxtpc_seg_path: ???
 # Path to the JAXTPC inst/hits HDF5 file.
 jaxtpc_inst_path: ???
 
+# Format 3 only (then io.input_path is the mctruth file and jaxtpc_seg_path the
+# step file): the presupera file of the same JAXTPC run.
+jaxtpc_presupera_path: ~
+
 # ---------------------------------------------------------------------------
 # What a point is  (JAXTPC pixel readout only)
 # ---------------------------------------------------------------------------
@@ -145,7 +149,9 @@ pixel_geometry_from_fit: false
 # onto [anode, cathode] and a nominal x cannot fall outside the volume; the t0
 # displacement instead pushes charge off the end of the window, where it is
 # never recorded.  Both are counted in the run report, and neither is clipped.
-hit_reference_tick: 0
+#
+# Not set: the pre-window recorded in the hits file (format 3), else 0.
+hit_reference_tick: ~
 
 # What lands in the energy column, when point_source=hits.
 #

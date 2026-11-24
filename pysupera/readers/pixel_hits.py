@@ -217,7 +217,7 @@ def decode_plane_hits(plane) -> dict:
             f"uint16.")
 
     key = next((k for k in _CHARGE_SCALE if k in plane), None)
-    if key is None:
+    if key is None and 'charge' not in plane:
         raise KeyError(
             f"pixel plane {plane.name!r} has no per-entry charge dataset "
             f"(expected one of {sorted(_CHARGE_SCALE)}); it cannot be "
@@ -228,12 +228,15 @@ def decode_plane_hits(plane) -> dict:
     centre_py = np.repeat(plane['center_py'][:].astype(np.int32), sizes)
     centre_pz = np.repeat(plane['center_pz'][:].astype(np.int32), sizes)
     centre_t = np.repeat(plane['center_times'][:].astype(np.int32), sizes)
-    peak = np.repeat(plane['peak_charges'][:].astype(np.float32), sizes)
 
     py = centre_py + plane['delta_py'][:n].astype(np.int32)
     pz = centre_pz + plane['delta_pz'][:n].astype(np.int32)
     tick = centre_t + plane['delta_times'][:n].astype(np.int32)
-    charge = peak * (plane[key][:n].astype(np.float32) / _CHARGE_SCALE[key])
+    if 'charge' in plane:            # format 3: absolute, in the plane's units
+        charge = plane['charge'][:n].astype(np.float32)
+    else:
+        peak = np.repeat(plane['peak_charges'][:].astype(np.float32), sizes)
+        charge = peak * (plane[key][:n].astype(np.float32) / _CHARGE_SCALE[key])
 
     return {'py': py, 'pz': pz, 'tick': tick, 'charge': charge,
             'group': np.repeat(groups, sizes)}

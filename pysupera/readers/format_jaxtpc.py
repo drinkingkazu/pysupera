@@ -524,7 +524,7 @@ class JaxtpcHDF5Reader(EventReaderBase):
         point_source: str | None = None,
         hit_x_from: str = 'nominal',
         hit_energy: str = 'charge',
-        hit_reference_tick: float = 0.0,
+        hit_reference_tick: float | None = None,
         hit_charge_threshold: float = 0.0,
         sensor_path: str | None = None,
         pixel_pitch_mm: float | None = None,
@@ -535,6 +535,7 @@ class JaxtpcHDF5Reader(EventReaderBase):
         pixel_geometry: list | None = None,
         step_key: str = 'pstep/lar_vol',
         truth_segments: bool = False,
+        presupera_path: str | None = None,
     ) -> None:
         import h5py
 
@@ -638,9 +639,24 @@ class JaxtpcHDF5Reader(EventReaderBase):
         self.last_mask_stats: dict | None = None
 
         # Open all three files for the lifetime of the reader.
-        self._edepsim_file = h5py.File(edepsim_path, 'r')
-        self._seg_file     = h5py.File(seg_path, 'r')
-        self._inst_file    = h5py.File(inst_path, 'r')
+        with h5py.File(inst_path, 'r') as _f:
+            from .format3 import is_format3
+            self._format3 = is_format3(_f)
+            if hit_reference_tick is None and self._format3:
+                # the window opens pre_window_us before Geant4 t = 0
+                _a = _f['config'].attrs
+                self._hit_reference_tick = float(_a['pre_window_us']) / float(_a['time_step_us'])
+        if self._format3:
+            from .format3 import TruthFile, HitsFile
+            # edepsim_path names the mctruth file, seg_path the step file
+            self._edepsim_file = TruthFile(edepsim_path, seg_path)
+            self._seg_file     = None
+            self._inst_file    = HitsFile(inst_path, presupera_path,
+                                          self._edepsim_file)
+        else:
+            self._edepsim_file = h5py.File(edepsim_path, 'r')
+            self._seg_file     = h5py.File(seg_path, 'r')
+            self._inst_file    = h5py.File(inst_path, 'r')
         self._sensor_file  = (h5py.File(sensor_path, 'r')
                               if sensor_path else None)
         if point_source == 'hits':
@@ -650,6 +666,9 @@ class JaxtpcHDF5Reader(EventReaderBase):
         #: EDepSim event index -> JAXTPC entry group; None: format-1 files,
         #: whose event_NNN is the EDepSim event index itself.
         self._entries = self._map_entries()
+        if self._format3:
+            self._inst_file.event_of = {
+                k: i for i, k in enumerate(self._entries) if k is not None}
         #: The JAXTPC entry (index into the entry_NNNNNN groups) of the
         #: event just read; None for a format-1 file.
         self.last_jaxtpc_entry = None
@@ -964,7 +983,8 @@ class JaxtpcHDF5Reader(EventReaderBase):
                 f"{self._inst_path}: its inputs share a file name "
                 f"({', '.join(srcs)}), so its entries cannot be paired with "
                 f"{self._edepsim_path} by name")
-        me = os.path.basename(self._edepsim_path)
+        me = os.path.basename(self._seg_path if getattr(self, '_format3', False)
+                              else self._edepsim_path)
         return [by_src.get((me, i)) for i in range(self._n_events)]
 
     def _entry_key(self, index):
@@ -1572,6 +1592,19 @@ class JaxtpcHDF5Reader(EventReaderBase):
         ``charge`` (N,), and ``n_actual`` (int).  Volumes with no segments
         return ``{'n_actual': 0}``.
         """
+        if self._format3:
+            steps, _ = self._edepsim_file.step_columns(self._inst_file.event_of[event_key])
+            out = []
+            for rows, _g in self._inst_file.volumes(event_key):
+                st = steps[rows]
+                out.append({
+                    'positions_mm': np.stack([st['x'], st['y'], st['z']], 1),
+                    'de': st['de'].astype(np.float32),
+                    'dx': st['dx'].astype(np.float32),
+                    't0_us': st['t'] / np.float32(1000.0),
+                    'n_actual': len(rows)} if len(rows) else {'n_actual': 0})
+            return out
+
         if event_key not in self._seg_file:
             raise KeyError(
                 f"Event group {event_key!r} not found in the JAXTPC seg file "

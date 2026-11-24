@@ -7,6 +7,7 @@ Every 4.1 output records, per event, the input it was made from::
     inputs/jaxtpc_step   (I,) str   their JAXTPC step / hits / sensor files
     inputs/jaxtpc_hits   (I,) str   ("" when not used); one row per EDepSim
     inputs/jaxtpc_sensor (I,) str   input, so a merged JAXTPC file repeats
+    inputs/jaxtpc_presupera (I,) str  (format 3)
     events/input         (n_events,) int32  row of inputs/ the event came from
     events/input_event   (n_events,) int64  its event index in that EDepSim file
     events/jaxtpc_entry  (n_events,) int64  its entry in the JAXTPC files
@@ -31,7 +32,8 @@ import numpy as np
 
 #: The per-event identity columns of /dprod/events (and of events/ here).
 ID_COLUMNS = ("event_id", "job_id", "job_event")
-INPUT_ROLES = ("edepsim", "jaxtpc_step", "jaxtpc_hits", "jaxtpc_sensor")
+INPUT_ROLES = ("edepsim", "jaxtpc_step", "jaxtpc_hits", "jaxtpc_sensor",
+               "jaxtpc_presupera")
 
 
 def read_dprod_events(f, n_events=None):

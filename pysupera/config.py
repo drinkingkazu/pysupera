@@ -540,14 +540,16 @@ def build_reader(cfg: DictConfig):
     if not _is_list(cfg.io.input_path):
         d = inputs[0]
         return _build_one_reader(cfg, fmt, d["edepsim"], d["jaxtpc_step"] or None,
-                                 d["jaxtpc_hits"] or None, d["jaxtpc_sensor"] or None)
+                                 d["jaxtpc_hits"] or None, d["jaxtpc_sensor"] or None,
+                                 d.get("jaxtpc_presupera") or None)
     from pysupera.readers.chain import ChainReader
     readers = []
     try:
         for d in inputs:
             readers.append(_build_one_reader(
                 cfg, fmt, d["edepsim"], d["jaxtpc_step"] or None,
-                d["jaxtpc_hits"] or None, d["jaxtpc_sensor"] or None))
+                d["jaxtpc_hits"] or None, d["jaxtpc_sensor"] or None,
+                d.get("jaxtpc_presupera") or None))
     except BaseException:
         for r in readers:
             r.close()
@@ -563,7 +565,8 @@ def _is_list(v):
 #: reader.* keys naming a JAXTPC file, and the inputs/ role each fills.
 _JAXTPC_PATH_KEYS = (("jaxtpc_seg_path", "jaxtpc_step"),
                      ("jaxtpc_inst_path", "jaxtpc_hits"),
-                     ("jaxtpc_sensor_path", "jaxtpc_sensor"))
+                     ("jaxtpc_sensor_path", "jaxtpc_sensor"),
+                     ("jaxtpc_presupera_path", "jaxtpc_presupera"))
 
 
 def reader_inputs(cfg: DictConfig) -> list:
@@ -595,11 +598,13 @@ def reader_inputs(cfg: DictConfig) -> list:
         else:
             vals = [str(v) if v else ""] * len(paths)
         for d, x in zip(inputs, vals):
-            d[role] = x
+            if x or role != "jaxtpc_presupera":    # only format 3 has one
+                d[role] = x
     return inputs
 
 
-def _build_one_reader(cfg, fmt, path, seg_path, inst_path, sensor_path):
+def _build_one_reader(cfg, fmt, path, seg_path, inst_path, sensor_path,
+                      presupera_path=None):
     """The reader of one input (see :func:`build_reader`)."""
     if fmt == "edepsim_h5":
 
@@ -635,6 +640,7 @@ def _build_one_reader(cfg, fmt, path, seg_path, inst_path, sensor_path):
                 edepsim_path              = path,
                 seg_path                  = str(seg_path),
                 inst_path                 = str(inst_path),
+                presupera_path            = presupera_path,
                 vertex_key                = str(cfg.reader.get("vertex_key",
                                                 "vertex/geant4")),
                 particle_key              = str(cfg.reader.get("particle_key",
@@ -655,8 +661,8 @@ def _build_one_reader(cfg, fmt, path, seg_path, inst_path, sensor_path):
                                                 "nominal")),
                 hit_energy                = str(cfg.reader.get("hit_energy",
                                                 "charge")),
-                hit_reference_tick        = float(cfg.reader.get(
-                                                "hit_reference_tick", 0.0) or 0.0),
+                hit_reference_tick        = cfg.reader.get(
+                                                "hit_reference_tick"),
                 hit_charge_threshold      = float(cfg.reader.get(
                                                 "hit_charge_threshold", 0.0) or 0.0),
                 sensor_path               = sensor_path,
